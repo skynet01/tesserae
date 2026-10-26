@@ -63,6 +63,12 @@ dependencies = [
     # Used by the recipes widget to render a scannable link back to
     # the source recipe page in the card's bottom-right corner.
     "segno>=1.6,<2",
+    # PDF page rasteriser (Chromium's PDFium, wheel-bundled for linux
+    # x86_64/arm64/armv7, macOS and Windows, so pure pip like
+    # pillow-heif). The news_front_pages widget rasterises a paper's PDF
+    # front page at panel width in a child process; without it the widget
+    # falls back to Freedom Forum's 700 px JPEG.
+    "pypdfium2>=5,<6",
 ]
 
 [project.scripts]
