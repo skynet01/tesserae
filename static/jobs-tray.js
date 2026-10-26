@@ -130,7 +130,9 @@
     // The title is a link when the job names a page to go and look at.
     if (job.href) {
       if (!entry.link) { entry.link = el("a"); entry.title.replaceChildren(entry.link); }
-      entry.link.href = job.href;
+      // A root-relative page needs the ingress prefix under Home Assistant.
+      var rooted = job.href.charAt(0) === "/" && job.href.charAt(1) !== "/";
+      entry.link.href = rooted ? (window.TESSERAE_URL_PREFIX || "") + job.href : job.href;
       entry.link.textContent = job.title;
     } else {
       entry.title.textContent = job.title;

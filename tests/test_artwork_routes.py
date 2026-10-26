@@ -125,3 +125,15 @@ def test_the_page_lists_pictures_by_dashboard_and_acts_on_them(app: Flask, monke
     assert "Removed 1 picture" in r.get_data(as_text=True) or "Removed 2 picture" in r.get_data(
         as_text=True
     )
+
+
+def test_href_carries_the_ingress_prefix(app: Flask) -> None:
+    """Widgets redirect their Plugins menu entry to ``href``; under Home
+    Assistant's ingress it must keep the prefix or the browser lands on the HA
+    host root and gets a 404. The tray keeps the bare path."""
+    c = artwork.Collection("some_widget", "prefixed", make=lambda job: (b"", {}), label="Art")
+    assert c.href == "/plugins/some_widget/artwork/prefixed/"
+    with app.test_request_context("/", base_url="http://ha.local/api/hassio_ingress/abc123"):
+        assert c.href == "/api/hassio_ingress/abc123/plugins/some_widget/artwork/prefixed/"
+    assert c.page_path == "/plugins/some_widget/artwork/prefixed/"
+    assert c._tray.href == c.page_path

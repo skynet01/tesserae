@@ -624,7 +624,7 @@ button.ghost.danger:hover { color: var(--t-danger); text-decoration: underline; 
   font-size: var(--t-size-sm);
   color: var(--t-muted);
 }
-.condition-picker .cp-status[data-tone="ok"]   { color: var(--t-success, #2E7D32); }
+.condition-picker .cp-status[data-tone="ok"]   { color: var(--t-ok, #2E7D32); }
 .condition-picker .cp-status[data-tone="warn"] { color: var(--t-warn,    #B36A0A); }
 .condition-picker .cp-status[data-tone="fail"] { color: var(--t-danger,  #B0322A); }
 .condition-picker .cp-row-test {
@@ -632,7 +632,7 @@ button.ghost.danger:hover { color: var(--t-danger); text-decoration: underline; 
   font-size: var(--t-size-md);
   font-weight: 700;
 }
-.condition-picker .cp-row-test[data-tone="ok"]   { color: var(--t-success, #2E7D32); }
+.condition-picker .cp-row-test[data-tone="ok"]   { color: var(--t-ok, #2E7D32); }
 .condition-picker .cp-row-test[data-tone="fail"] { color: var(--t-danger,  #B0322A); }
 .condition-picker .cp-error {
   color: var(--t-danger, #B0322A);
@@ -745,7 +745,7 @@ button.ghost.danger:hover { color: var(--t-danger); text-decoration: underline; 
   align-items: center;
   gap: 0.3em;
   padding: 2px 8px;
-  background: var(--t-surface-sunken, color-mix(in srgb, var(--t-text) 6%, transparent));
+  background: var(--t-surface-sunk, color-mix(in srgb, var(--t-fg) 6%, transparent));
   border-radius: 5px;
   color: var(--t-muted);
 }
@@ -775,7 +775,7 @@ button.ghost.danger:hover { color: var(--t-danger); text-decoration: underline; 
 }
 .rotation-countdown-track {
   height: 8px;
-  background: var(--t-bg-soft, rgba(0, 0, 0, 0.06));
+  background: var(--t-surface-soft, rgba(0, 0, 0, 0.06));
   border-radius: var(--t-radius-pill, 999px);
   overflow: hidden;
   position: relative;

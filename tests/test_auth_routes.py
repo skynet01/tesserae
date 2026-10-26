@@ -225,6 +225,25 @@ def test_setup_mismatched_confirm_shows_inline_error(app: Flask) -> None:
     assert not auth.password_is_set(_settings_store(app))
 
 
+def test_setup_goes_to_the_wizard_on_a_fresh_install(app: Flask) -> None:
+    resp = app.test_client().post(
+        "/setup", data={"password": "longenough", "password_confirm": "longenough"}
+    )
+    assert resp.status_code == 302
+    assert "/onboarding" in resp.location
+
+
+def test_setup_skips_the_wizard_when_already_onboarded(app: Flask) -> None:
+    """Home Assistant's ingress needs no password, so the wizard can be done
+    there first; setting a password for direct access later goes home."""
+    _settings_store(app).patch_section("app", {"onboarded": True})
+    resp = app.test_client().post(
+        "/setup", data={"password": "longenough", "password_confirm": "longenough"}
+    )
+    assert resp.status_code == 302
+    assert "/onboarding" not in resp.location
+
+
 def test_login_wrong_password_shows_inline_error(app: Flask) -> None:
     client = app.test_client()
     _sign_in(client)

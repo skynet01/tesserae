@@ -183,6 +183,9 @@ def test_topbar_battery_indicator_links_to_admin_page(app: Flask) -> None:
         def __init__(self) -> None:
             self.devices = {"d1": _FakeDevice("d1", "Dining")}
 
+        def all(self) -> list:
+            return list(self.devices.values())
+
     app.config["DEVICE_REGISTRY"] = _FakeRegistry()
     app.config["DEVICE_STATUS"] = {
         "d1": {"received_at": time.time(), "parsed": {"battery_pct": 42}},
@@ -220,6 +223,9 @@ def test_topbar_battery_indicator_applies_per_device_offset(app: Flask) -> None:
     class _FakeRegistry:
         def __init__(self, devices: dict) -> None:
             self.devices = devices
+
+        def all(self) -> list:
+            return list(self.devices.values())
 
     # Two devices: one with no offset (raw 4% surfaces as 4%), one
     # with +30% offset (raw 4% surfaces as 34%, well above the
@@ -267,6 +273,9 @@ def test_panel_with_no_battery_sense_reads_as_unknown_not_empty(app: Flask) -> N
     class _FakeRegistry:
         def __init__(self, devices: dict) -> None:
             self.devices = devices
+
+        def all(self) -> list:
+            return list(self.devices.values())
 
     app.config["DEVICE_REGISTRY"] = _FakeRegistry({"c3": _FakeDevice("c3", "Hallway", {})})
     app.config["DEVICE_STATUS"] = {

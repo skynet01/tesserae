@@ -14,7 +14,7 @@ from __future__ import annotations
 from flask import flash, redirect, render_template, request, url_for
 from werkzeug.wrappers import Response
 
-from app import auth
+from app import auth, onboarding
 
 from ._shared import bp, log_auth, safe_next, settings_store
 
@@ -43,6 +43,10 @@ def setup() -> Response | str:
             log_auth("setup", "ok")
             # First run drops into the setup wizard, not straight to
             # Settings, the wizard sequences broker → device → dashboard.
+            # An install already set up another way (through Home
+            # Assistant's ingress, which needs no password) goes home.
+            if onboarding.is_onboarded(settings):
+                return redirect(url_for("index"))
             return redirect(url_for("onboarding.index"))
     return render_template("setup.html", error=error)
 
