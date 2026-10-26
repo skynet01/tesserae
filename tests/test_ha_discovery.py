@@ -308,6 +308,28 @@ def test_publish_toggles_save_and_reach_a_fresh_publisher(app: Flask, tmp_path: 
     assert second._dashboard_buttons_on() is True
 
 
+def test_discovery_started_at_boot_has_the_button_service_hooks(tmp_path: Path) -> None:
+    (tmp_path / "core").mkdir(parents=True, exist_ok=True)
+    SettingsStore(tmp_path / "core" / "settings.json").update_section(
+        "app", {"ha_discovery_enabled": True}
+    )
+    booted = create_app(
+        testing=False,
+        data_root=tmp_path,
+        plugins_dir=REPO_ROOT / "plugins",
+        renderers_dir=REPO_ROOT / "renderers",
+        devices_dir=REPO_ROOT / "devices",
+    )
+    ha = booted.config["HA_DISCOVERY"]
+    assert ha is not None
+    # The Input event entity and its listener need the service; it used to
+    # be built after the first transport wiring, so a restart left both out
+    # until the next settings save.
+    assert ha._hooks.button_service is booted.config["BUTTON_SERVICE"]
+    assert ha._hooks.step_device_fn is not None
+    ha.stop()
+
+
 # -- Multi-head: per-display HA devices --------------------------------
 
 

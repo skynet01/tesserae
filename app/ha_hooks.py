@@ -386,10 +386,10 @@ def _step_device(app: Flask, device_id: str, delta: int) -> str | None:
     button service, the same path a physical next / previous press takes
     (see ``ButtonService.step`` for what differs and why).
 
-    The service is looked up per call, not when the hooks are built: the
-    first transport wiring (which starts HA discovery) runs before the
-    button service exists at boot, and a captured ``None`` would leave the
-    entities dead until the next settings save."""
+    The service is looked up per call, not when the hooks are built, so
+    the buttons never hold on to a missing one: the hooks are built
+    whenever the transport is rewired, which at boot used to happen
+    before the service existed."""
     svc = app.config.get("BUTTON_SERVICE")
     step = getattr(svc, "step", None)
     if not callable(step):
