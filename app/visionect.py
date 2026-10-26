@@ -379,12 +379,13 @@ class VisionectService:
                 snapshot.clear()
 
     async def _serve(self, ready: threading.Event) -> None:
-        from pyvisionect.io import VisionectServer
         from pyvisionect.session import DeviceStateStore
+
+        from app.visionect_listener import GuardedServer
 
         stop_event = asyncio.Event()
         store = DeviceStateStore()
-        server = VisionectServer(
+        server = GuardedServer(
             on_events=self._on_events, store=store, host=self.host, port=self.port
         )
         self._stop_event, self._store, self._server = stop_event, store, server
@@ -747,6 +748,7 @@ class VisionectService:
         sign = self._sign(uuid)
         now = time.monotonic()
         if isinstance(event, DeviceConnected):
+            self._mark_identified(uuid)
             # A new connection: whatever was in flight on the old one is lost.
             sign.image_inflight = None
             sign.sleep_inflight = None
@@ -828,6 +830,14 @@ class VisionectService:
             sign.shown_checksum,
         )
         sign.shown_digest = ""
+
+    def _mark_identified(self, uuid: str) -> None:
+        """Lift the listener's identify deadline for the sign's socket."""
+        writers = getattr(self._server, "_writers", None)
+        writer = writers.get(uuid_bytes(uuid)) if isinstance(writers, dict) else None
+        mark = getattr(self._server, "mark_identified", None)
+        if writer is not None and callable(mark):
+            mark(writer)
 
     def _peer(self, uuid: str) -> str:
         writers = getattr(self._server, "_writers", None)

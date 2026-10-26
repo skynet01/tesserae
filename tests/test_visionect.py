@@ -24,9 +24,17 @@ from flask import Flask
 from PIL import Image
 from pyvisionect.devices.enums import PacketType
 from pyvisionect.packets import ControlPacket, StatusPacket
-from pyvisionect.wire import Compression, DataHeader, Direction, FrameDecoder, encode_frame
+from pyvisionect.wire import (
+    BlockHeader,
+    Compression,
+    DataHeader,
+    Direction,
+    FrameDecoder,
+    ProtocolHeader,
+    encode_frame,
+)
 
-from app import visionect
+from app import visionect, visionect_listener
 from app.discovery import DiscoveryCache
 
 UUID = "36002000-1247-3830-3933-303600000000"
@@ -765,3 +773,174 @@ def test_busy_port_is_retried_on_a_timer(tmp_path: Path, monkeypatch) -> None:
             time.sleep(0.05)
     finally:
         h.svc.stop()
+
+
+# -- untrusted LAN traffic ----------------------------------------------------
+
+
+def _closed_soon(sock: socket.socket, timeout: float = 3.0) -> bool:
+    """Whether the server drops ``sock`` within ``timeout``."""
+    sock.settimeout(timeout)
+    try:
+        while True:
+            if not sock.recv(65536):
+                return True
+    except (ConnectionResetError, BrokenPipeError):
+        return True
+    except TimeoutError:
+        return False
+
+
+def _raw(port: int) -> socket.socket:
+    return socket.create_connection(("127.0.0.1", port), timeout=5)
+
+
+def test_the_listener_hooks_pyvisionect_where_it_expects() -> None:
+    """GuardedServer overrides two private methods; a pyvisionect release that
+    renames or reshapes them must fail here, not silently drop the bounds."""
+    import inspect
+
+    from pyvisionect.io import VisionectServer
+
+    for name, params in (
+        ("_handle_client", ["self", "reader", "writer"]),
+        ("_run_timers", ["self", "conn", "writer"]),
+    ):
+        method = getattr(VisionectServer, name)
+        assert inspect.iscoroutinefunction(method), name
+        assert list(inspect.signature(method).parameters) == params, name
+
+
+def test_a_decompression_bomb_never_reaches_the_decoder(harness: Harness, monkeypatch) -> None:
+    import pyvisionect.wire.framing as framing
+
+    def _boom(*_a: Any, **_k: Any) -> bytes:
+        raise AssertionError("the bomb reached pyvisionect's block decoder")
+
+    monkeypatch.setattr(framing, "decode_blocks", _boom)
+    assert harness.svc.start()
+    # Two blocks declared, so the library's one total-size check passes; the
+    # first block's one LZ4 byte "inflates" to 2 GiB.
+    body = BlockHeader(0, 1, 1, 1 << 31, 0).pack() + b"\x00"
+    frame = ProtocolHeader(version=3, compression=Compression.LZ4, length=len(body)).pack() + body
+    sock = _raw(harness.svc.port)
+    try:
+        sock.sendall(frame)
+        assert _closed_soon(sock)
+    finally:
+        sock.close()
+    assert harness.svc._server.rejected_frames == 1
+
+
+def test_a_huge_frame_is_refused_from_its_header(harness: Harness) -> None:
+    assert harness.svc.start()
+    sock = _raw(harness.svc.port)
+    try:
+        # Claims 50 MB; the library would buffer all of it before deciding.
+        sock.sendall(ProtocolHeader(version=3, length=50_000_000).pack() + b"\0" * 1000)
+        assert _closed_soon(sock)
+    finally:
+        sock.close()
+    assert harness.svc._server.rejected_frames == 1
+
+
+def test_a_small_compressed_frame_still_reaches_the_library(harness: Harness) -> None:
+    harness.render("frame-a")
+    assert harness.svc.start()
+    payload = StatusPacket(records=STATUS_TAGS, sentinel=0xDEADBEEF).encode()
+    frame = encode_frame(
+        DataHeader(
+            device_id=visionect.uuid_bytes(UUID),
+            type=PacketType.STATUS,
+            id=1,
+            length=len(payload),
+        ),
+        payload,
+        direction=Direction.DEVICE_TO_SERVER,
+        compression=Compression.LZ4,
+    )
+    sign = FakeSign(harness.svc.port)
+    try:
+        for i in range(len(frame)):  # one byte at a time: frames reassemble
+            sign.sock.sendall(frame[i : i + 1])
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+    finally:
+        sign.close()
+
+
+def test_a_connection_that_never_identifies_is_dropped_on_time(
+    harness: Harness, monkeypatch
+) -> None:
+    """The library's identify timeout is per read, and stops applying once a
+    frame carries a device id even if it never yields a valid status. The
+    listener's deadline is for the whole connection."""
+    monkeypatch.setattr(visionect_listener, "IDENTIFY_TIMEOUT_S", 0.6)
+    assert harness.svc.start()
+    assert harness.svc._server.identify_timeout == 0.6
+    sock = _raw(harness.svc.port)
+    try:
+        # A status-typed frame whose payload doesn't decode: the library
+        # registers the UUID but no sign ever identifies.
+        sock.sendall(device_frame(UUID, PacketType.STATUS, b"\x01\x02\x03", 1))
+        started = time.monotonic()
+        assert _closed_soon(sock, timeout=5)
+        assert time.monotonic() - started < 3
+    finally:
+        sock.close()
+    assert harness.svc._server.identify_timeouts == 1
+
+
+def test_a_sign_is_not_dropped_by_the_identify_deadline(harness: Harness, monkeypatch) -> None:
+    monkeypatch.setattr(visionect_listener, "IDENTIFY_TIMEOUT_S", 0.4)
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        assert not _closed_soon(sign.sock, timeout=1.0)
+    finally:
+        sign.close()
+
+
+def test_the_listener_caps_connections_per_address(harness: Harness, monkeypatch) -> None:
+    monkeypatch.setattr(visionect_listener, "MAX_CONNECTIONS_PER_PEER", 2)
+    assert harness.svc.start()
+    socks = [_raw(harness.svc.port) for _ in range(2)]
+    try:
+        time.sleep(0.2)
+        extra = _raw(harness.svc.port)
+        socks.append(extra)
+        assert _closed_soon(extra)
+        assert not _closed_soon(socks[0], timeout=0.3)
+    finally:
+        for sock in socks:
+            sock.close()
+    assert harness.svc._server.refused_connections == 1
+
+
+def test_a_timer_task_write_error_does_not_escape() -> None:
+    """pyvisionect awaits the timer task suppressing only CancelledError, so
+    an error out of it would skip the connection's removal and close."""
+    import asyncio
+
+    aborted: list[bool] = []
+
+    class _Writer:
+        transport = SimpleNamespace(abort=lambda: aborted.append(True), is_closing=lambda: True)
+
+        def get_extra_info(self, _name: str) -> Any:
+            return ("10.0.0.9", 1234)
+
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            raise ConnectionResetError("Connection lost")
+
+    conn = SimpleNamespace(closed=False, advance=lambda _now: [], drain=lambda: b"\x01")
+
+    async def _run() -> None:
+        server = visionect_listener.GuardedServer(on_events=lambda c, e: None)
+        await asyncio.wait_for(server._run_timers(conn, _Writer()), timeout=5)
+
+    asyncio.run(_run())  # returns instead of raising ConnectionResetError
+    assert aborted == [True]
