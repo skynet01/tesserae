@@ -215,11 +215,14 @@ class Harness:
         self.registry = SimpleNamespace(devices={"visionect": kind, "lobby": self.device})
         self.latest: dict[str, Any] | None = None
         self.repaints: list[str] = []
+        self.consumed: list[str] = []
+        self.busy = False  # the push pipeline is rendering for the device
         self.app = Flask(__name__)
         self.app.config["SETTINGS_STORE"] = self.settings
         self.app.config["DISCOVERY_CACHE"] = DiscoveryCache()
         self.app.config["PUSH_MANAGER"] = SimpleNamespace(
-            invalidate_and_repaint=lambda device_id, reencode=True: self.repaints.append(device_id)
+            invalidate_and_repaint=lambda device_id, reencode=True: self.repaints.append(device_id),
+            consume_force_refetch=self.consumed.append,
         )
         self.svc = visionect.VisionectService(host="127.0.0.1", port=free_port())
         self.svc.attach(
@@ -229,6 +232,7 @@ class Harness:
                 settings=self.settings,
                 renders_dir=self.renders,
                 latest_render_fn=lambda _device_id: self.latest,
+                render_busy_fn=lambda _device_id: self.busy,
             )
         )
 
@@ -1186,3 +1190,202 @@ def test_a_closing_socket_reads_as_disconnected() -> None:
     assert (svc.sign_view(UUID) or {}).get("connected") is False
     sign.writer = SimpleNamespace(transport=SimpleNamespace(is_closing=lambda: False))
     assert svc._alive(sign)
+
+
+# -- sleep vs renders, the glass check, resends ---------------------------------
+
+
+def test_sleep_waits_for_a_render_in_progress(tmp_path: Path, monkeypatch) -> None:
+    """Frame A acked, render B under way as the window starts: the sign used
+    to sleep all night on A."""
+    monkeypatch.setattr(visionect, "RENDER_HOLD_POLL_S", 0.1)
+    h = Harness(tmp_path, app_settings=_window_around_now(sleep=True))
+    try:
+        h.render("frame-a")
+        h.busy = True
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.images()) == 1)
+            sign.ack(sign.images()[0].id)
+            sign.wait_for(lambda s: len(s.commands()) > 0, timeout=1.5)
+            assert sign.commands() == []  # B is still rendering
+            h.render("frame-b", shade=128)
+            h.busy = False
+            h.push()
+            assert sign.wait_for(lambda s: len(s.images()) == 2)
+            sign.wait_for(lambda s: len(s.commands()) > 0, timeout=1.0)
+            assert sign.commands() == []  # and B isn't acked yet
+            sign.ack(sign.images()[1].id)
+            assert sign.wait_for(lambda s: len(s.commands()) == 1)
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_sleep_waits_for_a_render_even_with_no_frame_yet(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(visionect, "RENDER_HOLD_POLL_S", 0.1)
+    h = Harness(tmp_path, app_settings=_window_around_now(sleep=True))
+    try:
+        h.busy = True  # latest_render_for() is None, but a render is coming
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            sign.wait_for(lambda s: len(s.commands()) > 0, timeout=1.5)
+            assert sign.commands() == []
+            h.render("frame-a")
+            h.busy = False
+            h.push()
+            assert sign.wait_for(lambda s: len(s.images()) == 1)
+            sign.ack(sign.images()[0].id)
+            assert sign.wait_for(lambda s: len(s.commands()) == 1)
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_a_render_that_never_finishes_holds_the_sleep_only_so_long(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(visionect, "RENDER_HOLD_POLL_S", 0.1)
+    monkeypatch.setattr(visionect, "RENDER_HOLD_MAX_S", 0.6)
+    h = Harness(tmp_path, app_settings=_window_around_now(sleep=True))
+    try:
+        h.busy = True
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.commands()) == 1, timeout=5)
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+@pytest.mark.parametrize("failure", ["missing", "encode"])
+def test_an_unreadable_render_is_noted_once_and_the_sign_still_sleeps(
+    tmp_path: Path, monkeypatch, caplog, failure: str
+) -> None:
+    h = Harness(tmp_path, app_settings=_window_around_now(sleep=True))
+    try:
+        h.render("frame-a")
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.images()) == 1)
+            if failure == "missing":
+                h.latest = {"digest": "frame-gone", "filename": "frame-gone.png", "ext": "png"}
+            else:
+                h.render("frame-b", shade=128)
+
+                def _broken(*_a: Any) -> Any:
+                    raise ValueError("bad PNG")
+
+                monkeypatch.setattr(visionect, "_encode", _broken)
+            caplog.clear()
+            sign.ack(sign.images()[0].id)
+            # The sign keeps frame A and sleeps on it.
+            assert sign.wait_for(lambda s: len(s.commands()) == 1)
+            for _ in range(3):  # later passes don't retry or log it again
+                h.push()
+                sign.status()
+            sign.wait_for(lambda s: len(s.images()) > 1, timeout=1.0)
+            assert len(sign.images()) == 1
+        finally:
+            sign.close()
+        notes = [r for r in caplog.records if "can't send render" in r.getMessage()]
+        assert len(notes) == 1
+        view = h.svc.sign_view(UUID) or {}
+        assert "couldn't be read" in view.get("last_error", "")
+    finally:
+        h.svc.stop()
+
+
+def test_a_frame_adopted_after_a_restart_keeps_its_glass_check(harness: Harness) -> None:
+    """At startup a frame the sign already shows (its CRC matches) is
+    adopted without a resend; its checksum must arm the glass check too."""
+    harness.render("frame-a")
+    status = StatusPacket(records=STATUS_TAGS, sentinel=0)
+    path = harness.renders / "frame-a.png"
+    checksum = int(visionect._encode(path, visionect.sign_panel(status)).state_checksum)
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status(with_tag(9, checksum))
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("in_sync") is True)
+        state = harness.svc._signs[UUID]
+        assert state.shown_checksum == checksum and state.shown_at > 0
+        assert sign.images() == []  # adopted, not resent
+        # Much later the sign reports something else: one corrective resend.
+        state.shown_at = time.time() - visionect.CRC_CONVERGE_S - 1
+        sign.status(with_tag(9, checksum ^ 1))
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+    finally:
+        sign.close()
+
+
+def test_an_ack_rearms_the_corrective_resend() -> None:
+    from pyvisionect.packets import ControlPacket as Control
+    from pyvisionect.session import Acked
+
+    svc = visionect.VisionectService()
+    sign = svc._sign(UUID)
+    conn = SimpleNamespace(device_id=visionect.uuid_bytes(UUID), closed=False)
+    sign.conn = conn
+    sign.crc_corrected = True  # spent on the previous frame
+    sign.inflight = visionect._Inflight(
+        kind="image", packet_id=7, conn=conn, writer=None, digest="frame-b", checksum=5
+    )
+    event = Acked(packet_id=7, control=Control.ack(), device_id=visionect.uuid_bytes(UUID))
+    assert svc._handle_event(conn, event) == UUID
+    assert sign.shown_digest == "frame-b" and sign.shown_checksum == 5
+    assert not sign.crc_corrected
+
+
+def test_one_sleep_lasts_at_most_a_day(tmp_path: Path, monkeypatch) -> None:
+    from app import quiet_hours
+
+    h = Harness(tmp_path, app_settings=_window_around_now(sleep=True))
+    monkeypatch.setattr(
+        quiet_hours,
+        "quiet_ends_at",
+        lambda _window, now, _tz: now + timedelta(days=5),  # a long "away" window
+    )
+    assert h.svc._sleep_minutes(h.device) == 24 * 60  # type: ignore[arg-type]
+
+
+def test_a_history_resend_repaints_the_frame_once(harness: Harness) -> None:
+    from pyvisionect.packets import ImagePacket
+
+    harness.render("frame-a")
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        sign.ack(sign.images()[0].id)
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("in_sync") is True)
+        normal = ImagePacket.decode(sign.images()[0].payload).checksum
+        # History -> resend: the same frame, flagged for a one-shot refetch.
+        harness.latest = {**harness.latest, "force_refetch": True, "timestamp": 1000.0}
+        harness.push()
+        assert sign.wait_for(lambda s: len(s.images()) == 2)
+        resent = ImagePacket.decode(sign.images()[1].payload).checksum
+        assert resent != normal  # a checksum the sign can't hold: it repaints
+        sign.ack(sign.images()[1].id)
+        assert _wait(lambda: harness.consumed == ["lobby"])
+        assert harness.svc._signs[UUID].shown_checksum == resent
+        harness.push()  # the flag is still set, but that resend was honoured
+        sign.wait_for(lambda s: len(s.images()) > 2, timeout=1.0)
+        assert len(sign.images()) == 2
+        harness.latest = {**harness.latest, "timestamp": 2000.0}  # another resend
+        harness.push()
+        assert sign.wait_for(lambda s: len(s.images()) == 3)
+    finally:
+        sign.close()

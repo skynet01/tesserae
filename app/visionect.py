@@ -72,8 +72,10 @@ REPAINT_WAIT_S = 300.0
 # up to 30 minutes after the ACK; only after this long is a mismatch real.
 CRC_CONVERGE_S = 40 * 60.0
 # The longest single deep sleep we ask for, and the margin past the window's
-# end so the sign wakes to the day's first frame.
-MAX_SLEEP_MINUTES = 6 * 24 * 60
+# end so the sign wakes to the day's first frame. Nothing can wake a sleeping
+# sign over the network, so one sleep is at most a day: a longer window is
+# slept a day at a time (the sign wakes, reconnects and is put back to sleep).
+MAX_SLEEP_MINUTES = 24 * 60
 SLEEP_MARGIN_MINUTES = 2
 # A frame or sleep command the sign never answers, counted from when its
 # write finished (a full 32" frame, 1.8 MB, has taken 12 s to ACK over
@@ -91,6 +93,12 @@ WRITE_TIMEOUT_S = 90.0
 # (DHCP) gets back in at its next re-dial.
 PROBE_QUIET_S = 30.0
 PROBE_TIMEOUT_S = 20.0
+# Quiet-hours sleep waits while the push pipeline renders for the device (a
+# push that started just before the window would otherwise land after the
+# sign fell asleep on the old frame), checking every RENDER_HOLD_POLL_S, for
+# at most RENDER_HOLD_MAX_S.
+RENDER_HOLD_POLL_S = 5.0
+RENDER_HOLD_MAX_S = 600.0
 # pyvisionect.imaging.constants Encoding.FOUR_BIT and Dithering.NONE. The
 # renderer has already dithered onto the 16-grey ramp, and NONE keeps n*17
 # levels exact.
@@ -171,6 +179,26 @@ def artifact_path(renders_dir: Path, latest: dict[str, Any]) -> Path | None:
     return renders_dir / name
 
 
+def resend_stamp(latest: dict[str, Any] | None) -> float:
+    """The timestamp of a History "resend" the latest render carries (its
+    one-shot ``force_refetch`` flag), or 0.0. Each resend writes a new
+    entry, so the timestamp tells one resend of the same frame from the
+    next."""
+    if not latest or not latest.get("force_refetch"):
+        return 0.0
+    try:
+        return float(latest.get("timestamp") or 0.0) or 1.0
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def perturbed_checksum(checksum: int) -> int:
+    """A frame checksum the sign can't already hold, so it treats an
+    unchanged frame as new and repaints it (pyvisionect's ``force_full``
+    lever, computed here so the ACKed state checksum is known)."""
+    return ((checksum ^ 0x8000_0000) & 0xFFFF_FFFF) or 1
+
+
 @dataclass(frozen=True)
 class _Context:
     app: Flask
@@ -178,6 +206,8 @@ class _Context:
     settings: Any
     renders_dir: Path
     latest_render_fn: Callable[[str], dict[str, Any] | None]
+    # PushManager.render_in_progress: a push for this device is under way.
+    render_busy_fn: Callable[[str], bool] = lambda _device_id: False
 
 
 @dataclass
@@ -192,6 +222,7 @@ class _Inflight:
     checksum: int = 0
     minutes: int = 0
     deadline: float = math.inf  # monotonic; set once the write has finished
+    resend_stamp: float = 0.0  # the History resend this frame answers, if any
 
 
 @dataclass
@@ -213,6 +244,9 @@ class _Sign:
     refused: dict[str, Any] | None = None  # the last same-UUID connection refused
     frame: Any = None  # EncodedFrame for frame_digest
     frame_digest: str = ""
+    failed_digest: str = ""  # a latest render that couldn't be read or encoded
+    resend_stamp: float = 0.0  # the last History resend honoured (its timestamp)
+    hold_since: float = 0.0  # monotonic; sleep held for a render in progress
     shown_digest: str = ""  # acked by the sign during this run
     shown_checksum: int | None = None  # its state checksum (status tag 9)
     shown_at: float = 0.0  # wall clock of that ACK
@@ -684,7 +718,10 @@ class VisionectService:
         if inflight is not None and now >= inflight.deadline:
             sign.inflight = None
             what = "frame" if inflight.kind == "image" else "sleep command"
-            sign.last_error = f"never confirmed the {what}; reconnecting"
+            sign.last_error = (
+                f"The sign never confirmed the {what}, so Tesserae dropped the connection; "
+                "it re-dials and gets the latest state."
+            )
             logger.warning(
                 "visionect: sign %s never acked the %s; dropping the connection so it "
                 "re-dials and gets the latest state",
@@ -755,56 +792,92 @@ class VisionectService:
         digest = str((latest or {}).get("digest") or "")
 
         # 1. Have the latest frame encoded. Geometry comes from the sign's
-        #    own DisplayType, so wait for its first status.
-        if latest and digest and digest != sign.frame_digest and status is not None:
+        #    own DisplayType, so wait for its first status. A render that
+        #    can't be read or encoded is noted once and skipped: the sign
+        #    keeps (and may sleep on) the frame it has, rather than this
+        #    pass failing every minute all night.
+        if (
+            latest
+            and digest
+            and digest not in (sign.frame_digest, sign.failed_digest)
+            and status is not None
+        ):
             path = artifact_path(ctx.renders_dir, latest)
-            if path is None or not path.exists():
-                sign.last_error = "render missing on disk"
-                logger.warning("visionect %s: render %s missing on disk", device.id, path)
-                return
-            frame = await loop.run_in_executor(None, _encode, path, panel)
-            current = ctx.latest_render_fn(device.id) or {}
-            if (
-                self._ctx_gen != gen
-                or str(current.get("digest") or "") != digest
-                or self._device_for_uuid(sign.uuid) is not device
-                or sign.status is not status
-            ):
-                sign.dirty = True  # superseded while encoding; start over
-                return
-            sign.frame, sign.frame_digest = frame, digest
-            sign.repaint_until = 0.0
-            sign.last_error = ""
-            if not sign.shown_digest and status.display_state_crc == frame.state_checksum:
-                # Before our first ACK this run (a restart) the sign's CRC is
-                # the best evidence: it already shows this frame.
-                sign.shown_digest = digest
+            try:
+                if path is None or not path.exists():
+                    raise FileNotFoundError(f"{path} is missing")
+                frame = await loop.run_in_executor(None, _encode, path, panel)
+            except Exception as exc:
+                sign.failed_digest = digest
+                sign.last_error = (
+                    "The latest render couldn't be read, so the sign keeps its last frame."
+                )
+                logger.warning(
+                    "visionect %s: can't send render %s (%s); the sign keeps its last frame",
+                    device.id,
+                    digest[:12],
+                    exc,
+                    exc_info=not isinstance(exc, FileNotFoundError),
+                )
+            else:
+                current = ctx.latest_render_fn(device.id) or {}
+                if (
+                    self._ctx_gen != gen
+                    or str(current.get("digest") or "") != digest
+                    or self._device_for_uuid(sign.uuid) is not device
+                    or sign.status is not status
+                ):
+                    sign.dirty = True  # superseded while encoding; start over
+                    return
+                sign.frame, sign.frame_digest = frame, digest
+                sign.failed_digest = ""
+                sign.repaint_until = 0.0
+                sign.last_error = ""
+                if not sign.shown_digest and status.display_state_crc == frame.state_checksum:
+                    # Before our first ACK this run (a restart) the sign's CRC
+                    # is the best evidence: it already shows this frame. Its
+                    # checksum and time arm the glass check, as an ACK would.
+                    sign.shown_digest = digest
+                    sign.shown_checksum = int(frame.state_checksum)
+                    sign.shown_at = time.time()
 
         if not self._alive(sign) or sign.inflight is not None:
             return
         conn, writer = sign.conn, sign.writer
 
-        # 2. Send the frame the sign hasn't acked, one at a time.
-        if sign.frame is not None and sign.frame_digest != sign.shown_digest:
+        # 2. Send the frame the sign hasn't acked, one at a time. A History
+        #    "resend" of the frame it already shows is honoured once, with a
+        #    checksum the sign can't hold, so it really repaints (ghosting).
+        stamp = resend_stamp(latest) if digest and digest == sign.frame_digest else 0.0
+        repaint = bool(stamp) and stamp != sign.resend_stamp
+        if sign.frame is not None and (sign.frame_digest != sign.shown_digest or repaint):
             wait = sign.retry_at - time.monotonic()
             if wait > 0:
                 self._schedule(sign.uuid, delay=wait)
                 return
+            checksum = int(sign.frame.state_checksum)
+            if sign.frame_digest == sign.shown_digest:
+                checksum = perturbed_checksum(checksum)
+                packet_id = int(conn.send_image(sign.frame, checksum_override=checksum))
+            else:
+                packet_id = int(conn.send_image(sign.frame))
             inflight = _Inflight(
                 kind="image",
-                packet_id=int(conn.send_image(sign.frame)),
+                packet_id=packet_id,
                 conn=conn,
                 writer=writer,
                 digest=sign.frame_digest,
-                checksum=int(sign.frame.state_checksum),
+                checksum=checksum,
+                resend_stamp=stamp,
             )
             sign.inflight = inflight
             self._publish(sign)  # "sending" while the write is under way
             logger.info(
-                "visionect %s: sending frame %s to sign %s",
+                "visionect %s: sending frame %s to sign %s%s",
                 device.id,
                 sign.frame_digest[:12],
                 sign.uuid,
+                " (resend)" if checksum != int(sign.frame.state_checksum) else "",
             )
             await self._send(sign, inflight, IMAGE_ACK_TIMEOUT_S)
             return  # the ACK re-runs us; sleep must wait for it
@@ -820,17 +893,38 @@ class VisionectService:
             self._schedule(sign.uuid, delay=wait)
             return
         minutes = self._sleep_minutes(device)
-        if minutes is not None:
-            inflight = _Inflight(
-                kind="sleep",
-                packet_id=int(conn.sleep(minutes)),
-                conn=conn,
-                writer=writer,
-                minutes=minutes,
+        if minutes is None:
+            sign.hold_since = 0.0
+            return
+        # The frame to sleep on may still be rendering (a push that started
+        # just before the window): wait for it, but not all night.
+        now = time.monotonic()
+        if ctx.render_busy_fn(device.id):
+            if not sign.hold_since:
+                sign.hold_since = now
+            if now - sign.hold_since < RENDER_HOLD_MAX_S:
+                self._schedule(sign.uuid, delay=RENDER_HOLD_POLL_S)
+                return
+            logger.warning(
+                "visionect %s: still rendering after %.0f min; the sign sleeps on the frame it has",
+                device.id,
+                RENDER_HOLD_MAX_S / 60,
             )
-            sign.inflight = inflight
-            logger.info("visionect: quiet hours, sign %s sleeps for %d min", sign.uuid, minutes)
-            await self._send(sign, inflight, SLEEP_ACK_TIMEOUT_S)
+        # A render that landed since this pass read the latest goes first.
+        if str((ctx.latest_render_fn(device.id) or {}).get("digest") or "") != digest:
+            sign.dirty = True
+            return
+        sign.hold_since = 0.0
+        inflight = _Inflight(
+            kind="sleep",
+            packet_id=int(conn.sleep(minutes)),
+            conn=conn,
+            writer=writer,
+            minutes=minutes,
+        )
+        sign.inflight = inflight
+        logger.info("visionect: quiet hours, sign %s sleeps for %d min", sign.uuid, minutes)
+        await self._send(sign, inflight, SLEEP_ACK_TIMEOUT_S)
 
     async def _send(self, sign: _Sign, inflight: _Inflight, ack_timeout: float) -> None:
         """Put what ``inflight`` queued on the wire, then start its ACK clock."""
@@ -839,7 +933,9 @@ class VisionectService:
             return  # answered, or the sign reconnected, during the write
         if not ok:
             sign.inflight = None
-            sign.last_error = "stopped taking data; reconnecting"
+            sign.last_error = (
+                "The sign stopped taking data, so Tesserae dropped the connection; it re-dials."
+            )
             if inflight.conn is sign.conn:
                 self._drop(sign)
             return
@@ -949,8 +1045,12 @@ class VisionectService:
                     sign.shown_digest = inflight.digest
                     sign.shown_checksum = inflight.checksum
                     sign.shown_at = time.time()
+                    sign.crc_corrected = False  # a new frame: its own corrective resend
                     sign.retry_at = 0.0
                     sign.last_error = ""
+                    if inflight.resend_stamp:
+                        sign.resend_stamp = inflight.resend_stamp
+                        self._consume_resend(uuid)
                     logger.info("visionect: sign %s acked frame %s", uuid, inflight.digest[:12])
                 else:
                     sign.asleep_until = time.time() + inflight.minutes * 60
@@ -963,7 +1063,9 @@ class VisionectService:
                 if inflight.kind == "image":
                     sign.retry_at = now + delay
                     sign.last_error = (
-                        "refused a frame (charging)" if event.charging else "refused a frame"
+                        "The sign refused a frame while charging; Tesserae retries in 5 minutes."
+                        if event.charging
+                        else "The sign refused a frame; Tesserae retries in a minute."
                     )
                     level = logging.DEBUG if event.charging else logging.WARNING
                     logger.log(level, "visionect: sign %s refused a frame; retrying", uuid)
@@ -1007,6 +1109,7 @@ class VisionectService:
         sign.status = status
         sign.heard_at = time.monotonic()
         sign.probe_at = 0.0
+        sign.failed_digest = ""  # worth another try, maybe at another geometry
         # Whatever was in flight on the old connection is lost.
         sign.inflight = None
         sign.asleep_until = 0.0
@@ -1088,6 +1191,24 @@ class VisionectService:
             sign.shown_checksum,
         )
         sign.shown_digest = ""
+
+    def _consume_resend(self, uuid: str) -> None:
+        """Clear the latest render's one-shot resend flag once the sign has
+        repainted for it, so a restart doesn't honour it again."""
+        ctx = self._ctx
+        device = self._device_for_uuid(uuid)
+        push_mgr = ctx.app.config.get("PUSH_MANAGER") if ctx is not None else None
+        consume = getattr(push_mgr, "consume_force_refetch", None)
+        if device is None or not callable(consume):
+            return
+
+        async def _consume() -> None:
+            try:
+                await asyncio.get_running_loop().run_in_executor(None, consume, device.id)
+            except Exception:
+                logger.exception("visionect: clearing the resend flag for %s failed", device.id)
+
+        self._spawn(_consume())
 
     def _spawn(self, coro: Any) -> None:
         task = asyncio.get_running_loop().create_task(coro)
@@ -1371,6 +1492,7 @@ def register(app: Flask) -> None:
                 settings=settings,
                 renders_dir=Path(renders_dir),
                 latest_render_fn=push_mgr.latest_render_for,
+                render_busy_fn=getattr(push_mgr, "render_in_progress", lambda _d: False),
             )
         )
         push_mgr.add_listener(svc.on_push)

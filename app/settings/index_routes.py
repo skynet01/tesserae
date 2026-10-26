@@ -1966,7 +1966,7 @@ def _visionect_setup(device: Device) -> dict[str, Any] | None:
         problem = view.get("last_error") or ""
         body = f"Sign {uuid} is connected{where}. {state}"
         if problem:
-            body += f" Last problem: the sign {problem}; Tesserae retries shortly."
+            body += f" Last problem: {problem}"
         return {"ok": not problem, "title": "Sign connected", "body": body, "link": _VISIONECT_DOCS}
     asleep = view.get("asleep_until")
     if isinstance(asleep, (int, float)) and asleep > time.time():
