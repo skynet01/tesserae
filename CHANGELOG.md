@@ -6,6 +6,32 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- Each display gets *Next* and *Previous* buttons in Home Assistant. They
+  step whatever that display is showing right now, on that display only,
+  the way its own left and right buttons do. On a display with several
+  lineups bound (one per time slot, say), they step the lineup whose page
+  is on the glass. A one-page lineup, or a display that follows nothing,
+  is left alone. They work while automation is paused and during quiet
+  hours, like other manual sends.
+- Two switches next to the Home Assistant discovery toggle, both on by
+  default: **Publish lineup controls to Home Assistant** (each lineup's
+  switch, Push now, Next and Previous, and the displays' Lineup picker)
+  and **Publish a button per dashboard to Home Assistant**. Turning one
+  off removes those entities from HA when you save; the Active dashboard
+  and per-display Dashboard pickers stay.
+
+### Fixed
+
+- Home Assistant's per-display Input event (physical buttons and touch)
+  works after a restart; until now it only appeared after the next
+  settings save.
+- Removing a display or a lineup no longer takes Home Assistant entities
+  from another one whose id starts the same way (deleting `kitchen` used to
+  remove `kitchen_2`'s entities too, its battery and signal sensors until
+  the next restart).
+
 ## [0.480.1], 2026-10-26
 
 ### Fixed
