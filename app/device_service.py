@@ -19,18 +19,44 @@ mypy --strict applies to this module, see pyproject.toml.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
 from app.device_loader import Device, DeviceRegistry, colour_depths, load_instance_file
 from app.quantizer import canonicalise_gamut, refine_reported_gamut
 from app.renderer_loader import RendererRegistry, clone_for_instances
 
 logger = logging.getLogger(__name__)
+
+# Instance files are rewritten whole (read, patch, write back) from request
+# threads and from background ones: the Visionect listener conforming a
+# sign's panel, TRMNL size adoption, a firmware-driven renderer switch.
+# Every read-modify-write of an instance file, and every delete, holds this
+# lock, so two writers can't interleave and drop each other's change and a
+# writer that read the file before a delete can't bring the device back.
+INSTANCE_FILE_LOCK = threading.RLock()
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def holds_instance_file_lock(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Run ``fn`` holding :data:`INSTANCE_FILE_LOCK`."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with INSTANCE_FILE_LOCK:
+            return fn(*args, **kwargs)
+
+    return wrapper
+
 
 # Canonical instance-id rule, shared with the Settings routes. Lowercase,
 # starts with a letter, 2–32 chars of [a-z0-9_-].
@@ -348,6 +374,7 @@ def renderer_id_for_gamut(renderers: RendererRegistry, kind: Any, gamut: str | N
     return None
 
 
+@holds_instance_file_lock
 def update_instance_gamut(
     *,
     devices: DeviceRegistry,
@@ -928,6 +955,7 @@ def relocate_orphan_instance_files(*, data_root: Path, device_data_root: Path) -
     return moved
 
 
+@holds_instance_file_lock
 def update_instance_panel(
     *,
     devices: DeviceRegistry,
@@ -1013,6 +1041,7 @@ def update_instance_panel(
     return InstanceResult(reloaded)
 
 
+@holds_instance_file_lock
 def update_instance_renderer(
     *,
     devices: DeviceRegistry,
@@ -1075,6 +1104,7 @@ def update_instance_renderer(
     return InstanceResult(reloaded), True
 
 
+@holds_instance_file_lock
 def set_instance_renderer_id(
     *,
     devices: DeviceRegistry,
@@ -1190,6 +1220,7 @@ def parse_advertised_gamuts(payload: Any) -> list[str] | None:
     return out
 
 
+@holds_instance_file_lock
 def update_advertised_gamuts(
     *,
     devices: DeviceRegistry,
@@ -1244,6 +1275,7 @@ def advertises_gamut(device: Any, gamut: str) -> bool:
     return isinstance(advertised, list) and gamut in advertised
 
 
+@holds_instance_file_lock
 def set_grey_prompt_dismissed(
     *,
     devices: DeviceRegistry,
@@ -1339,6 +1371,7 @@ def renderer_for_firmware(kind: Any, fw_version: Any) -> str | None:
     return str(kind_renderer_ids[0])
 
 
+@holds_instance_file_lock
 def sync_renderer_for_firmware(
     *,
     devices: DeviceRegistry,
@@ -1458,6 +1491,7 @@ def transport_switchable(kind: Device) -> bool:
     return not (protocol in _NATIVE_FIRMWARE_PROTOCOLS and is_hardware_sku(kind))
 
 
+@holds_instance_file_lock
 def restore_rest_only_transports(registry: DeviceRegistry) -> list[str]:
     """Put instances of REST-only kinds that read as MQTT back on REST.
 
@@ -1497,6 +1531,7 @@ def restore_rest_only_transports(registry: DeviceRegistry) -> list[str]:
     return healed
 
 
+@holds_instance_file_lock
 def refine_inherited_gamuts(registry: DeviceRegistry) -> list[str]:
     """Move instances onto their kind's coarser gamut where the stored one
     is a report that gamut refines (see
@@ -1588,6 +1623,7 @@ def _refresh_inherited_panel(
         panel.setdefault(key, value)
 
 
+@holds_instance_file_lock
 def update_instance_kind(
     *,
     devices: DeviceRegistry,
@@ -1657,6 +1693,7 @@ def update_instance_kind(
     return InstanceResult(reloaded), True
 
 
+@holds_instance_file_lock
 def update_instance_quiet_hours(
     *,
     devices: DeviceRegistry,
@@ -1734,6 +1771,7 @@ def update_instance_quiet_hours(
     return InstanceResult(reloaded)
 
 
+@holds_instance_file_lock
 def update_instance_locale(
     *,
     devices: DeviceRegistry,
@@ -1777,6 +1815,7 @@ def update_instance_locale(
     return InstanceResult(reloaded)
 
 
+@holds_instance_file_lock
 def update_instance_battery_offset(
     *,
     devices: DeviceRegistry,
@@ -1826,6 +1865,7 @@ def update_instance_battery_offset(
     return InstanceResult(reloaded)
 
 
+@holds_instance_file_lock
 def delete_instance(
     *,
     devices: DeviceRegistry,

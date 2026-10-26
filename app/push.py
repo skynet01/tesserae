@@ -36,6 +36,7 @@ mypy --strict applies to this module, see pyproject.toml.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -445,6 +446,36 @@ class PushResult:
     event_ids: tuple[int, ...] = ()
 
 
+def _marks_rendering(
+    targets: Callable[..., Any],
+) -> Callable[[Callable[..., PushResult]], Callable[..., PushResult]]:
+    """Mark the devices a push entry point renders for while it runs.
+
+    ``targets`` gets the method's arguments and returns the device ids the
+    push is for (an empty collection when it targets no particular device).
+    The mark covers the whole call, the settle wait and the queue for
+    ``_lock`` included, and ends after the listeners have been told, so a
+    caller that sees ``render_in_progress()`` turn False also sees the
+    render it waited for in ``latest_render_for()``."""
+
+    def decorate(method: Callable[..., PushResult]) -> Callable[..., PushResult]:
+        @functools.wraps(method)
+        def wrapper(self: PushManager, *args: Any, **kwargs: Any) -> PushResult:
+            try:
+                ids = {str(d) for d in (targets(self, *args, **kwargs) or ()) if d}
+            except Exception:
+                ids = set()
+            self._mark_rendering(ids, +1)
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                self._mark_rendering(ids, -1)
+
+        return wrapper
+
+    return decorate
+
+
 class PushManager:
     """Single-flight render -> transform -> publish loop with event logging.
 
@@ -540,6 +571,13 @@ class PushManager:
         # panic-click Send never gets silently dropped).
         self._gen_lock = threading.Lock()
         self._device_gens: dict[str | None, int] = {}
+        # Devices a push entry point is rendering for right now, counted
+        # (pushes for one device can overlap while they queue on _lock).
+        # Read through render_in_progress() by transports that must not
+        # act on the old frame while a new one is on its way: the
+        # Visionect listener holds a quiet-hours deep sleep for it.
+        self._rendering_lock = threading.Lock()
+        self._rendering: dict[str, int] = {}
         # Renders accumulate in renders_dir as events age out (the event-log
         # cap evicts rows but not their artifacts). Sweep orphans on a
         # rolling basis so the dir stays bounded without a restart.
@@ -637,6 +675,30 @@ class PushManager:
     def remove_listener(self, callback: Callable[[PushResult], None]) -> None:
         with self._listener_lock, contextlib.suppress(ValueError):
             self._listeners.remove(callback)
+
+    # -- renders in progress ---------------------------------------------
+
+    def _mark_rendering(self, device_ids: set[str], delta: int) -> None:
+        if not device_ids:
+            return
+        with self._rendering_lock:
+            for device_id in device_ids:
+                count = self._rendering.get(device_id, 0) + delta
+                if count > 0:
+                    self._rendering[device_id] = count
+                else:
+                    self._rendering.pop(device_id, None)
+
+    def render_in_progress(self, device_id: str) -> bool:
+        """Whether a push for ``device_id`` is under way: settling, queued
+        behind another push, rendering or publishing. Its result is in
+        ``latest_render_for()`` by the time this turns False."""
+        with self._rendering_lock:
+            return self._rendering.get(device_id, 0) > 0
+
+    def _page_device_ids(self, page_id: str) -> list[str]:
+        page = self._page_store.get(page_id)
+        return list(getattr(page, "device_ids", None) or [])
 
     def _notify(self, result: PushResult) -> None:
         with self._listener_lock:
@@ -893,6 +955,20 @@ class PushManager:
         passes ``reencode=False``. Returns True when a repaint was started."""
         with self._lock:
             entry = dict(self._latest_renders.get(device_id) or {})
+        # Marked from before the latest render goes until the repaint is
+        # done, so nothing reads "no render, nothing coming" in between.
+        self._mark_rendering({device_id}, +1)
+        handed_off = False
+        try:
+            handed_off = self._start_repaint(entry, device_id, reencode=reencode)
+        finally:
+            if not handed_off:
+                self._mark_rendering({device_id}, -1)
+        return handed_off
+
+    def _start_repaint(self, entry: dict[str, Any], device_id: str, *, reencode: bool) -> bool:
+        """invalidate_and_repaint's body. The device is marked rendering;
+        True hands that mark to the repaint thread, which clears it."""
         self.invalidate_latest_render(device_id)
         page_id = str(entry.get("page_id") or "")
         comp_digest = str(entry.get("composition_digest") or "")
@@ -919,6 +995,8 @@ class PushManager:
                     )
             except Exception:
                 logger.exception("repaint after renderer change failed for device=%s", device_id)
+            finally:
+                self._mark_rendering({device_id}, -1)
 
         threading.Thread(target=_repaint, name=f"repaint-{device_id}", daemon=True).start()
         return True
@@ -1713,6 +1791,11 @@ class PushManager:
 
     # -- public API ------------------------------------------------------
 
+    @_marks_rendering(
+        lambda self, page_id, *_a, device_ids=None, **_k: (
+            device_ids if device_ids else self._page_device_ids(page_id)
+        )
+    )
     def push(
         self,
         page_id: str,
@@ -1906,6 +1989,7 @@ class PushManager:
         with self._followup_lock:
             return self._followups.get(page_id)
 
+    @_marks_rendering(lambda self, *_a, device_id=None, **_k: (device_id,))
     def push_image(
         self,
         image_bytes: bytes,
@@ -1981,6 +2065,7 @@ class PushManager:
         self._notify(result)
         return result
 
+    @_marks_rendering(lambda self, *_a, device_id=None, **_k: (device_id,))
     def push_url_image(
         self,
         url: str,
@@ -2030,6 +2115,7 @@ class PushManager:
         self._notify(result)
         return result
 
+    @_marks_rendering(lambda self, *_a, device_id=None, **_k: (device_id,))
     def push_webpage(
         self,
         url: str,
@@ -2247,6 +2333,8 @@ class PushManager:
                 # Republish is a user-initiated resend from the History
                 # page; treat it as user intent (bypass coalescing) so
                 # the user's re-send never gets silently superseded.
+                resending = set(selected_ids)
+                self._mark_rendering(resending, +1)
                 self._lock.acquire()
                 try:
                     # ``force_publish=True``: resend is an explicit user
@@ -2272,6 +2360,7 @@ class PushManager:
                     )
                 finally:
                     self._lock.release()
+                    self._mark_rendering(resending, -1)
         self._notify(result)
         return result
 

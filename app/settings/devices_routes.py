@@ -23,7 +23,14 @@ from flask import Response as FlaskResponse
 from flask import current_app, flash, redirect, request, session, url_for
 from werkzeug.wrappers import Response
 
-from app import calibration, device_cleanup, device_service, renderer_loader, test_patterns
+from app import (
+    calibration,
+    device_cleanup,
+    device_service,
+    renderer_loader,
+    test_patterns,
+    visionect,
+)
 from app.button_actions import (
     ButtonActionError,
     page_name_index,
@@ -157,6 +164,7 @@ def devices_dev_seed() -> Response:
 # -- add / discover / dismiss ------------------------------------------
 
 
+@device_service.holds_instance_file_lock
 def _make_rest_instance(device: Any) -> str | None:
     """Put a freshly created instance on the REST transport and give it a
     token, the same end state as pairing or the card's transport switch.
@@ -179,6 +187,21 @@ def _make_rest_instance(device: Any) -> str | None:
     return str(token)
 
 
+def _sign_uuid_conflict(kind: Any, values: dict[str, Any], *, exclude: str = "") -> str | None:
+    """Why a Visionect sign UUID can't be stored for a device of ``kind``:
+    another device is already bound to that sign. None when it can (or the
+    kind isn't a Visionect sign, or no UUID is given)."""
+    if not visionect.is_visionect_device(kind):
+        return None
+    uuid = visionect.normalise_uuid(values.get("uuid"))
+    if not uuid:
+        return None
+    other = visionect.device_bound_to(devices(), settings_store(), uuid, exclude=exclude)
+    if other is None:
+        return None
+    return f"Sign {uuid} is already bound to device {other!r}."
+
+
 @bp.post("/settings/devices/add")
 def devices_add() -> Response:
     """Create a new device instance from the Devices-tab form. No restart
@@ -186,6 +209,26 @@ def devices_add() -> Response:
     Target-device dropdown."""
     form = request.form
     target_id = form.get("id") or ""
+    # Check the config values the form supplies before anything is created
+    # (or an orphan's state wiped). They used to be validated after the
+    # device existed and quietly dropped when invalid, which turned a
+    # mistyped Visionect UUID into a blank device that binds whichever
+    # unknown sign connects next.
+    kind = devices().get((form.get("kind") or "").strip())
+    if kind is not None:
+        offered = [
+            f for f in config_fields_from_schema(kind.config_schema) if f["name"] in request.form
+        ]
+        if offered:
+            ok, err = kind.validate_config(values_from_form(offered))
+            problem = (
+                f"Invalid {kind.name} config: {err}"
+                if not ok
+                else _sign_uuid_conflict(kind, values_from_form(offered))
+            )
+            if problem:
+                flash(f"Device not added. {problem}", "error")
+                return redirect(url_for("auth.settings_area", area="devices"))
     # v0.71.x (issue #48 follow-up): manual add doesn't know the
     # incoming MAC (the form doesn't collect one), so the MAC-differs
     # heuristic the discovery path uses can't fire. Users typing an id
@@ -273,6 +316,7 @@ def devices_add() -> Response:
     )
 
 
+@device_service.holds_instance_file_lock
 def _apply_rename(device: Any, new_name: str) -> None:
     """Rewrite the instance JSON's ``name`` field + the in-memory manifest,
     then nudge HA discovery to re-publish so its device tile title updates
@@ -327,6 +371,7 @@ def devices_pair_revoke(code: str) -> Response:
 
 
 @bp.post("/settings/devices/<instance_id>/set-transport")
+@device_service.holds_instance_file_lock
 def devices_set_transport(instance_id: str) -> Response:
     """Flip a device instance between MQTT and REST transports.
 
@@ -417,6 +462,7 @@ def devices_set_transport(instance_id: str) -> Response:
 
 
 @bp.post("/settings/devices/<instance_id>/regenerate-token")
+@device_service.holds_instance_file_lock
 def devices_regenerate_token(instance_id: str) -> Response:
     """Mint a fresh access token for a TRMNL device.
 
@@ -691,6 +737,23 @@ def devices_register_discovered(discovered_id: str) -> Response:
             "error",
         )
         return redirect(url_for("auth.settings_area", area="devices"))
+    # A Visionect sign announces its UUID, which the new device is bound to
+    # below. Refuse before creating anything when it isn't a UUID or another
+    # device already has that sign.
+    announced_kind = devices().get(kind_id)
+    announced_uuid = entry.parsed.get("uuid")
+    if announced_kind is not None and visionect.is_visionect_device(announced_kind):
+        problem = None
+        if announced_uuid not in (None, ""):
+            ok, err = announced_kind.validate_config({"uuid": announced_uuid})
+            problem = (
+                f"Invalid {announced_kind.name} config: {err}"
+                if not ok
+                else _sign_uuid_conflict(announced_kind, {"uuid": announced_uuid})
+            )
+        if problem:
+            flash(f"Device not registered. {problem}", "error")
+            return redirect(url_for("auth.settings_area", area="devices"))
 
     # Did the user pick a different variant from the picker (issue #82)?
     # The two 4" Inky panels share the pi_bin protocol but differ in gamut
@@ -834,7 +897,6 @@ def devices_register_discovered(discovered_id: str) -> Response:
     cache.forget(discovered_id)
     # A Visionect sign announces its UUID; bind the new device to that sign
     # before the transport rebuild, whatever id the device was given.
-    announced_uuid = entry.parsed.get("uuid")
     uuid_fields = [
         f for f in config_fields_from_schema(result.device.config_schema) if f["name"] == "uuid"
     ]
@@ -1276,8 +1338,11 @@ def devices_update_combined(instance_id: str) -> Response:
     if schema_fields:
         values = values_from_form(schema_fields)
         ok, err = device.validate_config(values)
+        conflict = _sign_uuid_conflict(device, values, exclude=instance_id) if ok else None
         if not ok:
             flash(f"Invalid {device.name} config: {err}", "error")
+        elif conflict:
+            flash(f"{device.name} config not saved. {conflict}", "error")
         elif device.transport == "relay":
             # Relay devices have no broker and no direct poll against this
             # server: save, then nudge the relay publisher so the sealed

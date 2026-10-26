@@ -55,8 +55,9 @@ def parse_status(payload: bytes) -> dict[str, Any]:
 
 
 def validate_config(payload: dict[str, Any]) -> tuple[bool, str | None]:
-    """The UUID is optional (blank binds the first unknown sign), but when
-    set it must be a 32-hex-digit UUID, with or without dashes."""
+    """The UUID is optional (blank binds the first unknown sign within an
+    hour), but when set it must be a 32-hex-digit UUID, with or without
+    dashes."""
     raw = payload.get("uuid")
     if raw is None or raw == "":
         return True, None

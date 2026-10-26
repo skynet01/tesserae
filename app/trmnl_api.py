@@ -372,7 +372,14 @@ def _adopt_reported_panel(device: Device, w: int, h: int) -> bool:
     panel = device.panel or {}
     if panel.get("native_w") is not None or panel.get("native_h") is not None:
         return False
+    from app.device_service import INSTANCE_FILE_LOCK
 
+    with INSTANCE_FILE_LOCK:
+        return _write_adopted_panel(device, w, h)
+
+
+def _write_adopted_panel(device: Device, w: int, h: int) -> bool:
+    """``_adopt_reported_panel``'s read-patch-write, under the instance-file lock."""
     inst_file = device.path
     try:
         raw = json.loads(inst_file.read_text(encoding="utf-8"))

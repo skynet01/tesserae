@@ -13,8 +13,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   frame as 16 greys over the sign's own protocol through the `pyvisionect`
   library.
   - **Adding a sign:** Add device has a new Visionect tab. Leave the UUID blank
-    and the first unknown sign that connects is bound. Any other sign shows up
-    in the discovered devices banner, ready to register.
+    and the first unknown sign that connects within the hour is bound. Any
+    other sign shows up in the discovered devices banner, ready to register.
   - **Models:** the catalog has the Place & Play 32" and 13", Joan 6 and 13,
     and the 9.7" boards. Each sign reports its own screen size on connect, and
     the device adopts it.

@@ -1549,3 +1549,51 @@ def test_a_send_waits_for_the_page_to_finish_painting(
     with patch("app.push.capture_composed", return_value=(_distinct_png((9, 9, 9)), [])):
         manager.push("home", source="follow-up", followup=1)
     assert naps == []
+
+
+def test_render_in_progress_covers_the_whole_push(tmp_path: Path, composition_png: bytes) -> None:
+    """A transport that must not act on the old frame while a new one is on
+    its way (the Visionect quiet-hours sleep) asks render_in_progress(): it
+    is True for the page's devices from the push's start, and the render it
+    covered is already the latest one by the time it turns False."""
+    renderers = [_make_renderer(tmp_path, "pi_png", "png", retain=False)]
+    manager, _mqtt, png = _wired(tmp_path, composition_png, renderers)
+    page = manager._page_store.get("home")
+    page.device_ids = ["lobby"]
+    manager._page_store.save(page)
+    seen: list[tuple[bool, bool]] = []
+
+    def _capture(*_a: object, **_k: object) -> tuple[bytes, list[object]]:
+        seen.append((manager.render_in_progress("lobby"), manager.render_in_progress("hall")))
+        return png, []
+
+    assert not manager.render_in_progress("lobby")
+    with patch("app.push.capture_composed", side_effect=_capture):
+        manager.push("home")
+    assert seen == [(True, False)]
+    assert not manager.render_in_progress("lobby")
+
+    # An explicit target wins over the binding, from the settle wait on.
+    settling: list[tuple[bool, bool]] = []
+
+    def _settle(page_id: str, **_k: object) -> tuple[float, int]:
+        settling.append((manager.render_in_progress("lobby"), manager.render_in_progress("hall")))
+        return 0.0, 0
+
+    with patch.object(manager, "settle_page", side_effect=_settle):
+        manager.push("home", device_ids={"hall"})
+    assert settling == [(False, True)]
+    assert not manager.render_in_progress("hall")
+
+    # A repaint is marked from before the latest render is dropped until it lands.
+    marks: list[bool] = []
+    real_invalidate = manager.invalidate_latest_render
+
+    def _invalidate(device_id: str) -> bool:
+        marks.append(manager.render_in_progress(device_id))
+        return real_invalidate(device_id)
+
+    manager.invalidate_latest_render = _invalidate  # type: ignore[method-assign]
+    assert manager.invalidate_and_repaint("lobby") is False  # nothing to repaint from
+    assert marks == [True]
+    assert not manager.render_in_progress("lobby")
