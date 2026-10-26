@@ -29,6 +29,15 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
   See the Visionect quickstart.
 
+- Widget settings can be a `repeater`: a list of rows the operator adds,
+  removes and moves up and down on the widget's settings card, each row a
+  few sub-fields (text, multi-line text, switch, number or choice). The
+  rows are stored as a JSON list. A save with a row that doesn't fit is
+  refused with a message naming the row, leaving the saved rows as they
+  were. A widget changing an existing setting into a repeater can export
+  `legacy_rows(name, value)` so the old value shows as rows. See
+  docs/widgets.md.
+
 ## [0.480.1], 2026-10-26
 
 ### Fixed

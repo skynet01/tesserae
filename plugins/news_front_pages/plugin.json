@@ -1,10 +1,10 @@
 {
   "tesserae_compat": "1.x",
   "name": "News, Front Pages",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "kind": "widget",
   "locales": ["en"],
-  "description": "Today's newspaper front pages from the Freedom Forum archive, one paper per render, filling the cell's width from the top. Rotates through the papers listed under Settings → Widgets → News, Front Pages, or shows one pinned paper. The rotation moves on at most once every four minutes, so a send prepared ahead of time and its follow-ups show one paper; that approximates one paper per shown frame, and two sends within four minutes repeat a paper. Pages download in the background, and the last good page stays up while a paper isn't out yet. No API key needed.",
+  "description": "Today's newspaper front pages from the Freedom Forum archive, one paper per render, filling the cell's width from the top. Rotates through the papers listed under Settings → Widgets → News, Front Pages, each with its own optional CSS, or shows one pinned paper. The rotation moves on at most once every four minutes, so a send prepared ahead of time and its follow-ups show one paper; that approximates one paper per shown frame, and two sends within four minutes repeat a paper. Pages download in the background as PDFs, drawn 1440 px wide so body text stays readable (Freedom Forum's 700 px JPEG stands in when a PDF can't be had), and the last good page stays up while a paper isn't out yet. No API key needed.",
   "icon": "ph-newspaper",
   "category": "reading",
   "supports": {
@@ -23,12 +23,64 @@
   "settings": [
     {
       "name": "papers",
-      "type": "textarea",
+      "type": "repeater",
       "label": "Papers",
-      "rows": 6,
-      "default": "NY_NYT 3.5\nWSJ 2\nUSAT\n# AZ_ADS",
-      "placeholder": "NY_NYT 3.5",
-      "help": "Freedom Forum paper codes to rotate through, one per line, in order. Start a line with # to skip that paper. A number after a code trims that percent off the top of the page, for the printer's slug line some papers carry."
+      "add_label": "Add paper",
+      "row_label": "Paper",
+      "max_rows": 40,
+      "help": "The papers to rotate through, in order: one per render, moving on at most every four minutes. Switch a paper off to leave it out of the rotation without losing its row; a cell pinned to it still shows it.",
+      "fields": [
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "label": "In rotation",
+          "default": true
+        },
+        {
+          "name": "code",
+          "type": "string",
+          "label": "Paper code",
+          "required": true,
+          "unique": true,
+          "max_length": 40,
+          "pattern": "[A-Za-z0-9_\\-]+",
+          "pattern_hint": "letters, digits, _ and - only, like NY_NYT",
+          "placeholder": "NY_NYT",
+          "help": "Freedom Forum's code for the paper, as in its front page addresses (frontpages.freedomforum.org/newspapers/ny_nyt-The_New_York_Times is NY_NYT). The paper picker on a cell lists them all."
+        },
+        {
+          "name": "css",
+          "type": "textarea",
+          "label": "CSS",
+          "rows": 2,
+          "max_length": 1000,
+          "monospace": true,
+          "placeholder": "optional, e.g. filter: contrast(1.15)",
+          "help": "CSS for this paper only, as declarations separated by semicolons. They style this paper's page image (it fills the cell's width, top first) and nothing else. Examples: transform: translateY(-3.5%) moves the page up by 3.5% of its height, to hide the printer's line some papers carry above the masthead. filter: contrast(1.15) grayscale(1) darkens the print. transform: scale(1.2); transform-origin: top center zooms in on the top. height: 100%; object-fit: cover; object-position: 50% 3% fills the cell and crops. Allowed: filter, opacity, transform, scale, rotate, transform-origin, margin, width and height (and their min/max), object-fit, object-position, clip-path: inset(), image-rendering. Moves, sizes and zoom are bounded (the page grows at most 3x along each side). url(), @import, quotes, braces and anything else are ignored, and anything that isn't plain CSS (a < or a backslash, say) drops the paper's CSS altogether."
+        }
+      ],
+      "default": [
+        {
+          "enabled": true,
+          "code": "NY_NYT",
+          "css": "transform: translateY(-3.5%)"
+        },
+        {
+          "enabled": true,
+          "code": "WSJ",
+          "css": "transform: translateY(-2%)"
+        },
+        {
+          "enabled": true,
+          "code": "USAT",
+          "css": ""
+        },
+        {
+          "enabled": false,
+          "code": "AZ_ADS",
+          "css": ""
+        }
+      ]
     }
   ],
   "updates": {

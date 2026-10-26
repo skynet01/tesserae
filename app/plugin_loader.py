@@ -44,6 +44,7 @@ from flask import (
 )
 from werkzeug.wrappers import Response
 
+from app import repeater
 from app.capabilities import Capabilities, set_delegate_resolver
 from app.capabilities import parse as _parse_capabilities
 
@@ -473,6 +474,15 @@ def _scan_plugin_dir(
             field_path = ".".join(str(p) for p in err.absolute_path) or "<root>"
             registry.errors.append(
                 LoaderError(plugin_id, child, f"manifest schema [{field_path}]: {err.message}")
+            )
+            continue
+
+        # What the schema can't say about a repeater setting: unique
+        # sub-field names, min_rows <= max_rows, a default that parses.
+        repeater_problems = repeater.manifest_errors(manifest)
+        if repeater_problems:
+            registry.errors.append(
+                LoaderError(plugin_id, child, f"manifest {repeater_problems[0]}")
             )
             continue
 

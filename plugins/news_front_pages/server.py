@@ -6,9 +6,10 @@ round-robined the enabled papers on every frame request. Here there is no cron
 and no PDF tooling: ``fetch()`` answers from the pages saved in the widget's
 data dir and queues what is missing for one background download worker.
 
-Freedom Forum publishes each paper at
-``https://cdn.freedomforum.org/dfp/jpg<day-of-month>/lg/<CODE>.jpg``. Three
-quirks shape the code below:
+Freedom Forum publishes each paper as a PDF at
+``https://cdn.freedomforum.org/dfp/pdf<day-of-month>/<CODE>.pdf`` and as a
+JPEG at ``.../dfp/jpg<day-of-month>/lg/<CODE>.jpg``. Three quirks shape the
+code below:
 
 * The path names only the day of the month, so each slot is reused every
   month. Freedom Forum clears a slot a couple of days after the edition, and a
@@ -18,9 +19,18 @@ quirks shape the code below:
   date whatever the server's own time zone is. A paper that isn't out yet (or
   doesn't print that day, like the Sunday WSJ) falls back to yesterday's and
   then the day before's edition, as the old cron did.
-* The ``lg`` JPEG is the largest image on offer, about 700 px wide. Only the
-  PDF is bigger, and rasterising it would need a dependency a widget can't
-  declare, so a full-width page on a large panel is an upscale.
+* The ``lg`` JPEG is only about 700 px wide: on a 1440 px panel it is an
+  upscale, and body text can't be read. So the page comes from the PDF,
+  page one drawn at ``RASTER_WIDTH_PX`` from its own vectors and fonts (as
+  the old cron did with ImageMagick at 150 dpi). pypdfium2 does the drawing,
+  in a child process with a wall-clock timeout and capped CPU time and
+  address space, so a PDF that hangs or balloons costs that process, never
+  the server; the PDF itself is capped at ``MAX_PDF_BYTES``. When there is
+  no PDF, it can't be drawn, or pypdfium2 isn't installed, the JPEG stands
+  in, and today's page is redrawn once the PDF can be had: asked for again
+  on a backoff (``pdf_retry`` in state.json), a bounded number of times,
+  and at once on a forced refresh. The PDF leaves ``JPEG_RESERVE_S`` of an
+  edition's time for the JPEG, so a slow PDF can't starve the fallback.
 
 How a render works:
 
@@ -44,11 +54,19 @@ How a render works:
   paper per shown frame": a warm-ahead, its send and the follow-ups show one
   paper. The accepted cost: two separate sends inside the hold repeat a paper,
   and a warm-ahead that leads its send by more than the hold moves on early.
+* The ``papers`` setting is a list of rows (code, in-rotation switch, CSS),
+  edited on the settings card. The rotation remembers the paper shown and
+  the order it came from, never a position, so rows added, removed,
+  reordered or switched off while it runs can't leave it pointing past the
+  end. Each paper's CSS is sanitised here (``sanitize_css``) and applied by
+  client.js to that paper's image only.
 
 Layout under ``data_dir``::
 
-    pages/<CODE>_<YYYYMMDD>.jpg   one validated download per paper and edition
-    state.json                    paper shown + since when, download attempts and failures
+    pages/<CODE>_<YYYYMMDD>.jpg   one validated page per paper and edition (the
+                                  PDF drawn at panel width, or the JPEG)
+    state.json                    paper shown, since when and the order it came from;
+                                  download attempts and failures
     directory.json                Freedom Forum's paper list, for the editor's picker
 
 A downloaded edition is kept until it is more than ``KEEP_DAYS`` old, a newer
@@ -60,15 +78,18 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import hashlib
 import html
 import http.client
+import importlib.util
 import io
 import json
 import logging
 import math
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -76,7 +97,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -102,6 +123,7 @@ logger = logging.getLogger(__name__)
 # blueprint, so an install under another folder name still serves its pages.
 PLUGIN_ID = Path(__file__).resolve().parent.name
 
+PDF_URL = "https://cdn.freedomforum.org/dfp/pdf{day}/{code}.pdf"
 PAGE_URL = "https://cdn.freedomforum.org/dfp/jpg{day}/lg/{code}.jpg"
 SITEMAP_URL = "https://frontpages.freedomforum.org/sitemap.xml"
 USER_AGENT = f"tesserae/0.1 (+{PLUGIN_ID})"
@@ -127,6 +149,31 @@ MAX_QUEUED = 32
 # All of one job's requests (today, yesterday, the day before) together; a
 # request in flight can overrun it by one socket timeout.
 JOB_BUDGET_S = 90.0
+# The PDF rasteriser runs in a child process (rasterise_pdf): page one only,
+# at RASTER_WIDTH_PX, killed after RASTER_TIMEOUT_S of wall time, with its
+# CPU time and address space capped where the platform allows.
+RASTER_WIDTH_PX = 1440
+RASTER_TIMEOUT_S = 45.0
+# Below this much time left in the PDF's share of an edition's window, the
+# page isn't drawn (the JPEG gets its turn instead).
+RASTER_MIN_S = 5.0
+# Of an edition's DOWNLOAD_BUDGET_S, what the PDF (download and drawing)
+# leaves for the JPEG fallback, so a slow PDF can't use up the fallback's time.
+JPEG_RESERVE_S = 20.0
+# Today's page saved from the JPEG asks for its PDF again on a backoff
+# (PDF_RETRY_S, doubling, up to PDF_RETRY_MAX_S), at most PDF_MAX_TRIES
+# times an edition; a forced refresh asks at once whatever the count.
+PDF_RETRY_S = 30 * 60
+PDF_RETRY_MAX_S = 6 * 60 * 60
+PDF_MAX_TRIES = 6
+RASTER_CPU_S = 30
+RASTER_MEMORY_BYTES = 1536 * 1024 * 1024
+RASTER_MAX_ASPECT = 4.0
+MAX_PDF_BYTES = 30 * 1024 * 1024
+# A saved page narrower than this came from the JPEG fallback.
+SHARP_MIN_WIDTH_PX = 1000
+# Drawing runs inside the job's deadline; a request in flight can overrun it
+# by one socket timeout.
 JOB_WORST_S = JOB_BUDGET_S + HTTP_TIMEOUT_S
 # The host follows a push up at most this many times in a row
 # (FOLLOWUP_LIMIT in app/push.py); the hint is spread so they cover the wait.
@@ -153,9 +200,18 @@ PAGES_DIR = "pages"
 STATE_FILE = "state.json"
 DIRECTORY_FILE = "directory.json"
 
-DEFAULT_PAPERS = "NY_NYT 3.5\nWSJ 2\nUSAT\n# AZ_ADS"
+# The ``papers`` setting's default, as in plugin.json. Two papers carry the
+# printer's slug line above the masthead; their CSS moves the page up past it.
+DEFAULT_PAPERS: list[dict[str, Any]] = [
+    {"enabled": True, "code": "NY_NYT", "css": "transform: translateY(-3.5%)"},
+    {"enabled": True, "code": "WSJ", "css": "transform: translateY(-2%)"},
+    {"enabled": True, "code": "USAT", "css": ""},
+    {"enabled": False, "code": "AZ_ADS", "css": ""},
+]
+# Rows read from the setting (the settings card allows as many).
+MAX_PAPERS = 40
 
-CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _PAGE_FILE_RE = re.compile(r"^([A-Z0-9_-]+)_(\d{8})\.jpg$")
 _SITEMAP_SLUG_RE = re.compile(r"<loc>\s*https://frontpages\.freedomforum\.org/newspapers/([^<\s]+)")
 
@@ -222,11 +278,11 @@ class CdnUnreachable(Exception):
 
 @dataclass(frozen=True)
 class Paper:
-    """One line of the ``papers`` setting."""
+    """One row of the ``papers`` setting."""
 
     code: str
-    enabled: bool = True
-    trim: float = 0.0  # percent of the page height cut off the top
+    enabled: bool = True  # in the rotation; a cell pinned to it shows it anyway
+    css: str = ""  # sanitised declarations for this paper's page image
 
 
 @dataclass(frozen=True)
@@ -246,8 +302,22 @@ def clean_code(raw: Any) -> str | None:
     """A paper code as the CDN spells it (upper case), or None if it isn't one.
     Freedom Forum's own page URLs carry the code in lower case, so a code
     copied from there is accepted too."""
-    code = str(raw or "").strip().upper()
+    code = str(raw or "").strip().upper() if isinstance(raw, (str, type(None))) else ""
     return code if CODE_RE.match(code) else None
+
+
+def _flag(raw: Any, default: bool = True) -> bool:
+    """A row's ``enabled``: a real boolean from the settings card, or one of
+    the usual spellings from a hand-edited settings file."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "on", "yes")
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    return False
 
 
 def _parse_trim(raw: str) -> float | None:
@@ -258,13 +328,21 @@ def _parse_trim(raw: str) -> float | None:
     return min(max(value, 0.0), MAX_TRIM_PCT) if math.isfinite(value) else None
 
 
-def parse_papers(text: Any) -> list[Paper]:
-    """Parse the ``papers`` setting: ``CODE`` or ``CODE TRIM`` per line, ``#``
-    to disable a line. Anything else (a ``# heading`` comment, a typo) is
-    skipped rather than guessed at, and a repeated code keeps its first line."""
-    papers: list[Paper] = []
+def _trim_css(trim: float) -> str:
+    """The old per-line trim (percent of the page height cut off the top) as
+    the CSS that does the same: a translate percentage is of the element's
+    own height."""
+    return f"transform: translateY(-{trim:g}%)" if trim > 0 else ""
+
+
+def legacy_text_rows(text: str) -> list[dict[str, Any]]:
+    """Rows for the setting's old form, a textarea with ``CODE`` or
+    ``CODE TRIM`` per line and ``#`` to switch a line off. Anything else (a
+    ``# heading`` comment, a typo) is skipped rather than guessed at, and a
+    repeated code keeps its first line, so the rows always save as they are."""
+    rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for raw_line in str(text or "").splitlines():
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         enabled = not line.startswith("#")
         parts = line.lstrip("#").split()
@@ -275,8 +353,321 @@ def parse_papers(text: Any) -> list[Paper]:
         if code is None or trim is None or code in seen:
             continue
         seen.add(code)
-        papers.append(Paper(code, enabled, trim))
+        rows.append({"enabled": enabled, "code": code, "css": _trim_css(trim)})
+        if len(rows) >= MAX_PAPERS:
+            break
+    return rows
+
+
+def legacy_rows(name: str, value: Any) -> list[dict[str, Any]] | None:
+    """Host hook (app/repeater.py): the settings card shows a ``papers``
+    value saved before the setting became rows as rows; saving stores them."""
+    if name != "papers" or not isinstance(value, str):
+        return None
+    return legacy_text_rows(value)
+
+
+def _rows(value: Any) -> list[dict[str, Any]]:
+    """The setting's rows, whichever form it was saved in: the list the
+    settings card stores, the same as a JSON string, or the old text."""
+    if isinstance(value, str):
+        if not value.lstrip().startswith("["):
+            return legacy_text_rows(value)
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]
+
+
+def parse_papers(value: Any) -> list[Paper]:
+    """The ``papers`` setting as papers, in order. A row without a valid
+    code (blank, spaces, ``../x``) is skipped, and so are keys a row
+    doesn't know. A code listed twice uses its first row that is in the
+    rotation (else its first row), at the first row's place."""
+    papers: list[Paper] = []
+    at: dict[str, int] = {}
+    for row in _rows(value)[:MAX_PAPERS]:
+        code = clean_code(row.get("code"))
+        if code is None:
+            continue
+        paper = Paper(code, _flag(row.get("enabled")), sanitize_css(row.get("css")))
+        if code not in at:
+            at[code] = len(papers)
+            papers.append(paper)
+        elif paper.enabled and not papers[at[code]].enabled:
+            papers[at[code]] = paper
     return papers
+
+
+# ----- per-paper CSS ---------------------------------------------------------
+#
+# Each paper's CSS is a list of declarations applied to that paper's page
+# image and nothing else: client.js sets them as the <img>'s inline style
+# (``style.cssText``), so there is no selector, no rule and no stylesheet for
+# them to escape from, and other papers and widgets never see them. The page
+# is drawn by the headless Chromium that composes the panel's frame, so they
+# are also cut down here to a small, closed vocabulary before they reach it:
+#
+# * Only the characters CSS declarations of that vocabulary need. Anything
+#   else (``<``, ``>``, braces, quotes, backslash escapes, ``@``, ``#``,
+#   ``&``, non-ASCII, control characters) drops the paper's CSS entirely,
+#   since past that point there is no telling where a declaration ends.
+#   Comments are removed first; an unclosed one drops it all too.
+# * Each declaration is ``property: value``. The property must be in
+#   ``_CSS_PROPERTIES``; every function in the value must be in
+#   ``_CSS_FUNCTION_CONTEXT`` (no url(), image-set(), var(), attr(), env(),
+#   calc(), expression(), skew()), at most one level deep; every number must
+#   carry a unit its context allows and stay inside that context's bound
+#   (``_css_limits``: moves within half the page, sizes within twice the
+#   cell); every scale (the scale property and each of the transform's
+#   scale functions, at its largest factor, rotations notwithstanding)
+#   multiplies into one bound of ``CSS_MAX_SCALE``.
+#   A declaration that fails is dropped on its own; of two for the same
+#   property, the last one counts, as in CSS.
+# * No position, z-index or anything else that could put the page outside
+#   its cell; nothing that loads anything. The ``translate`` property is
+#   client.js's, to put the page on whole pixels; ``transform: translate()``
+#   does what a paper needs.
+
+CSS_MAX_CHARS = 1000
+CSS_MAX_DECLARATIONS = 12
+CSS_MAX_VALUE_CHARS = 200
+CSS_MAX_FUNCTIONS = 6
+# How far the page may be enlarged: every scale in its CSS multiplied
+# together at its largest factor (see _css_value).
+CSS_MAX_SCALE = 3.0
+
+_CSS_PROPERTIES = frozenset(
+    {
+        "filter",
+        "opacity",
+        "transform",
+        "transform-origin",
+        "scale",
+        "rotate",
+        "object-fit",
+        "object-position",
+        "margin",
+        "margin-top",
+        "margin-right",
+        "margin-bottom",
+        "margin-left",
+        "width",
+        "height",
+        "max-width",
+        "max-height",
+        "min-width",
+        "min-height",
+        "clip-path",
+        "image-rendering",
+    }
+)
+# Every number is read in a context, which bounds it: the function it sits
+# in, else its property. A number with no context (``transform: 5px``) is
+# refused. Skew isn't offered: near 90deg it stretches the page without
+# bound, and a newspaper page has no use for it.
+_CSS_FUNCTION_CONTEXT: dict[str, str] = {
+    "translate": "move",
+    "translatex": "move",
+    "translatey": "move",
+    "scale": "scale",
+    "scalex": "scale",
+    "scaley": "scale",
+    "rotate": "angle",
+    "hue-rotate": "angle",
+    "brightness": "tone",
+    "contrast": "tone",
+    "grayscale": "tone",
+    "invert": "tone",
+    "opacity": "tone",
+    "saturate": "tone",
+    "sepia": "tone",
+    "inset": "place",
+}
+_CSS_PROPERTY_CONTEXT: dict[str, str] = {
+    "scale": "scale",
+    "rotate": "angle",
+    "opacity": "tone",
+    "margin": "move",
+    "margin-top": "move",
+    "margin-right": "move",
+    "margin-bottom": "move",
+    "margin-left": "move",
+    "width": "size",
+    "height": "size",
+    "max-width": "size",
+    "max-height": "size",
+    "min-width": "size",
+    "min-height": "size",
+    "object-position": "place",
+    "transform-origin": "place",
+}
+_CSS_VIEWPORT_UNITS = ("vw", "vh", "vmin", "vmax")
+
+
+def _css_limits(context: str) -> Mapping[str, float]:
+    """The largest magnitude a number may have in ``context``, per unit
+    ("" is unitless). A unit not listed is refused. Moves stay within half
+    the page, sizes within twice the cell; a bare 0 is the only unitless
+    length."""
+    if context == "move":
+        return {"": 0, "%": 50, "px": 1000, "em": 50, "rem": 50} | dict.fromkeys(
+            _CSS_VIEWPORT_UNITS, 50
+        )
+    if context == "size":
+        return {"": 0, "%": 200, "px": 3000, "em": 100, "rem": 100} | dict.fromkeys(
+            _CSS_VIEWPORT_UNITS, 200
+        )
+    if context == "place":
+        return {"": 0, "%": 100, "px": 3000, "em": 100, "rem": 100} | dict.fromkeys(
+            _CSS_VIEWPORT_UNITS, 100
+        )
+    if context == "angle":
+        return {"": 0, "deg": 360, "turn": 1, "rad": 6.3, "grad": 400}
+    if context == "tone":
+        return {"": 4, "%": 400}
+    if context == "scale":
+        return {"": CSS_MAX_SCALE, "%": 100 * CSS_MAX_SCALE}
+    return {}
+
+
+_CSS_CHARS_RE = re.compile(r"^[A-Za-z0-9 \t\r\n.,:;%()+\-!/*]*$")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+# Matched against a stripped chunk, so the value needs no lazy trailing
+# whitespace match (which goes quadratic on a long run of spaces).
+_CSS_DECLARATION_RE = re.compile(r"^([A-Za-z-]+)\s*:\s*(.+)$", re.S)
+_CSS_TOKEN_RE = re.compile(
+    r"""
+      (?P<ws>\s+)
+    | (?P<func>[A-Za-z][A-Za-z0-9-]*)\(
+    | (?P<close>\))
+    | (?P<comma>,)
+    | (?P<num>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?P<unit>%|[A-Za-z]+)?
+    | (?P<ident>-?[A-Za-z][A-Za-z0-9-]*)
+    """,
+    re.X,
+)
+
+
+def _scale_factor(name: str, factors: list[float]) -> float | None:
+    """How much one scale (a ``scale*()`` function's arguments, or the
+    scale property's values) can enlarge the page: its largest factor, and
+    never less than 1, since shrinking one axis doesn't make up for
+    growing another. None for a third (z) value or no value at all."""
+    expected = (1,) if name in ("scalex", "scaley") else (1, 2)
+    if len(factors) not in expected:
+        return None
+    return max(1.0, *factors)
+
+
+def _css_value(prop: str, value: str) -> float | None:
+    """Check one declaration's value; how much it can enlarge the page (1
+    for not at all) when it's allowed, else None. The bound is
+    deliberately coarse: every scale in the value multiplies in at its
+    largest factor, whatever lies between (a rotate turns one axis's scale
+    into the other's, so per-axis sums can't be trusted)."""
+    if len(value) > CSS_MAX_VALUE_CHARS:
+        return None
+    pos, functions, growth = 0, 0, 1.0
+    current: str | None = None  # the function we're inside, if any
+    factors: list[float] = []  # scale values seen in the current scope
+    while pos < len(value):
+        match = _CSS_TOKEN_RE.match(value, pos)
+        if match is None:
+            return None
+        pos = match.end()
+        if match.group("func"):
+            name = match.group("func").lower()
+            functions += 1
+            if current is not None or name not in _CSS_FUNCTION_CONTEXT:
+                return None
+            if functions > CSS_MAX_FUNCTIONS:
+                return None
+            current, factors = name, []
+        elif match.group("close"):
+            if current is None:
+                return None
+            if _CSS_FUNCTION_CONTEXT[current] == "scale":
+                factor = _scale_factor(current, factors)
+                if factor is None:
+                    return None
+                growth *= factor
+            current, factors = None, []
+        elif match.group("num"):
+            context = (
+                _CSS_FUNCTION_CONTEXT[current]
+                if current is not None
+                else _CSS_PROPERTY_CONTEXT.get(prop)
+            )
+            unit = (match.group("unit") or "").lower()
+            limit = _css_limits(context or "").get(unit)
+            try:
+                number = float(match.group("num"))
+            except ValueError:
+                return None
+            if limit is None or not math.isfinite(number) or abs(number) > limit:
+                return None
+            if context == "scale":
+                factors.append(abs(number) / 100 if unit == "%" else abs(number))
+    if current is not None:
+        return None
+    if prop == "scale" and factors:
+        factor = _scale_factor("scale", factors)
+        if factor is None:
+            return None
+        growth *= factor
+    return growth if growth <= CSS_MAX_SCALE else None
+
+
+def _without_important(value: str) -> str:
+    head, bang, tail = value.rpartition("!")
+    return head.rstrip() if bang and tail.strip().lower() == "important" else value
+
+
+def sanitize_css(raw: Any) -> str:
+    """``raw`` cut down to the declarations it's safe to give one paper's
+    page image, re-serialised as ``prop: value; prop: value``; "" when
+    nothing survives. See the notes above for what survives."""
+    if not isinstance(raw, str) or len(raw) > CSS_MAX_CHARS:
+        return ""
+    return _sanitize_css(raw)
+
+
+@functools.lru_cache(maxsize=256)
+def _sanitize_css(raw: str) -> str:
+    """sanitize_css for a string, remembered: every render reads every
+    paper's CSS, and it only changes when the settings do."""
+    if not _CSS_CHARS_RE.match(raw):
+        return ""
+    text = _CSS_COMMENT_RE.sub(" ", raw)
+    if "/*" in text or "*/" in text:
+        return ""
+    # The last declaration of a property is the one that applies, as in CSS.
+    kept: dict[str, tuple[str, float]] = {}
+    for chunk in text.split(";"):
+        match = _CSS_DECLARATION_RE.match(chunk.strip())
+        if match is None:
+            continue
+        prop = match.group(1).lower()
+        value = _without_important(match.group(2))
+        scale = _css_value(prop, value) if prop in _CSS_PROPERTIES and value else None
+        if scale is not None:
+            kept.pop(prop, None)
+            kept[prop] = (" ".join(value.split()), scale)
+    # The scale property and the transform's scale functions multiply: past
+    # the bound together, the scale property goes.
+    if (
+        "scale" in kept
+        and "transform" in kept
+        and kept["scale"][1] * kept["transform"][1] > CSS_MAX_SCALE
+    ):
+        del kept["scale"]
+    return "; ".join(
+        f"{prop}: {value}" for prop, (value, _) in list(kept.items())[:CSS_MAX_DECLARATIONS]
+    )
 
 
 # ----- small file helpers ----------------------------------------------------
@@ -362,18 +753,18 @@ def page_size(body: bytes) -> tuple[int, int] | None:
     return size if fmt in ("JPEG", "PNG") and min(size) >= MIN_IMAGE_EDGE_PX else None
 
 
-def _read_capped(resp: Any, deadline: float) -> bytes:
-    """The body, stopping one byte past ``MAX_IMAGE_BYTES`` and at ``deadline``.
+def _read_capped(resp: Any, deadline: float, cap: int = MAX_IMAGE_BYTES) -> bytes:
+    """The body, stopping one byte past ``cap`` and at ``deadline``.
     ``read1`` returns whatever one socket read brings, where ``read(n)`` would
     wait for all n bytes, so the deadline is checked at least once per
     ``HTTP_TIMEOUT_S`` however slowly the bytes arrive."""
     read = getattr(resp, "read1", None) or resp.read
     chunks: list[bytes] = []
     total = 0
-    while total <= MAX_IMAGE_BYTES:
+    while total <= cap:
         if _clock() >= deadline:
             raise CdnUnreachable("download too slow")
-        chunk = read(min(READ_CHUNK_BYTES, MAX_IMAGE_BYTES + 1 - total))
+        chunk = read(min(READ_CHUNK_BYTES, cap + 1 - total))
         if not chunk:
             break
         chunks.append(chunk)
@@ -381,20 +772,17 @@ def _read_capped(resp: Any, deadline: float) -> bytes:
     return b"".join(chunks)
 
 
-def download_edition(code: str, day: date, deadline: float | None = None) -> bytes | None:
-    """The ``code`` front page for ``day``, validated, or None when that
-    edition isn't there. Raises :class:`CdnUnreachable` when the CDN fails or
-    ``deadline`` (on ``_clock``; at most ``DOWNLOAD_BUDGET_S`` away) passes."""
-    deadline = min(deadline or math.inf, _clock() + DOWNLOAD_BUDGET_S)
+def _get(url: str, deadline: float, cap: int, accept: str) -> tuple[bytes, str | None] | None:
+    """The body (at most ``cap`` + 1 bytes) and its Last-Modified, or None on
+    a 404. Raises :class:`CdnUnreachable` when the CDN fails or ``deadline``
+    (on ``_clock``; at most ``DOWNLOAD_BUDGET_S`` away) passes."""
+    deadline = min(deadline, _clock() + DOWNLOAD_BUDGET_S)
     if deadline <= _clock():
         raise CdnUnreachable("out of time")
-    url = PAGE_URL.format(day=day.day, code=code)
-    request = urllib.request.Request(
-        url, headers={"User-Agent": USER_AGENT, "Accept": "image/jpeg,image/*;q=0.8"}
-    )
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as resp:
-            body = _read_capped(resp, deadline)
+            body = _read_capped(resp, deadline, cap)
             headers = getattr(resp, "headers", None)
             last_modified = headers.get("Last-Modified") if headers is not None else None
     except urllib.error.HTTPError as err:
@@ -405,6 +793,156 @@ def download_edition(code: str, day: date, deadline: float | None = None) -> byt
     except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as err:
         # HTTPException covers a response cut off mid-body (IncompleteRead).
         raise CdnUnreachable(str(getattr(err, "reason", None) or err)) from err
+    return body, last_modified
+
+
+# Runs in a child process (``python -I -c``), so a PDF that hangs, crashes
+# or balloons the rasteriser takes down that process, never the server. It
+# caps its own address space and CPU time first (where ``resource`` exists:
+# Linux and macOS), reads the PDF from stdin and writes page one as a JPEG,
+# ``argv[1]`` pixels wide, to stdout. Exit 3 is a PDF it won't draw.
+_RASTER_CHILD = r"""
+import io
+import sys
+
+width, memory, cpu, max_aspect = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
+try:
+    import resource
+except ImportError:
+    resource = None
+if resource is not None:
+    for name, value in (("RLIMIT_AS", memory), ("RLIMIT_CPU", cpu)):
+        limit = getattr(resource, name, None)
+        if limit is not None:
+            try:
+                resource.setrlimit(limit, (value, value))
+            except (ValueError, OSError):
+                pass
+import pypdfium2
+document = pypdfium2.PdfDocument(sys.stdin.buffer.read())
+if len(document) < 1:
+    sys.exit(3)
+page = document[0]
+w, h = page.get_size()
+if not (w > 0 and h > 0) or h / w > max_aspect or w / h > max_aspect:
+    sys.exit(3)
+image = page.render(scale=width / w).to_pil().convert("RGB")
+out = io.BytesIO()
+image.save(out, "JPEG", quality=90, subsampling=0, optimize=True)
+sys.stdout.buffer.write(out.getvalue())
+"""
+
+
+@functools.cache
+def rasteriser_available() -> bool:
+    """Whether pypdfium2 is installed (a core dependency, but an older
+    install may not have it yet). Looked up, not imported: only the child
+    process ever loads it."""
+    return importlib.util.find_spec("pypdfium2") is not None
+
+
+def rasterise_pdf(
+    body: bytes, width: int = RASTER_WIDTH_PX, timeout: float = RASTER_TIMEOUT_S
+) -> bytes | None:
+    """Page one of the PDF ``body`` as a JPEG ``width`` pixels wide, drawn
+    at that width from the PDF's own vectors and fonts (never an upscaled
+    bitmap), or None when it can't be drawn: no rasteriser, a broken or odd
+    PDF, the child over its time or memory. Blocks for at most ``timeout``
+    (and never more than ``RASTER_TIMEOUT_S``); the worker thread is the
+    only caller."""
+    timeout = min(timeout, RASTER_TIMEOUT_S)
+    if not rasteriser_available() or timeout <= 0:
+        return None
+    command = [
+        sys.executable,
+        "-I",
+        "-c",
+        _RASTER_CHILD,
+        str(width),
+        str(RASTER_MEMORY_BYTES),
+        str(RASTER_CPU_S),
+        str(RASTER_MAX_ASPECT),
+    ]
+    try:
+        done = subprocess.run(
+            command, input=body, capture_output=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("%s: PDF rasteriser timed out", PLUGIN_ID)
+        return None
+    except (OSError, ValueError) as err:
+        logger.warning("%s: PDF rasteriser didn't start: %s", PLUGIN_ID, err)
+        return None
+    if done.returncode != 0:
+        detail = done.stderr[-300:].decode("utf-8", "replace").strip()
+        logger.warning("%s: PDF rasteriser failed (%s) %s", PLUGIN_ID, done.returncode, detail)
+        return None
+    size = page_size(done.stdout)
+    if size is None or abs(size[0] - width) > 2:
+        logger.warning("%s: PDF rasteriser returned no usable page", PLUGIN_ID)
+        return None
+    return done.stdout
+
+
+def _pdf_edition(code: str, day: date, deadline: float, *, quiet: bool) -> bytes | None:
+    """The ``code`` front page for ``day`` drawn from its PDF, or None when
+    there's no PDF or it can't be drawn. With ``quiet`` a CDN failure is a
+    None too, and the JPEG fallback after it decides whether Freedom Forum
+    is reachable; without, it raises :class:`CdnUnreachable`."""
+    try:
+        got = _get(
+            PDF_URL.format(day=day.day, code=code), deadline, MAX_PDF_BYTES, "application/pdf"
+        )
+    except CdnUnreachable as err:
+        if not quiet:
+            raise
+        logger.info("%s: %s PDF for %s unavailable (%s)", PLUGIN_ID, code, day, err)
+        return None
+    if got is None:
+        return None
+    body, last_modified = got
+    if len(body) > MAX_PDF_BYTES or _slot_is_stale(last_modified, day):
+        logger.info("%s: %s PDF for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
+        return None
+    if not body.startswith(b"%PDF"):
+        logger.info("%s: %s PDF for %s is not a PDF", PLUGIN_ID, code, day)
+        return None
+    left = deadline - _clock()
+    if left < RASTER_MIN_S:
+        logger.info("%s: no time left to draw the %s PDF for %s", PLUGIN_ID, code, day)
+        return None
+    return rasterise_pdf(body, timeout=left)
+
+
+def download_edition(
+    code: str, day: date, deadline: float | None = None, *, pdf_only: bool = False
+) -> bytes | None:
+    """The ``code`` front page for ``day``, validated, or None when that
+    edition isn't there. The PDF comes first, drawn at panel width; the
+    ``lg`` JPEG (about 700 px wide) is the fallback, skipped when
+    ``pdf_only``. The two share one ``DOWNLOAD_BUDGET_S`` window (and
+    ``deadline``, on ``_clock``), of which the PDF, download and drawing
+    together, leaves ``JPEG_RESERVE_S`` for the JPEG. Raises
+    :class:`CdnUnreachable` when the CDN fails or the time runs out."""
+    deadline = min(deadline if deadline is not None else math.inf, _clock() + DOWNLOAD_BUDGET_S)
+    if deadline <= _clock():
+        raise CdnUnreachable("out of time")
+    if pdf_only:
+        return _pdf_edition(code, day, deadline, quiet=False) if rasteriser_available() else None
+    pdf_deadline = deadline - JPEG_RESERVE_S
+    if rasteriser_available() and pdf_deadline > _clock():
+        sharp = _pdf_edition(code, day, pdf_deadline, quiet=True)
+        if sharp is not None:
+            return sharp
+    got = _get(
+        PAGE_URL.format(day=day.day, code=code),
+        deadline,
+        MAX_IMAGE_BYTES,
+        "image/jpeg,image/*;q=0.8",
+    )
+    if got is None:
+        return None
+    body, last_modified = got
     if len(body) > MAX_IMAGE_BYTES or _slot_is_stale(last_modified, day):
         logger.info("%s: %s for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
         return None
@@ -489,13 +1027,70 @@ def prune(pages: Path, today: date, now: float) -> None:
             _unlink_if_same(path, identity)
 
 
+def _saved_width(path: Path) -> int | None:
+    """A saved page's width from its header alone (no decode), or None."""
+    try:
+        with Image.open(path) as img:
+            return int(img.size[0])
+    except Exception:  # missing, half-written, not an image
+        return None
+
+
+def _pdf_retry(state: dict[str, Any], code: str, day: date) -> tuple[int, float]:
+    """How many times the PDF of ``code``'s ``day`` edition has been asked
+    for and failed, and when it may be asked for again (wall time)."""
+    entry = _section(state, "pdf_retry").get(code)
+    if not isinstance(entry, dict) or entry.get("day") != day.isoformat():
+        return 0, 0.0
+    tries, after = entry.get("tries"), entry.get("after")
+    if isinstance(tries, bool) or not isinstance(tries, int) or not isinstance(after, (int, float)):
+        return 0, 0.0
+    return tries, float(after)
+
+
+def _wants_sharper(
+    code: str, day: date, width: int | None, state: dict[str, Any], now: float, force: bool
+) -> bool:
+    """Whether the saved ``day`` page of ``code``, ``width`` pixels wide, is
+    the blurry JPEG fallback and its PDF may be asked for now. A PDF that
+    wasn't there (not out yet, say) or didn't draw is asked for again on a
+    backoff, up to ``PDF_MAX_TRIES`` times an edition; a forced refresh asks
+    at once. Pages saved before the PDF path existed are of this kind too,
+    so today's are redrawn; older ones age out."""
+    if width is None or width >= SHARP_MIN_WIDTH_PX or not rasteriser_available():
+        return False
+    if force:
+        return True
+    tries, after = _pdf_retry(state, code, day)
+    return tries < PDF_MAX_TRIES and now >= after
+
+
 # ----- rotation --------------------------------------------------------------
 
 
-def rotation(enabled: list[str], last: str | None) -> list[str]:
-    """Enabled codes from the one after ``last`` on round the list, ``last`` at the end."""
-    start = enabled.index(last) + 1 if last in enabled else 0
+def rotation(enabled: list[str], last: str | None, previous: list[str] | None = None) -> list[str]:
+    """Enabled codes from the one after ``last`` on round the list, ``last``
+    at the end. The rotation remembers papers, not a position, so an edited
+    list can't leave it pointing past the end. When ``last`` has left the
+    list (removed, switched off, its code edited), the rotation resumes at
+    the first paper still listed that came after it in ``previous``, the
+    order it was shown from, rather than starting over."""
+    if last in enabled:
+        start = enabled.index(last) + 1
+    elif previous and last in previous:
+        at = previous.index(last)
+        after = previous[at + 1 :] + previous[:at]
+        resume = next((code for code in after if code in enabled), None)
+        start = enabled.index(resume) if resume is not None else 0
+    else:
+        start = 0
     return enabled[start:] + enabled[:start]
+
+
+def _codes(raw: Any) -> list[str] | None:
+    if not isinstance(raw, list):
+        return None
+    return [code for code in raw if isinstance(code, str)][:MAX_PAPERS]
 
 
 def plan(enabled: list[str], state: dict[str, Any], now: float) -> tuple[list[str], str | None]:
@@ -506,7 +1101,7 @@ def plan(enabled: list[str], state: dict[str, Any], now: float) -> tuple[list[st
     current = state.get("current")
     current = current if isinstance(current, str) else None
     since = state.get("since")
-    order = rotation(enabled, current)
+    order = rotation(enabled, current, _codes(state.get("order")))
     held = isinstance(since, (int, float)) and 0 <= now - since < ROTATION_HOLD_S
     if current in enabled and held:
         return [current, *order[:-1]], current
@@ -681,7 +1276,9 @@ def _work(run: _Run) -> None:
 
 def _refresh(data_dir: Path, job: _Job) -> None:
     """One job: look at the state again (the render that queued it read it
-    before earlier jobs landed), download outside the lock, save under it."""
+    before earlier jobs landed), download outside the lock, save under it.
+    Today's page already saved as the blurry JPEG fallback is redrawn from
+    the PDF when that may now work (``_wants_sharper``)."""
     pages = data_dir / PAGES_DIR
     state_path = data_dir / STATE_FILE
     with _LOCK:
@@ -689,17 +1286,23 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if not job.force and _recently_checked(state, job.code, _wall()):
             return
         have = newest_page(pages, job.code, job.today)
-    if have is not None and have.day >= job.today:
+    current = have is not None and have.day >= job.today
+    sharpen = (
+        current
+        and have is not None
+        and _wants_sharper(job.code, have.day, have.width, state, _wall(), job.force)
+    )
+    if current and not sharpen:
         return
     saved: tuple[date, bytes] | None = None
     failure = "missing"
     deadline = _clock() + JOB_BUDGET_S
     for back in range(LOOKBACK_DAYS):
         day = job.today - timedelta(days=back)
-        if have is not None and day <= have.day:
+        if have is not None and (day < have.day or (day == have.day and not sharpen)):
             break  # nothing older can beat an edition already kept
         try:
-            body = download_edition(job.code, day, deadline)
+            body = download_edition(job.code, day, deadline, pdf_only=sharpen)
         except Exception as err:  # CdnUnreachable, or the host refusing the egress
             logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
             failure = "unreachable"
@@ -707,6 +1310,19 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if body is not None:
             saved = (day, body)
             break
+    # The edition left on its JPEG by this job, whose PDF is asked for again
+    # later: a JPEG saved in its place, or a redraw that came to nothing
+    # (no PDF yet, one that didn't draw, an outage).
+    blurry_day: date | None = None
+    sharp_day: date | None = None
+    if saved is not None and rasteriser_available():
+        size = page_size(saved[1])
+        if size is not None and size[0] < SHARP_MIN_WIDTH_PX:
+            blurry_day = saved[0]
+        else:
+            sharp_day = saved[0]
+    elif sharpen and saved is None and have is not None:
+        blurry_day = have.day
     now = _wall()
     with _LOCK:
         if saved is not None:
@@ -728,6 +1344,22 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if saved is None and have is None:
             failed[job.code] = failure
         state["failed"] = failed
+        oldest = (job.today - timedelta(days=LOOKBACK_DAYS)).isoformat()
+        retry = {
+            code: entry
+            for code, entry in _section(state, "pdf_retry").items()
+            if isinstance(entry, dict)
+            and isinstance(entry.get("day"), str)
+            and entry["day"] >= oldest
+        }
+        if blurry_day is not None:
+            tries = _pdf_retry(state, job.code, blurry_day)[0] + 1
+            wait = min(PDF_RETRY_S * 2 ** min(tries - 1, 16), PDF_RETRY_MAX_S)
+            retry[job.code] = {"day": blurry_day.isoformat(), "tries": tries, "after": now + wait}
+        elif sharp_day is not None:
+            retry.pop(job.code, None)
+        state["pdf_retry"] = retry
+        state.pop("jpeg_only", None)  # this file's earlier, give-up-for-the-day record
         _write_json(state_path, state)
 
 
@@ -806,12 +1438,23 @@ def _select(
         # next but never moves the rotation; repeating the held paper doesn't either.
         if chosen and not pinned and not preview and chosen[0] != held:
             state["current"], state["since"] = chosen[0], now
+            state["order"] = list(candidates)  # where to resume if the list changes
             _write_json(state_path, state)
         due = [
             code
             for code in candidates
-            if not edition_path(pages, code, today).is_file()
-            and (force or not _recently_checked(state, code, now))
+            if (force or not _recently_checked(state, code, now))
+            and (
+                not edition_path(pages, code, today).is_file()
+                or _wants_sharper(
+                    code,
+                    today,
+                    _saved_width(edition_path(pages, code, today)),
+                    state,
+                    now,
+                    force,
+                )
+            )
         ]
     finally:
         _LOCK.release()
@@ -829,12 +1472,13 @@ def fetch(
     pinned_raw = str(options.get("paper") or "").strip()
     pinned = clean_code(pinned_raw) if pinned_raw else None
     if pinned_raw and pinned is None:
-        return {"error": f"'{pinned_raw}' isn't a Freedom Forum paper code."}
+        return {"error": f"'{pinned_raw[:60]}' isn't a Freedom Forum paper code."}
     candidates = [pinned] if pinned else [p.code for p in papers if p.enabled]
     if not candidates:
-        return {
-            "error": "No papers to show. Add paper codes under Settings → Widgets → News, Front Pages."
-        }
+        where = "under Settings → Widgets → News, Front Pages"
+        if papers:
+            return {"error": f"Every paper in the list is switched off. Turn one on {where}."}
+        return {"error": f"No papers to show. Add paper codes {where}."}
 
     data_dir = Path(ctx["data_dir"])
     today = _edition_today()
@@ -873,14 +1517,19 @@ def fetch(
         return _missing_error(candidates, picked.state, pinned)
 
     code, page = picked.chosen
-    trims = {p.code: p.trim for p in papers}
+    styles = {p.code: p.css for p in papers}
     payload: dict[str, Any] = {
-        "url": f"/plugins/{PLUGIN_ID}/page/{page.path.name}",
+        # The width tells a JPEG-fallback page from its sharp redraw, which
+        # replaces it under the same name: a browser holding the first (the
+        # route lets it keep a page a day) fetches the second.
+        "url": f"/plugins/{PLUGIN_ID}/page/{page.path.name}?w={page.width}",
         "code": code,
         "date": page.day.isoformat(),
         "width": page.width,
         "height": page.height,
-        "trim": trims.get(code, 0.0),
+        # This paper's own CSS, sanitised (see sanitize_css); a pinned paper
+        # uses its row's CSS too, whether or not the row is in the rotation.
+        "css": styles.get(code, ""),
     }
     _LAST_CLAIMED[key] = (now, payload)
     if code in line:
@@ -949,10 +1598,14 @@ def choices(name: str) -> list[dict[str, str]]:
     plugin = _plugin()
     names = directory(Path(plugin.data_dir)) if plugin is not None else dict(FALLBACK_DIRECTORY)
     rows = [{"value": "", "label": "Rotate through the paper list"}]
-    listed = [p.code for p in parse_papers(_settings().get("papers", DEFAULT_PAPERS))]
+    papers = parse_papers(_settings().get("papers", DEFAULT_PAPERS))
+    listed = [p.code for p in papers]
+    off = {p.code for p in papers if not p.enabled}
     rest = sorted((c for c in names if c not in listed), key=lambda c: names[c].casefold())
     for code in [*listed, *rest]:
         label = f"{names[code]} ({code})" if code in names else code
+        if code in off:
+            label += ", not in the rotation"
         rows.append({"value": code, "label": label})
     return rows
 

@@ -400,6 +400,106 @@ macro here instead.
 </div>
 {%- endmacro -%}
 
+{#- Repeater (``type: "repeater"``, app/repeater.py): a list of rows, each
+   with the sub-fields the manifest declares, added, removed and moved up
+   and down. The hidden input is what the form submits: the rows as JSON,
+   which static/components.js#attachRepeaters rewrites on every edit. The
+   row controls carry no ``name``, so they never reach the form data on
+   their own. Rows are drawn here so they show before any script runs; the
+   <template> is one empty row for the Add button. ``__i__`` in its ids is
+   replaced per new row. -#}
+{%- macro _repeater_row(field_id, view, row, idx, form=None) -%}
+<li class="repeater-row" data-repeater-row>
+  <div class="repeater-row-fields">
+  {%- for sub in view.subs %}
+    {%- set cid = field_id ~ '-' ~ idx ~ '-' ~ sub.name %}
+    {%- set val = row.get(sub.name) %}
+    {%- if sub.type == 'boolean' %}
+    <div class="field field--switch repeater-sub repeater-sub--boolean">
+      <label class="switch" for="{{ cid }}">
+        <input type="checkbox" id="{{ cid }}" data-repeater-key="{{ sub.name }}" data-repeater-type="boolean"
+               {% if form %}form="{{ form }}"{% endif %}{% if val %} checked{% endif %}>
+        <span class="switch-track"><span class="switch-thumb"></span></span>
+        <span class="switch-label">{{ sub.label }}</span>
+      </label>{{ info_pop(sub.get('help')) }}
+    </div>
+    {%- else %}
+    <div class="field repeater-sub repeater-sub--{{ sub.type }}">
+      <label for="{{ cid }}">{{ sub.label }}{{ info_pop(sub.get('help')) }}</label>
+      {%- if sub.type == 'textarea' %}
+      <textarea id="{{ cid }}" rows="{{ sub.rows }}" maxlength="{{ sub.max_length }}"
+                data-repeater-key="{{ sub.name }}" data-repeater-type="textarea"
+                autocomplete="off" autocapitalize="off" spellcheck="false"
+                {% if sub.get('monospace') %}class="is-mono"{% endif %}
+                {% if sub.get('placeholder') %}placeholder="{{ sub.placeholder }}"{% endif %}
+                {% if sub.get('required') %}required{% endif %}
+                {% if form %}form="{{ form }}"{% endif %}>
+{{ val if val is not none else '' }}</textarea>
+      {%- elif sub.type == 'number' %}
+      <input type="number" id="{{ cid }}" value="{{ '' if val is none else val }}"
+             data-repeater-key="{{ sub.name }}" data-repeater-type="number" autocomplete="off"
+             {% if sub.get('min') is not none %}min="{{ sub.min }}"{% endif %}
+             {% if sub.get('max') is not none %}max="{{ sub.max }}"{% endif %}
+             step="{{ sub.get('step', 'any') }}"
+             {% if sub.get('required') %}required{% endif %}
+             {% if form %}form="{{ form }}"{% endif %}>
+      {%- elif sub.type == 'select' %}
+      <select id="{{ cid }}" data-repeater-key="{{ sub.name }}" data-repeater-type="select"
+              {% if sub.get('required') %}required{% endif %}
+              {% if form %}form="{{ form }}"{% endif %}>
+        {%- for choice in sub.choices %}
+        <option value="{{ choice.value }}"{% if choice.value|string == val|string %} selected{% endif %}>{{ choice.get('label', choice.value) }}</option>
+        {%- endfor %}
+      </select>
+      {%- else %}
+      <input type="text" id="{{ cid }}" value="{{ val if val is not none else '' }}"
+             maxlength="{{ sub.max_length }}"
+             data-repeater-key="{{ sub.name }}" data-repeater-type="string"
+             autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+             {% if sub.get('placeholder') %}placeholder="{{ sub.placeholder }}"{% endif %}
+             {% if sub.get('pattern') %}pattern="{{ sub.pattern }}"{% endif %}
+             {% if sub.get('pattern_hint') %}title="{{ sub.pattern_hint }}"{% endif %}
+             {% if sub.get('required') %}required{% endif %}
+             {% if form %}form="{{ form }}"{% endif %}>
+      {%- endif %}
+    </div>
+    {%- endif %}
+  {%- endfor %}
+  </div>
+  <div class="repeater-row-actions">
+    <button type="button" class="ghost repeater-btn" data-repeater-up aria-label="Move {{ view.row_label }} up" title="Move up"><i class="ph ph-arrow-up" aria-hidden="true"></i></button>
+    <button type="button" class="ghost repeater-btn" data-repeater-down aria-label="Move {{ view.row_label }} down" title="Move down"><i class="ph ph-arrow-down" aria-hidden="true"></i></button>
+    <button type="button" class="ghost danger repeater-btn" data-repeater-remove aria-label="Remove {{ view.row_label }}" title="Remove"><i class="ph ph-trash" aria-hidden="true"></i></button>
+  </div>
+</li>
+{%- endmacro -%}
+
+{%- macro repeater_field(field_id, name, label, spec, value=None, help=None, form=None) -%}
+{%- set view = repeater_view(spec, value) -%}
+<div class="field field--repeater" data-repeater role="group" aria-labelledby="{{ field_id }}-label"
+     data-repeater-min="{{ view.min_rows }}" data-repeater-max="{{ view.max_rows }}"
+     data-repeater-row-label="{{ view.row_label }}" data-repeater-id="{{ field_id }}">
+  <span class="field-label" id="{{ field_id }}-label">{{ label }}{{ info_pop(help) }}</span>
+  <input type="hidden" name="{{ name }}" value="{{ view.rows|tojson|forceescape }}"
+         data-repeater-storage {% if form %}form="{{ form }}"{% endif %}>
+  <ol class="repeater-list" data-repeater-list>
+    {%- for row in view.rows %}
+    {{ _repeater_row(field_id, view, row, loop.index0, form) }}
+    {%- endfor %}
+  </ol>
+  <p class="repeater-empty" data-repeater-empty{% if view.rows %} hidden{% endif %}>Nothing here yet.</p>
+  <template data-repeater-template>{{ _repeater_row(field_id, view, view.defaults, '__i__', form) }}</template>
+  <div class="repeater-foot">
+    <button type="button" class="repeater-add" data-repeater-add
+            {% if view.rows|length >= view.max_rows %}aria-disabled="true"{% endif %}>
+      <i class="ph ph-plus" aria-hidden="true"></i><span>{{ view.add_label }}</span>
+    </button>
+    <span class="repeater-count" data-repeater-count>{{ view.rows|length }} of at most {{ view.max_rows }}</span>
+  </div>
+  <span class="sr-only" data-repeater-status aria-live="polite"></span>
+</div>
+{%- endmacro -%}
+
 {#- Location search: a text input + autocomplete dropdown that calls
    Open-Meteo's free geocoding endpoint and stores the chosen result
    as a JSON-encoded dict in a hidden input. The dict shape is what the
@@ -735,6 +835,8 @@ macro here instead.
                                 help=help_text) }}
   {% elif ftype == 'entity_overrides' %}
     {{ entity_overrides_field(field_id, name, label, value=value, help=help_text, formats=spec.get('formats', False)) }}
+  {% elif ftype == 'repeater' and repeater_view(spec, value).usable %}
+    {{ repeater_field(field_id, name, label, spec, value=value, help=help_text, form=form) }}
   {% elif ftype == 'location_search' %}
     {{ location_search_field(field_id, name, label, value=value, help=help_text) }}
   {% elif ftype == 'ha_device_picker' %}

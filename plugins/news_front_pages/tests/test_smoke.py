@@ -7,10 +7,13 @@ everything else."""
 from __future__ import annotations
 
 import contextvars
+import html
 import http.client
 import importlib.util
 import io
+import json
 import os
+import re
 import sys
 import threading
 import time
@@ -28,6 +31,7 @@ from flask import Flask
 from flask.testing import FlaskClient
 from PIL import Image
 
+from app import repeater
 from plugins.news_front_pages import server
 
 TODAY = date(2026, 10, 25)
@@ -109,6 +113,7 @@ class FakeCdn:
     def __init__(self, pages: dict[str, bytes | _Resp] | None = None) -> None:
         self.pages = pages or {}
         self.calls: list[str] = []
+        self.agents: list[str | None] = []
         self.down = False
         self.gate: threading.Event | None = None
         self.contexts: list[str] = []
@@ -116,6 +121,7 @@ class FakeCdn:
     def __call__(self, req: Any, timeout: float | None = None) -> _Resp:
         url = req if isinstance(req, str) else req.full_url
         self.calls.append(url)
+        self.agents.append(None if isinstance(req, str) else req.get_header("User-agent"))
         self.contexts.append(CONTEXT_PROBE.get())
         if self.gate is not None:
             assert self.gate.wait(10), "test gate never opened"
@@ -137,8 +143,11 @@ def clocks(monkeypatch: pytest.MonkeyPatch) -> Clocks:
 
 @pytest.fixture
 def cdn(monkeypatch: pytest.MonkeyPatch, clocks: Clocks, tmp_path: Path) -> Iterator[FakeCdn]:
+    """Freedom Forum, faked. The PDF rasteriser is off here, so these tests
+    see the JPEG path alone; the ``pdf`` fixture turns it on."""
     fake = FakeCdn()
     monkeypatch.setattr(server, "_edition_today", lambda: TODAY)
+    monkeypatch.setattr(server, "rasteriser_available", lambda: False)
     with patch("urllib.request.urlopen", fake):
         try:
             yield fake
@@ -152,7 +161,7 @@ def _fetch(
     tmp_path: Path,
     *,
     paper: str = "",
-    papers: str | None = None,
+    papers: Any = None,
     preview: bool = False,
     fresh: bool = False,
 ) -> dict[str, Any]:
@@ -240,23 +249,363 @@ def test_page_route_is_render_safe(app: Flask) -> None:
 
 # ----- the papers setting ----------------------------------------------------
 
+NYT_CSS = "transform: translateY(-3.5%)"
+WSJ_CSS = "transform: translateY(-2%)"
+
+
+def test_the_default_rows_match_the_manifest() -> None:
+    manifest = json.loads((Path(server.__file__).parent / "plugin.json").read_text())
+    setting = next(f for f in manifest["settings"] if f["name"] == "papers")
+    assert setting["type"] == "repeater"
+    assert setting["default"] == server.DEFAULT_PAPERS
+    assert setting["max_rows"] == server.MAX_PAPERS
+    assert repeater.spec_errors(setting) == []
+
 
 def test_parse_papers_defaults() -> None:
     assert server.parse_papers(server.DEFAULT_PAPERS) == [
-        server.Paper("NY_NYT", True, 3.5),
-        server.Paper("WSJ", True, 2.0),
-        server.Paper("USAT", True, 0.0),
-        server.Paper("AZ_ADS", False, 0.0),
+        server.Paper("NY_NYT", True, NYT_CSS),
+        server.Paper("WSJ", True, WSJ_CSS),
+        server.Paper("USAT", True, ""),
+        server.Paper("AZ_ADS", False, ""),
     ]
 
 
-def test_parse_papers_skips_what_it_cannot_read() -> None:
-    text = "# My papers\nny_nyt\n\nbad code!\nWSJ x\nUSAT 80\nNY_NYT 4\n#  tx_hc 1.5\nBRA^PR"
+def test_parse_papers_reads_rows() -> None:
+    rows = [
+        {"enabled": True, "code": " ny_nyt ", "css": "filter: contrast(1.2)", "extra": 1},
+        {"enabled": True, "code": ""},  # an empty row
+        {"enabled": True, "code": "   "},
+        {"enabled": True, "code": "../etc"},  # not a code
+        {"enabled": True, "code": "NY NYT"},
+        {"enabled": True, "code": ["NY_NYT"]},
+        "not a row",
+        None,
+        {"code": "USAT"},  # no enabled: in the rotation
+        {"enabled": "false", "code": "TX_HC"},  # a hand-edited settings file
+        {"enabled": 0, "code": "WSJ"},
+        {"enabled": True, "code": "WSJ", "css": WSJ_CSS},  # beats the switched-off WSJ
+        {"enabled": True, "code": "USAT", "css": "opacity: 0.5"},  # a later duplicate: ignored
+    ]
+    assert server.parse_papers(rows) == [
+        server.Paper("NY_NYT", True, "filter: contrast(1.2)"),
+        server.Paper("USAT", True, ""),
+        server.Paper("TX_HC", False, ""),
+        server.Paper("WSJ", True, WSJ_CSS),
+    ]
+    # The same rows as a JSON string read the same.
+    assert server.parse_papers(json.dumps(rows[:2])) == [
+        server.Paper("NY_NYT", True, "filter: contrast(1.2)")
+    ]
+
+
+@pytest.mark.parametrize("value", [None, 7, {"code": "WSJ"}, "[not json", [], ""])
+def test_parse_papers_finds_nothing_in_junk(value: Any) -> None:
+    assert server.parse_papers(value) == []
+
+
+def test_parse_papers_stops_at_max_papers() -> None:
+    rows = [{"code": f"P{i}"} for i in range(server.MAX_PAPERS + 10)]
+    assert len(server.parse_papers(rows)) == server.MAX_PAPERS
+
+
+def test_old_text_setting_still_reads() -> None:
+    """The setting used to be a textarea: ``CODE [trim%]`` per line, ``#``
+    to switch a line off. A saved value of that kind keeps working, the
+    trim turned into the CSS that does the same."""
+    text = "# My papers\nny_nyt 3.5\n\nbad code!\nWSJ x\nUSAT 80\nNY_NYT 4\n#  tx_hc 1.5\nBRA^PR"
     assert server.parse_papers(text) == [
-        server.Paper("NY_NYT", True, 0.0),
-        server.Paper("USAT", True, server.MAX_TRIM_PCT),
-        server.Paper("TX_HC", False, 1.5),
+        server.Paper("NY_NYT", True, NYT_CSS),
+        server.Paper("USAT", True, "transform: translateY(-25%)"),
+        server.Paper("TX_HC", False, "transform: translateY(-1.5%)"),
     ]
+    assert server.parse_papers("NY_NYT 3.5\nWSJ 2\nUSAT\n# AZ_ADS") == server.parse_papers(
+        server.DEFAULT_PAPERS
+    )
+
+
+def test_legacy_rows_turn_the_old_text_into_rows_that_save() -> None:
+    manifest = json.loads((Path(server.__file__).parent / "plugin.json").read_text())
+    setting = next(f for f in manifest["settings"] if f["name"] == "papers")
+    rows = server.legacy_rows("papers", "NY_NYT 3.5\nWSJ 2\nUSAT\n# AZ_ADS\nusat 9\n# heading here")
+    assert rows == server.DEFAULT_PAPERS
+    # The settings card's own save accepts them unchanged.
+    assert repeater.parse_rows(setting, rows) == rows
+    assert server.legacy_rows("other", "WSJ") is None
+    assert server.legacy_rows("papers", [{"code": "WSJ"}]) is None
+
+
+def test_the_settings_card_shows_the_old_text_as_rows_and_saving_migrates(
+    app: Flask, client: FlaskClient
+) -> None:
+    store = app.config["SETTINGS_STORE"]
+    store.patch_section("plugins", {"news_front_pages": {"papers": "NY_NYT 3.5\nWSJ 2\n# USAT"}})
+    page = client.get("/settings/plugins")
+    assert page.status_code == 200
+    body = page.get_data(as_text=True)
+    card = body[body.index('id="plugin-news_front_pages"') :]
+    match = re.search(r'<input type="hidden" name="papers" value="([^"]*)"', card)
+    assert match is not None
+    shown = json.loads(html.unescape(match.group(1)))
+    assert shown == [
+        {"enabled": True, "code": "NY_NYT", "css": NYT_CSS},
+        {"enabled": True, "code": "WSJ", "css": WSJ_CSS},
+        {"enabled": False, "code": "USAT", "css": ""},
+    ]
+    fields = app.config["PLUGIN_REGISTRY"].get("news_front_pages").manifest["settings"]
+    assert store.get_for_runtime("plugins", "news_front_pages", fields)["papers"].startswith(
+        "NY_NYT"
+    )
+    # Saving the card as shown stores the rows; the widget reads them the same.
+    resp = client.post("/settings/plugin-news_front_pages", data={"papers": json.dumps(shown)})
+    assert resp.status_code == 302
+    saved = store.get_for_runtime("plugins", "news_front_pages", fields)["papers"]
+    assert saved == shown
+    assert server.parse_papers(saved) == server.parse_papers("NY_NYT 3.5\nWSJ 2\n# USAT")
+
+
+def test_the_settings_card_refuses_a_duplicate_or_bad_code(app: Flask, client: FlaskClient) -> None:
+    store = app.config["SETTINGS_STORE"]
+    fields = app.config["PLUGIN_REGISTRY"].get("news_front_pages").manifest["settings"]
+    for rows in (
+        [{"code": "WSJ"}, {"code": "wsj "}],
+        [{"code": "NY NYT"}],
+        [{"code": ""}],
+        [{"code": "WSJ", "css": "x" * 1001}],
+    ):
+        client.post("/settings/plugin-news_front_pages", data={"papers": json.dumps(rows)})
+        assert store.get_for_runtime("plugins", "news_front_pages", fields)["papers"] == (
+            server.DEFAULT_PAPERS
+        )
+
+
+# ----- per-paper CSS ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "kept"),
+    [
+        ("transform: translateY(-3.5%);", "transform: translateY(-3.5%)"),
+        (
+            "object-position: 50% 3%; filter: contrast(1.15) grayscale(1);",
+            "object-position: 50% 3%; filter: contrast(1.15) grayscale(1)",
+        ),
+        (
+            "TRANSFORM : Scale( 1.2 ) ;transform-origin:top   center",
+            "transform: Scale( 1.2 ); transform-origin: top center",
+        ),
+        ("height: 100%; object-fit: cover", "height: 100%; object-fit: cover"),
+        ("clip-path: inset(3% 0 0 0)", "clip-path: inset(3% 0 0 0)"),
+        ("margin-top: -2% !important", "margin-top: -2%"),
+        ("/* trim */ transform: translateY(-2%)", "transform: translateY(-2%)"),
+        (
+            "transform: translate(0, -20px) rotate(-0.5deg)",
+            "transform: translate(0, -20px) rotate(-0.5deg)",
+        ),
+        ("image-rendering: pixelated; opacity: .9", "image-rendering: pixelated; opacity: .9"),
+        ("", ""),
+        ("   ;;  ", ""),
+    ],
+)
+def test_css_keeps_plain_declarations(raw: str, kept: str) -> None:
+    assert server.sanitize_css(raw) == kept
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Out of the style context, or markup.
+        "</style><script>alert(1)</script>",
+        "filter: contrast(1.1)</style>",
+        "transform: none; } img { display: none",
+        "transform: none <",
+        # Network fetches and their spellings.
+        "@import 'https://evil.example/x.css'",
+        '@import url("https://evil.example/x.css")',
+        "filter: url(https://evil.example/f.svg#x)",
+        "filter: u\\72l(https://evil.example/)",
+        'width: 10px; content: "x"',
+        "clip-path: url(#clip)",
+        # Comments hiding things, an unclosed comment.
+        "filter: contrast(1.1) /* unclosed",
+        # Not ASCII, control characters.
+        "transform: translateY(-2％)",
+        "transform: none;\x00",
+        # Too long.
+        "opacity: 1;" * 100,
+        # Not a string.
+        None,
+        ["opacity: 1"],
+    ],
+)
+def test_css_that_could_escape_or_fetch_is_dropped_whole(raw: Any) -> None:
+    assert server.sanitize_css(raw) == ""
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "filter: url(x)",  # url() without anything special
+        "background: url(//evil.example/x.png)",
+        "transform: translateY(expression(alert(1)))",
+        "width: expression(1)",
+        "filter: image-set(x 1x)",
+        "width: calc(100px * 1000)",
+        "width: var(--x)",
+        "width: attr(data-x)",
+        "transform: translate(env(safe-area-inset-top))",
+        "position: fixed",  # out of the cell
+        "z-index: 99999",
+        "background: red",  # not in the vocabulary
+        "-moz-binding: x",
+        "behavior: x",
+        "--custom: 1",
+        "width: 100000px",  # absurd sizes
+        "width: 1e9px",
+        "transform: scale(50)",
+        "transform: scale(3) scale(3)",  # 9x together
+        "scale: 20",
+        "transform: rotate(9999deg)",
+        "filter: contrast(1.1",  # unbalanced
+        "filter: contrast(1.1))",
+        "transform: translate((1px), 2px)",
+        "width: 10pt",  # unit not on the list
+        "transition: all 1s",
+        "animation: spin 1s infinite",
+        "opacity: 1 ! important now",
+        "width",  # no value
+        "width:",
+        ": 10px",
+        "transform: " + "rotate(1deg) " * 7,  # too many functions
+    ],
+)
+def test_css_declarations_outside_the_vocabulary_are_dropped(raw: str) -> None:
+    assert server.sanitize_css(raw) == ""
+    # ...on their own: the declarations around them stay.
+    assert server.sanitize_css(f"opacity: 0.9; {raw}; filter: invert(1)").startswith("opacity: 0.9")
+
+
+def test_css_with_long_whitespace_runs_is_quick() -> None:
+    start = time.monotonic()
+    for raw in (
+        "opacity:" + " " * 990 + "1",
+        "opacity: 1" + " " * 985 + "x",
+        "opacity: 1 " + "!" + " " * 980,
+        "/*" * 499,
+    ):
+        server._sanitize_css.cache_clear()
+        server.sanitize_css(raw)
+    assert time.monotonic() - start < 0.5
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "scale: 4",  # over the per-axis bound on its own
+        "transform: scale(4)",
+        "scale: 10 0.1",  # one axis far over
+        "transform: scaleX(10) scaleY(0.1)",
+        "transform: scaleX(2) scaleX(2)",
+        "scale: 2 2 2",  # a z value
+        "transform: scale()",
+        "transform: skewX(89.999deg)",  # skew isn't offered
+        "transform: skew(10deg)",
+        "transform: translateX(5000px)",
+        "transform: translate(80%)",
+        "margin-top: -90%",
+        "margin: 2000px",
+        "width: 1000%",
+        "width: 5000px",
+        "height: 300vh",
+        "width: 10",  # a unitless length that isn't 0
+        "object-position: 50% 300%",
+        "transform: 5px",  # a number with no context
+        "rotate: 1 1 0 45deg",
+        "filter: contrast(50)",
+        "opacity: 3000%",
+    ],
+)
+def test_css_sizes_and_moves_are_bounded(raw: str) -> None:
+    assert server.sanitize_css(raw) == ""
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A rotate turns one axis's scale into the other's: 9x along one axis.
+        "transform: scaleX(3) rotate(90deg) scaleY(3)",
+        "transform: scale(3, 1) rotate(90deg) scale(3, 1)",
+        "transform: scaleX(3) rotate(90deg) scaleX(3) rotate(90deg) scaleX(3) rotate(90deg)",
+        # Shrinking one axis doesn't buy growth on another.
+        "transform: scaleX(0.1) rotate(90deg) scaleY(3) scaleX(3)",
+        "transform: scale(0.5) scale(3) scale(3)",
+    ],
+)
+def test_every_scale_counts_at_its_largest_whatever_turns_it(raw: str) -> None:
+    assert server.sanitize_css(raw) == ""
+
+
+def test_the_scale_property_on_top_of_a_rotated_transform_is_dropped() -> None:
+    raw = "scale: 3; transform: scaleX(3) rotate(90deg)"
+    assert server.sanitize_css(raw) == "transform: scaleX(3) rotate(90deg)"
+    assert server.sanitize_css("scale: 1.5; transform: rotate(90deg) scaleY(2)") == (
+        "scale: 1.5; transform: rotate(90deg) scaleY(2)"
+    )
+
+
+def test_scale_counts_the_property_and_the_transform_together() -> None:
+    # 2 x 2 = 4, over the bound together: the scale property goes.
+    assert server.sanitize_css("scale: 2; transform: scale(2)") == "transform: scale(2)"
+    assert server.sanitize_css("transform: scale(2) translateY(-2%); scale: 1 2") == (
+        "transform: scale(2) translateY(-2%)"
+    )
+    # 1.5 x 2 = 3, on the bound: both stay.
+    assert server.sanitize_css("scale: 1.5; transform: scale(2)") == (
+        "scale: 1.5; transform: scale(2)"
+    )
+    assert server.sanitize_css("transform: scaleX(1.5) scaleX(2)") == (
+        "transform: scaleX(1.5) scaleX(2)"
+    )
+    # A declaration set again replaces the first, so the bound sees the last:
+    # 1.2 x 2 is inside it, 3 x 2 would not have been.
+    assert server.sanitize_css("transform: scale(3); transform: scale(1.2); scale: 2") == (
+        "transform: scale(1.2); scale: 2"
+    )
+    assert server.sanitize_css("transform: scale(1.2); transform: scale(3); scale: 2") == (
+        "transform: scale(3)"
+    )
+
+
+def test_css_keeps_at_most_a_dozen_declarations() -> None:
+    props = ["margin", "margin-top", "margin-right", "margin-bottom", "margin-left"]
+    props += ["width", "height", "max-width", "max-height", "min-width", "min-height"]
+    props += ["object-position", "transform-origin"]
+    kept = server.sanitize_css("; ".join(f"{p}: 0" for p in props))
+    assert kept.count(": 0") == server.CSS_MAX_DECLARATIONS
+    # A property set twice counts once: the last one, as in CSS.
+    assert server.sanitize_css("opacity: 1;" * 30) == "opacity: 1"
+    assert server.sanitize_css("opacity: 0.5; filter: invert(1); opacity: 0.8") == (
+        "filter: invert(1); opacity: 0.8"
+    )
+
+
+def test_each_paper_gets_its_own_css(tmp_path: Path, cdn: FakeCdn, clocks: Clocks) -> None:
+    _seed_today(tmp_path, "NY_NYT", "WSJ")
+    rows = [
+        {"enabled": True, "code": "NY_NYT", "css": "filter: contrast(1.2)"},
+        {"enabled": True, "code": "WSJ", "css": "@import url(x); opacity: 1"},
+    ]
+    first = _fetch(tmp_path, papers=rows)
+    clocks.wall += server.ROTATION_HOLD_S
+    second = _fetch(tmp_path, papers=rows)
+    assert (first["code"], first["css"]) == ("NY_NYT", "filter: contrast(1.2)")
+    assert (second["code"], second["css"]) == ("WSJ", "")
+
+
+def test_client_applies_the_css_to_the_page_image_only() -> None:
+    js = (Path(server.__file__).parent / "client.js").read_text()
+    assert "img.style.cssText = paperCss(data)" in js
+    assert "${data.css" not in js and "${paperCss" not in js  # never through markup
 
 
 # ----- rotation --------------------------------------------------------------
@@ -330,12 +679,18 @@ def test_a_held_paper_that_lost_its_page_moves_on(
 def test_disabled_papers_are_left_out(tmp_path: Path, cdn: FakeCdn, clocks: Clocks) -> None:
     _seed_today(tmp_path, "NY_NYT", "WSJ")
     assert _sends(tmp_path, clocks, 2, papers="# NY_NYT\nWSJ") == ["WSJ", "WSJ"]
+    assert _sends(tmp_path, clocks, 2, papers=_rows("-NY_NYT", "WSJ")) == ["WSJ", "WSJ"]
 
 
 def test_rotation_and_plan_helpers() -> None:
     assert server.rotation(["A", "B", "C"], "B") == ["C", "A", "B"]
     assert server.rotation(["A", "B", "C"], "C") == ["A", "B", "C"]
     assert server.rotation(["A", "B", "C"], "GONE") == ["A", "B", "C"]
+    # A paper that left the list resumes after where it stood.
+    assert server.rotation(["A", "C", "D"], "B", ["A", "B", "C", "D"]) == ["C", "D", "A"]
+    assert server.rotation(["A", "B", "C"], "D", ["A", "B", "C", "D"]) == ["A", "B", "C"]
+    assert server.rotation(["A"], "B", ["B", "C"]) == ["A"]
+    assert server.rotation([], "B", ["B"]) == []
     held = {"current": "B", "since": 1000.0}
     assert server.plan(["A", "B", "C"], held, 1010.0) == (["B", "C", "A"], "B")
     later = 1000.0 + server.ROTATION_HOLD_S
@@ -346,28 +701,97 @@ def test_rotation_and_plan_helpers() -> None:
 def test_pinned_paper_ignores_the_rotation(tmp_path: Path, cdn: FakeCdn) -> None:
     _seed_today(tmp_path, "NY_NYT", "TX_HC")
     data = _fetch(tmp_path, paper="tx_hc")
-    assert (data["code"], data["trim"]) == ("TX_HC", 0.0)
+    assert (data["code"], data["css"]) == ("TX_HC", "")
     assert "current" not in _state(tmp_path)
     assert _fetch(tmp_path)["code"] == "NY_NYT"
 
 
+def test_a_pinned_paper_switched_off_in_the_list_keeps_its_css(
+    tmp_path: Path, cdn: FakeCdn
+) -> None:
+    _seed_today(tmp_path, "AZ_ADS", "WSJ")
+    rows = [{"enabled": False, "code": "AZ_ADS", "css": "opacity: 0.8"}, {"code": "WSJ"}]
+    data = _fetch(tmp_path, paper="AZ_ADS", papers=rows)
+    assert (data["code"], data["css"]) == ("AZ_ADS", "opacity: 0.8")
+    assert _fetch(tmp_path, papers=rows)["code"] == "WSJ"
+
+
 def test_bad_pinned_code_and_empty_list_are_errors(tmp_path: Path, cdn: FakeCdn) -> None:
     assert "isn't a Freedom Forum paper code" in _fetch(tmp_path, paper="../x")["error"]
-    assert "No papers to show" in _fetch(tmp_path, papers="# NY_NYT")["error"]
+    assert "No papers to show" in _fetch(tmp_path, papers=[])["error"]
+    assert "No papers to show" in _fetch(tmp_path, papers=[{"code": ""}, {"code": "a b"}])["error"]
+    off = [{"enabled": False, "code": "NY_NYT"}, {"enabled": False, "code": "WSJ"}]
+    assert "Every paper in the list is switched off" in _fetch(tmp_path, papers=off)["error"]
+    assert "switched off" in _fetch(tmp_path, papers="# NY_NYT")["error"]
     assert cdn.calls == []
 
 
-def test_payload_carries_size_and_trim(tmp_path: Path, cdn: FakeCdn) -> None:
+def test_payload_carries_size_and_css(tmp_path: Path, cdn: FakeCdn) -> None:
     _seed_today(tmp_path, "NY_NYT")
     assert _fetch(tmp_path, papers="NY_NYT 3.5") == {
-        "url": "/plugins/news_front_pages/page/NY_NYT_20261025.jpg",
+        "url": "/plugins/news_front_pages/page/NY_NYT_20261025.jpg?w=700",
         "code": "NY_NYT",
         "date": "2026-10-25",
         "width": 700,
         "height": 1342,
-        "trim": 3.5,
+        "css": NYT_CSS,
     }
     assert cdn.calls == []
+
+
+# ----- the rotation over edited rows -----------------------------------------
+
+
+def _rows(*codes: str) -> list[dict[str, Any]]:
+    return [{"enabled": not c.startswith("-"), "code": c.lstrip("-"), "css": ""} for c in codes]
+
+
+def test_rotation_follows_reordered_rows(tmp_path: Path, cdn: FakeCdn, clocks: Clocks) -> None:
+    _seed_today(tmp_path, "A1", "B1", "C1", "D1")
+    assert _sends(tmp_path, clocks, 2, papers=_rows("A1", "B1", "C1", "D1")) == ["A1", "B1"]
+    # Reordered: the paper after B1 in the new order comes next.
+    assert _sends(tmp_path, clocks, 3, papers=_rows("D1", "B1", "A1", "C1")) == ["A1", "C1", "D1"]
+
+
+def test_rotation_resumes_after_a_removed_or_switched_off_paper(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
+    _seed_today(tmp_path, "A1", "B1", "C1", "D1")
+    assert _sends(tmp_path, clocks, 2, papers=_rows("A1", "B1", "C1", "D1")) == ["A1", "B1"]
+    # B1, the paper on show, is removed: C1 (after it) is next, not A1.
+    assert _sends(tmp_path, clocks, 1, papers=_rows("A1", "C1", "D1")) == ["C1"]
+    # C1 is switched off while held: it moves on at once, to D1.
+    clocks.wall -= server.ROTATION_HOLD_S - 10
+    assert _fetch(tmp_path, papers=_rows("A1", "-C1", "D1"))["code"] == "D1"
+
+
+def test_rotation_wraps_when_the_last_paper_is_removed(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
+    """The state names papers, so a list that shrank under the rotation
+    can't leave it pointing past the end."""
+    _seed_today(tmp_path, "A1", "B1", "C1", "D1")
+    assert _sends(tmp_path, clocks, 4, papers=_rows("A1", "B1", "C1", "D1"))[-1] == "D1"
+    assert _sends(tmp_path, clocks, 2, papers=_rows("A1", "B1")) == ["A1", "B1"]
+    # Every paper it knew is gone: it starts over.
+    _seed_today(tmp_path, "X1", "Y1")
+    assert _sends(tmp_path, clocks, 2, papers=_rows("X1", "Y1")) == ["X1", "Y1"]
+
+
+def test_rotation_survives_an_edited_code_and_old_state(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
+    _seed_today(tmp_path, "A1", "B1", "C1", "E1")
+    assert _sends(tmp_path, clocks, 2, papers=_rows("A1", "B1", "C1")) == ["A1", "B1"]
+    # B1's code is edited to E1 in place: the rotation carries on after it.
+    assert _sends(tmp_path, clocks, 2, papers=_rows("A1", "E1", "C1")) == ["C1", "A1"]
+    # A state file from before "order" was kept, or with junk in it.
+    for junk in (None, "A1", [1, None, "C1"]):
+        state = _state(tmp_path)
+        state["order"] = junk
+        server._write_json(tmp_path / "state.json", state)
+        clocks.wall += server.ROTATION_HOLD_S
+        assert _fetch(tmp_path, papers=_rows("A1", "E1", "C1"))["code"] in {"A1", "E1", "C1"}
 
 
 # ----- background downloads --------------------------------------------------
@@ -686,6 +1110,311 @@ def test_refuses_last_months_file_in_a_reused_slot(tmp_path: Path, cdn: FakeCdn)
     assert _fetch_settled(tmp_path, paper="WSJ")["date"] == "2026-10-24"
 
 
+# ----- the PDF: sharp pages ----------------------------------------------------
+
+needs_pdfium = pytest.mark.skipif(
+    importlib.util.find_spec("pypdfium2") is None, reason="pypdfium2 not installed"
+)
+
+
+def _pdf(width_pt: int = 612, height_pt: int = 1188) -> bytes:
+    """A one-page PDF ``width_pt`` x ``height_pt`` points: white, with a black
+    band across the top tenth, so a drawn page can be told from a blank."""
+    img = Image.new("L", (width_pt, height_pt), 255)
+    img.paste(0, (0, 0, width_pt, height_pt // 10))
+    buf = io.BytesIO()
+    img.save(buf, format="PDF", resolution=72)
+    return buf.getvalue()
+
+
+def _pdf_url(code: str, day: int) -> str:
+    return f"{CDN}/pdf{day}/{code}.pdf"
+
+
+@pytest.fixture
+def pdf(monkeypatch: pytest.MonkeyPatch, cdn: FakeCdn) -> FakeCdn:
+    """The fake CDN with the PDF rasteriser on."""
+    monkeypatch.setattr(server, "rasteriser_available", lambda: True)
+    return cdn
+
+
+def _size(body: bytes | None) -> tuple[int, int] | None:
+    return server.page_size(body) if body else None
+
+
+@needs_pdfium
+def test_rasterise_draws_page_one_at_panel_width() -> None:
+    body = server.rasterise_pdf(_pdf())
+    assert body is not None
+    with Image.open(io.BytesIO(body)) as img:
+        assert img.format == "JPEG"
+        assert img.width == server.RASTER_WIDTH_PX
+        assert abs(img.height - 1188 * server.RASTER_WIDTH_PX / 612) <= 1
+        grey = img.convert("L")
+        assert grey.getpixel((700, 20)) < 40  # the band, drawn
+        assert grey.getpixel((700, 2000)) > 215  # the page, white
+
+
+@needs_pdfium
+@pytest.mark.parametrize(
+    "body",
+    [b"%PDF-1.4 not really", b"", _jpeg(), _pdf(100, 5000), _pdf(5000, 100)],
+    ids=["broken", "empty", "jpeg", "too-tall", "too-wide"],
+)
+def test_rasterise_refuses_what_it_cannot_draw(body: bytes) -> None:
+    assert server.rasterise_pdf(body) is None
+
+
+def test_rasterise_gives_up_on_a_stuck_or_failing_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "rasteriser_available", lambda: True)
+    monkeypatch.setattr(server, "_RASTER_CHILD", "import time; time.sleep(30)")
+    monkeypatch.setattr(server, "RASTER_TIMEOUT_S", 0.5)
+    start = time.monotonic()
+    assert server.rasterise_pdf(_pdf()) is None
+    assert time.monotonic() - start < 10
+    monkeypatch.setattr(server, "_RASTER_CHILD", "import sys; sys.stdout.write('junk')")
+    assert server.rasterise_pdf(_pdf()) is None
+    monkeypatch.setattr(server, "_RASTER_CHILD", "raise SystemExit(9)")
+    assert server.rasterise_pdf(_pdf()) is None
+
+
+def test_rasterise_child_caps_its_own_memory_and_cpu() -> None:
+    assert '"RLIMIT_AS", memory' in server._RASTER_CHILD
+    assert '"RLIMIT_CPU", cpu' in server._RASTER_CHILD
+    assert "document[0]" in server._RASTER_CHILD  # page one only
+
+
+@needs_pdfium
+def test_the_pdf_comes_first(pdf: FakeCdn) -> None:
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf(), _url("WSJ", 25): PAGE}
+    size = _size(server.download_edition("WSJ", TODAY))
+    assert size is not None and size[0] == server.RASTER_WIDTH_PX
+    assert pdf.calls == [_pdf_url("WSJ", 25)]
+
+
+@needs_pdfium
+@pytest.mark.parametrize(
+    "served",
+    [
+        None,  # no PDF for this paper (a 404)
+        b"<html>captive portal</html>",
+        _jpeg(),  # not a PDF
+        b"%PDF-1.4 truncated",  # a PDF that won't draw
+    ],
+    ids=["404", "html", "jpeg", "broken-pdf"],
+)
+def test_the_jpeg_stands_in_when_the_pdf_fails(pdf: FakeCdn, served: bytes | None) -> None:
+    pdf.pages = {_url("WSJ", 25): PAGE}
+    if served is not None:
+        pdf.pages[_pdf_url("WSJ", 25)] = served
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    assert pdf.calls == [_pdf_url("WSJ", 25), _url("WSJ", 25)]
+
+
+@needs_pdfium
+def test_an_oversized_or_stale_pdf_is_refused(
+    pdf: FakeCdn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "MAX_PDF_BYTES", 1000)
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf(), _url("WSJ", 25): PAGE}
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    monkeypatch.setattr(server, "MAX_PDF_BYTES", 30 * 1024 * 1024)
+    stale = {"Last-Modified": "Mon, 21 Sep 2026 06:00:00 GMT"}
+    pdf.pages = {_pdf_url("WSJ", 25): _Resp(_pdf(), stale), _url("WSJ", 25): PAGE}
+    assert server.download_edition("WSJ", TODAY) == PAGE
+
+
+def test_without_the_rasteriser_only_the_jpeg_is_asked_for(cdn: FakeCdn) -> None:
+    cdn.pages = {_pdf_url("WSJ", 25): b"%PDF", _url("WSJ", 25): PAGE}
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    assert cdn.calls == [_url("WSJ", 25)]
+
+
+@needs_pdfium
+def test_a_pdf_outage_falls_to_the_jpeg_which_reports_it(pdf: FakeCdn) -> None:
+    pdf.down = True
+    with pytest.raises(server.CdnUnreachable):
+        server.download_edition("WSJ", TODAY)
+    assert pdf.calls == [_pdf_url("WSJ", 25), _url("WSJ", 25)]
+
+
+@needs_pdfium
+def test_a_render_gets_the_sharp_page_and_its_size(tmp_path: Path, pdf: FakeCdn) -> None:
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
+    data = _fetch_settled(tmp_path, paper="WSJ")
+    assert data["url"].endswith(f"/WSJ_20261025.jpg?w={server.RASTER_WIDTH_PX}")
+    assert data["width"] == server.RASTER_WIDTH_PX
+
+
+@needs_pdfium
+def test_todays_blurry_page_is_redrawn_from_the_pdf_once(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    """A page saved from the JPEG (before the PDF path, or while the PDF
+    wasn't out) is redrawn when the PDF is there: the render shows it at
+    once and the next one gets the sharp page, under a new URL."""
+    _seed(tmp_path, "WSJ_20261025.jpg")  # 700 px wide
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
+    first = _fetch(tmp_path, paper="WSJ")
+    assert first["url"].endswith("?w=700")
+    assert first["live_pending"] == 1  # the redraw is on its way
+    _settle(tmp_path)
+    second = _fetch(tmp_path, paper="WSJ")
+    assert second["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+    assert "live_pending" not in second
+    assert pdf.calls == [_pdf_url("WSJ", 25)]  # the PDF only: the JPEG is what it had
+    clocks.wall += 2 * server.RECHECK_S
+    _fetch_settled(tmp_path, paper="WSJ")
+    assert len(pdf.calls) == 1  # sharp now: nothing more to do
+
+
+@needs_pdfium
+def test_a_redraw_that_finds_no_pdf_backs_off_then_stops(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    _seed(tmp_path, "WSJ_20261025.jpg")  # 700 px wide
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
+    assert pdf.calls == [_pdf_url("WSJ", 25)]
+    retry = _state(tmp_path)["pdf_retry"]["WSJ"]
+    assert (retry["day"], retry["tries"]) == ("2026-10-25", 1)
+    assert retry["after"] == pytest.approx(clocks.wall + server.PDF_RETRY_S, abs=5)
+    # Inside the backoff (and the recheck wait) nothing is asked for.
+    clocks.wall += server.PDF_RETRY_S - 60
+    _fetch_settled(tmp_path, paper="WSJ")
+    assert len(pdf.calls) == 1
+    # Each later try waits twice as long, up to the cap, and the tries stop.
+    asked = []
+    for _ in range(3 * server.PDF_MAX_TRIES):
+        clocks.wall += server.PDF_RETRY_MAX_S
+        _fetch_settled(tmp_path, paper="WSJ")
+        asked.append(len(pdf.calls))
+    assert asked[-1] == server.PDF_MAX_TRIES
+    assert _state(tmp_path)["pdf_retry"]["WSJ"]["tries"] == server.PDF_MAX_TRIES
+    # A forced refresh asks again whatever the count.
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
+    forced = _fetch_settled(tmp_path, paper="WSJ", fresh=True)
+    assert forced["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+    assert "WSJ" not in _state(tmp_path)["pdf_retry"]
+
+
+@needs_pdfium
+def test_a_pdf_published_after_the_jpeg_is_still_fetched(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    """The PDF 404s (not out yet) while the JPEG is there: the JPEG is
+    shown, and the PDF is asked for again later, not given up on."""
+    pdf.pages = {_url("WSJ", 25): PAGE}
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
+    assert _state(tmp_path)["pdf_retry"]["WSJ"]["tries"] == 1
+    pdf.pages[_pdf_url("WSJ", 25)] = _pdf()
+    clocks.wall += server.PDF_RETRY_S
+    data = _fetch_settled(tmp_path, paper="WSJ")
+    assert data["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+    assert "WSJ" not in _state(tmp_path)["pdf_retry"]
+
+
+@needs_pdfium
+def test_a_forced_refresh_skips_the_backoff(tmp_path: Path, pdf: FakeCdn, clocks: Clocks) -> None:
+    pdf.pages = {_pdf_url("WSJ", 25): b"<html>", _url("WSJ", 25): PAGE}
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
+    calls = len(pdf.calls)
+    clocks.wall += 60
+    pdf.pages[_pdf_url("WSJ", 25)] = _pdf()
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")  # backing off
+    assert len(pdf.calls) == calls
+    data = _fetch_settled(tmp_path, paper="WSJ", fresh=True)
+    assert data["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+
+
+@needs_pdfium
+def test_an_outage_during_a_redraw_is_tried_again_later(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    _seed(tmp_path, "WSJ_20261025.jpg")
+    pdf.down = True
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
+    assert _state(tmp_path)["pdf_retry"]["WSJ"]["tries"] == 1
+    pdf.down = False
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
+    clocks.wall += server.PDF_RETRY_S
+    data = _fetch_settled(tmp_path, paper="WSJ")
+    assert data["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+
+
+def test_old_retry_records_and_the_old_give_up_record_are_dropped(
+    tmp_path: Path, cdn: FakeCdn
+) -> None:
+    server._write_json(
+        tmp_path / "state.json",
+        {
+            "jpeg_only": {"WSJ": "2026-10-25"},
+            "pdf_retry": {
+                "OLD": {"day": "2026-10-01", "tries": 2, "after": 0},
+                "BAD": 3,
+                "NEW": {"day": "2026-10-25", "tries": 1, "after": 0},
+            },
+        },
+    )
+    cdn.pages = {_url("WSJ", 25): PAGE}
+    _fetch_settled(tmp_path, paper="WSJ")
+    state = _state(tmp_path)
+    assert "jpeg_only" not in state
+    assert set(state["pdf_retry"]) == {"NEW"}
+
+
+@needs_pdfium
+def test_a_slow_pdf_leaves_the_jpeg_its_time(pdf: FakeCdn, clocks: Clocks) -> None:
+    """A PDF that trickles in uses up its own share of the edition's time,
+    not the JPEG's: the fallback is still fetched."""
+
+    def tick() -> None:
+        clocks.mono += 1.0
+
+    pdf.pages = {_pdf_url("WSJ", 25): _Resp(_pdf(), on_read=tick), _url("WSJ", 25): PAGE}
+    start = clocks.mono
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    assert clocks.mono - start <= server.DOWNLOAD_BUDGET_S - server.JPEG_RESERVE_S + 1
+    assert pdf.calls == [_pdf_url("WSJ", 25), _url("WSJ", 25)]
+
+
+def test_drawing_gets_only_the_pdfs_time_left(
+    monkeypatch: pytest.MonkeyPatch, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    timeouts: list[float] = []
+
+    def fake_rasterise(body: bytes, width: int = 0, timeout: float = 0) -> bytes | None:
+        timeouts.append(timeout)
+        return None
+
+    monkeypatch.setattr(server, "rasterise_pdf", fake_rasterise)
+    pdf.pages = {_pdf_url("WSJ", 25): b"%PDF-1.4", _url("WSJ", 25): PAGE}
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    assert timeouts == [pytest.approx(server.DOWNLOAD_BUDGET_S - server.JPEG_RESERVE_S)]
+    # Too little left in the job: not drawn at all, and the JPEG still comes.
+    timeouts.clear()
+    deadline = clocks.mono + server.JPEG_RESERVE_S + server.RASTER_MIN_S - 1
+    assert server.download_edition("WSJ", TODAY, deadline) == PAGE
+    assert timeouts == []
+
+
+@needs_pdfium
+def test_every_request_says_who_is_asking(pdf: FakeCdn) -> None:
+    """cdn.freedomforum.org answers Python's default urllib User-Agent with a
+    403, so the PDF and the JPEG requests both carry the widget's own."""
+    pdf.pages = {_url("WSJ", 25): PAGE}
+    server.download_edition("WSJ", TODAY)
+    assert pdf.agents == [server.USER_AGENT, server.USER_AGENT]
+    assert server.USER_AGENT.startswith("tesserae/") and "Python-urllib" not in server.USER_AGENT
+
+
+def test_client_snaps_the_page_to_whole_pixels() -> None:
+    js = (Path(server.__file__).parent / "client.js").read_text()
+    assert "snapToPixels(img)" in js
+    assert 'addEventListener("load", () => snapToPixels(img)' in js
+    # The paper's CSS can't take the property the snap uses.
+    assert server.sanitize_css("translate: 0 -2px") == ""
+
+
 # ----- the lock and handed-out pages -----------------------------------------
 
 
@@ -714,7 +1443,7 @@ def test_a_page_just_handed_out_survives_a_newer_download(tmp_path: Path, cdn: F
     page's URL must not get a 404."""
     old = _seed(tmp_path, "WSJ_20261015.jpg", idle_s=IDLE)
     cdn.down = True
-    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("/WSJ_20261015.jpg")
+    assert "/WSJ_20261015.jpg?" in _fetch_settled(tmp_path, paper="WSJ")["url"]
     cdn.down = False
     cdn.pages = {_url("WSJ", 25): PAGE, _url("USAT", 25): PAGE}
     assert _fetch_settled(tmp_path, paper="WSJ", fresh=True)["date"] == "2026-10-25"

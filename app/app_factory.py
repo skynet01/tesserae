@@ -1348,6 +1348,9 @@ def create_app(
 
     app.jinja_env.globals["option_visible"] = _option_visible
     app.jinja_env.globals["option_sections"] = _option_sections
+    from app.repeater import view as _repeater_view
+
+    app.jinja_env.globals["repeater_view"] = _repeater_view
 
     def _choice_image(src: Any) -> str:
         """A select choice's picture (``choices[].image``) as the browser

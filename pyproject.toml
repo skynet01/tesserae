@@ -69,6 +69,12 @@ dependencies = [
     # the imaging extra reuses the numpy + Pillow above and adds only the
     # cramjam (LZ4) and xxhash wheels.
     "pyvisionect[imaging]>=0.1.1,<0.2",
+    # PDF page rasteriser (Chromium's PDFium, wheel-bundled for linux
+    # x86_64/arm64/armv7, macOS and Windows, so pure pip like
+    # pillow-heif). The news_front_pages widget rasterises a paper's PDF
+    # front page at panel width in a child process; without it the widget
+    # falls back to Freedom Forum's 700 px JPEG.
+    "pypdfium2>=5,<6",
 ]
 
 [project.scripts]

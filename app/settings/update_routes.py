@@ -26,6 +26,7 @@ from typing import Any
 from flask import current_app, flash, request
 from werkzeug.wrappers import Response
 
+from app.repeater import RepeaterValueError
 from app.state.settings_store import SECRET_MASK
 
 from ._shared import (
@@ -74,7 +75,11 @@ def settings_update(section_kind: str) -> Response:
         # renderer card. Filter them here too so a hand-crafted POST
         # to the renderer endpoint can't override per-device tuning.
         fields = [f for f in renderer.manifest.get("settings", []) if not f.get("device_setting")]
-        values = values_from_form(fields)
+        try:
+            values = values_from_form(fields)
+        except RepeaterValueError as err:
+            flash(f"{renderer.name} settings not saved. {err}", "error")
+            return redirect_to_section(section_kind)
         store.update_for_namespace("renderers", rid, values, fields)
         # Per-renderer Enabled toggle lives outside the manifest, so it's
         # stored in a sibling section keyed by id. Browsers don't submit
@@ -91,7 +96,13 @@ def settings_update(section_kind: str) -> Response:
         if plugin is None:
             return Response(f"unknown plugin {pid!r}", status=404)
         fields = list(plugin.manifest.get("settings", []))
-        values = values_from_form(fields)
+        try:
+            values = values_from_form(fields)
+        except RepeaterValueError as err:
+            # Nothing is saved: a repeater's rows are all or nothing, and the
+            # other fields wait with them rather than half the card saving.
+            flash(f"{plugin.name} settings not saved. {err}", "error")
+            return redirect_to_section(section_kind)
         store.update_for_namespace("plugins", pid, values, fields)
         flash(f"{plugin.name} settings saved.", "ok")
         return redirect_to_section(section_kind)
@@ -158,6 +169,8 @@ def _update_core(section_name: str, fields: list[dict[str, Any]]) -> str:
     out: dict[str, Any] = dict(existing)
     for field in fields:
         name = str(field["name"])
+        if name not in values:
+            continue  # not in this form (a repeater it didn't carry)
         is_secret = bool(field.get("secret"))
         disk = f"{name}_secret" if is_secret else name
         incoming = values.get(name)
