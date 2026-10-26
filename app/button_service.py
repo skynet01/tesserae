@@ -449,12 +449,13 @@ class ButtonService:
           on several time-slot lineups steps the one it is showing. The
           page's graph link for the button wins, else the next / previous
           page in lineup order, wrapping; the warmed frame is promoted or
-          the page rendered, and the nav position recorded, exactly as
-          :meth:`_deck_navigate` does for a press (no hold: a timer lineup
-          moves on at its next step boundary). From a recorded position
-          the lineup no longer contains, it steps from the entry page. A
-          one-page lineup has nowhere to go: a no-op, rather than falling
-          through to some other lineup's rotation.
+          the page rendered and the nav position recorded, as
+          :meth:`_deck_navigate` does for a press, except that a render
+          that never reached the display leaves the position alone. No
+          hold: a timer lineup moves on at its next step boundary. From a
+          recorded position the lineup no longer contains, it steps from
+          the entry page. A one-page lineup has nowhere to go: a no-op,
+          rather than falling through to some other lineup's rotation.
         * With no lineup, ``rotate_next`` / ``rotate_prev`` runs on the
           display's rotation (one targeting it directly or through its
           dashboards' bindings) and holds the way a button press does. No
@@ -506,7 +507,7 @@ class ButtonService:
                 now=now,
                 origin_extra={"button": label, "deck_id": deck.id},
                 source=source,
-                record_press=False,
+                remote=True,
             )
         rotation = self._resolve_rotation(device_id)
         if rotation is None:
@@ -843,13 +844,18 @@ class ButtonService:
         now: datetime,
         origin_extra: dict[str, Any],
         source: str = "deck",
-        record_press: bool = True,
+        remote: bool = False,
     ) -> ButtonHandleResult:
         """Move the device to ``target_page`` within ``deck``: promote the
         pre-warmed frame when there is one (instant), else render on the fly.
         Records nav position + dedup state either way. ``source`` labels the
-        push and the history row; ``record_press=False`` (a remote step, see
-        :meth:`step`) leaves the panel's dedup fingerprint untouched."""
+        push and the history row.
+
+        ``remote`` (a :meth:`step` from outside the panel) leaves the panel's
+        dedup fingerprint untouched, and keeps the nav position where it was
+        when nothing reached the display (failed render, no push manager):
+        the panel is still on the old page, so the next step must start
+        from it rather than skip the page that never showed."""
         pusher = self._push_getter()
         push_result: PushResult | None = None
         pushed_page_id: str | None = None
@@ -866,10 +872,10 @@ class ButtonService:
                     source=source,
                 )
         failed = push_result is not None and push_result.status == "failed"
-        if self._deck_nav is not None:
+        if self._deck_nav is not None and not (remote and (failed or pusher is None)):
             self._deck_nav.set(device_id, deck.id, target_page)
         # Dedup bookkeeping so a retry of the same event doesn't double-navigate.
-        if record_press:
+        if not remote:
             self._state.upsert(
                 state.model_copy(
                     update={

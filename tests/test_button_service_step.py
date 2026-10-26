@@ -347,10 +347,15 @@ def test_history_row_is_attributed_to_home_assistant_and_links_its_push(
     assert row.extra["push_event_id"] == 101
 
 
-def test_failed_push_is_reported_in_the_result(tmp_path: Path) -> None:
+def test_failed_push_is_reported_and_keeps_the_position(tmp_path: Path) -> None:
     rig = _rig(tmp_path)
     rig.push.status = "failed"
-    rig.decks.upsert(_deck("morning", ["a", "b"]))
+    rig.decks.upsert(_deck("morning", ["a", "b", "c"]))
+    rig.nav.set("kitchen", "morning", "a")
     result = rig.svc.step(device_id="kitchen", forward=True)
     assert result.push_result is not None and result.push_result.status == "failed"
     assert result.pushed_page_id is None
+    # The panel never left "a": the next step tries "b" again, not "c".
+    assert rig.nav.current_page("kitchen", "morning") == "a"
+    rig.push.status = "sent"
+    assert rig.svc.step(device_id="kitchen", forward=True).pushed_page_id == "b"
