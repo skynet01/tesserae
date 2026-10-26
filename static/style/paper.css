@@ -799,20 +799,21 @@
 
 /* Settings fields: label on the left, control on the right, as in the
    mockups (toggle rows already read that way). Wide screens only; below
-   that the classic stacked layout stays. */
+   that the classic stacked layout stays. A repeater keeps the full width
+   for its rows, its label above them. */
 @media (min-width: 1180px) {
-  :root[data-ui="paper"] .dx-section-body > .field:not(.field--slider):not(.field--days) {
+  :root[data-ui="paper"] .dx-section-body > .field:not(.field--slider):not(.field--days):not(.field--repeater) {
     display: grid;
     grid-template-columns: minmax(200px, 300px) minmax(0, 1fr);
     column-gap: 32px;
     align-items: start;
   }
-  :root[data-ui="paper"] .dx-section-body > .field:not(.field--slider):not(.field--days) > label {
+  :root[data-ui="paper"] .dx-section-body > .field:not(.field--slider):not(.field--days):not(.field--repeater) > label {
     grid-column: 1;
     grid-row: 1 / span 4;
     padding-top: 10px;
   }
-  :root[data-ui="paper"] .dx-section-body > .field:not(.field--slider):not(.field--days) > :not(label) { grid-column: 2; }
+  :root[data-ui="paper"] .dx-section-body > .field:not(.field--slider):not(.field--days):not(.field--repeater) > :not(label) { grid-column: 2; }
 }
 
 /* ----- Corners: 2px everywhere, square in the sidebars --------------- */

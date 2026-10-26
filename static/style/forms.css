@@ -2691,6 +2691,20 @@ input[type="range"].slider:focus::-moz-range-thumb {
   font-size: var(--t-size-sm);
   color: var(--t-muted);
 }
+/* A settings card spaces and rules off each .field; inside a row the
+   sub-fields sit in the row's grid instead. */
+.field.field--repeater .repeater-row .repeater-row-fields > .field.repeater-sub {
+  padding: 0;
+  margin: 0;
+  border-top: 0;
+}
+.field--repeater .repeater-row .repeater-sub > label {
+  margin-bottom: 4px;
+}
+.field--repeater .repeater-row .repeater-sub--boolean {
+  align-self: end;
+  padding-bottom: 6px;
+}
 @media (max-width: 640px) {
   .repeater-row-fields {
     grid-template-columns: 1fr;
