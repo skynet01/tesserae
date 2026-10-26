@@ -29,8 +29,6 @@ import time
 from collections.abc import Iterable, Mapping
 from http.cookiejar import Cookie
 
-from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
-
 # The difficulty and Argon2id cost the challenge script uses. Fixed by
 # BunnyCDN, not sent in the page.
 DIFFICULTY = 13
@@ -45,6 +43,23 @@ MAX_ITERATIONS = 20_000
 COOKIE_PREFIX = "bunny_shield"
 VERIFY_PATH = "/.bunny-shield/verify-pow"
 RESPONSE_HEADER = "BunnyShield-Challenge-Response"
+
+
+class SolverUnavailable(RuntimeError):
+    """This Python's ``cryptography`` has no Argon2id (it arrived in 44).
+
+    Imported lazily so an older install still loads the widget and fetches
+    every other source; only a GoComics challenge needs the solver.
+    """
+
+
+def _argon2id() -> type:
+    try:
+        from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+    except ImportError as err:
+        raise SolverUnavailable("cryptography 44 or newer is needed for Argon2id") from err
+    return Argon2id
+
 
 _DATA_POW_RE = re.compile(r"""data-pow\s*=\s*["']([^"']+)["']""")
 _CHALLENGE_TEXT = "Establishing a secure connection"
@@ -88,7 +103,8 @@ def solve(
     """Find the proof-of-work answer for ``data_pow``, or None within the cap.
 
     Raises ValueError for a value that cannot be a challenge (Argon2 wants a
-    salt of at least 8 bytes), so a garbled page fails loudly, not slowly.
+    salt of at least 8 bytes), so a garbled page fails loudly, not slowly,
+    and :class:`SolverUnavailable` when this Python can't do Argon2id.
     """
     parts = data_pow.split("#")
     if len(parts) < 2 or not parts[0] or not parts[1]:
@@ -97,8 +113,9 @@ def solve(
     challenge = parts[1]
     if len(salt) < 8:
         raise ValueError("data-pow user key is too short")
+    argon2id = _argon2id()
     for i in range(max_iterations):
-        kdf = Argon2id(
+        kdf = argon2id(
             salt=salt,
             length=ARGON2_LENGTH,
             iterations=ARGON2_ITERATIONS,

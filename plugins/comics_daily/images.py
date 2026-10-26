@@ -20,12 +20,14 @@ import io
 import json
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from PIL import Image, ImageOps
@@ -45,8 +47,24 @@ FORGET_AFTER_S = 30 * 86400
 _NAME_RE = re.compile(r"^[a-z0-9-]{1,80}-[0-9a-f]{12}\.(?:png|jpg)$")
 _KEY_SAFE_RE = re.compile(r"[^a-z0-9]+")
 
-# One writer at a time per process; readers rely on the atomic replace.
-_LOCK = threading.Lock()
+_RUNTIME = f"_tesserae_plugins.{Path(__file__).resolve().parent.name}.runtime"
+
+
+def shared(name: str, factory: Callable[[], Any]) -> Any:
+    """Process-wide state that outlives a reload of the plugin's modules.
+
+    An in-process widget reload imports these files again; module globals
+    would then give the new code its own lock and worker registry while the
+    old worker thread still writes to the same folder. Keeping them on one
+    holder module, created once, gives every version the same objects.
+    """
+    holder = sys.modules.setdefault(_RUNTIME, ModuleType(_RUNTIME))
+    return holder.__dict__.setdefault(name, factory())
+
+
+# One writer at a time per process, across reloads; readers rely on the
+# atomic replace.
+_LOCK: threading.Lock = shared("store_lock", threading.Lock)
 
 
 @dataclass(frozen=True)

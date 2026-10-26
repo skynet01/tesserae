@@ -46,6 +46,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from email.message import Message
@@ -56,8 +58,6 @@ from typing import Any
 
 from flask import Blueprint, abort, current_app, send_file
 from werkzeug.wrappers import Response
-
-from app.plugin_http import decode_content_encoding
 
 try:
     from app import jobs
@@ -262,9 +262,36 @@ class Web:
         if len(body) > limit:
             raise SourceError(f"{host} sent more than this widget will download.")
         headers = getattr(response, "headers", None) or Message()
-        body = decode_content_encoding(body, str(headers.get("Content-Encoding") or ""))
+        body = decode_body(body, str(headers.get("Content-Encoding") or ""), limit, host)
         status = int(getattr(response, "status", None) or getattr(response, "code", 0) or 0)
         return Reply(status, headers, body, getattr(response, "url", "") or request.full_url)
+
+
+def decode_body(body: bytes, encoding: str, limit: int, host: str) -> bytes:
+    """Undo a gzip or deflate ``Content-Encoding``, never past ``limit`` bytes.
+
+    urllib sends no Accept-Encoding, but a CDN may compress anyway. The cap
+    applies to the decoded size, so a small compressed answer can't expand
+    into a huge one; other codings pass through unchanged.
+    """
+    coding = encoding.lower().strip()
+    if coding in ("gzip", "x-gzip"):
+        attempts = [zlib.MAX_WBITS | 16]
+    elif coding == "deflate":
+        # Zlib-wrapped in theory, raw in some servers' practice.
+        attempts = [zlib.MAX_WBITS, -zlib.MAX_WBITS]
+    else:
+        return body
+    for wbits in attempts:
+        decoder = zlib.decompressobj(wbits)
+        try:
+            out = decoder.decompress(body, limit + 1)
+        except zlib.error:
+            continue
+        if len(out) > limit or decoder.unconsumed_tail:
+            raise SourceError(f"{host} sent more than this widget will download.")
+        return out
+    raise SourceError(f"{host} sent a damaged compressed answer.")
 
 
 def _download(web: Web, url: str, what: str) -> bytes:
@@ -373,11 +400,14 @@ def parse_strips(text: str) -> tuple[list[Source], list[Problem]]:
 
 @dataclass
 class Fetched:
-    """What a source produced: raw pictures with captions, and its date."""
+    """What a source produced: raw pictures with captions, and its date.
+    ``expected`` is how many pictures a complete set has, when some of them
+    may have failed to download (the Far Side's panels)."""
 
     pictures: list[tuple[bytes, str]]
     edition: str | None = None
     label: str | None = None
+    expected: int | None = None
 
 
 class GoComics:
@@ -463,6 +493,12 @@ class GoComics:
             answer = bunny_shield.solve(data_pow)
         except ValueError as err:
             raise SourceError("GoComics changed its browser check; it can't be passed.") from err
+        except bunny_shield.SolverUnavailable as err:
+            raise SourceError(
+                "GoComics wants a browser check this server can't solve: it needs "
+                "cryptography 44 or newer (update Tesserae), or give the strip an "
+                "image address."
+            ) from err
         if answer is None:
             raise SourceError("GoComics' browser check took too long to solve.")
         verify = self._web.post(
@@ -517,7 +553,7 @@ def fetch_farside(web: Web) -> Fetched:
             failure = err
     if not pictures:
         raise failure or SourceError("No Far Side panels could be downloaded.")
-    return Fetched(pictures)
+    return Fetched(pictures, expected=len(panels))
 
 
 def fetch_dilbert(web: Web, today: date) -> Fetched:
@@ -585,43 +621,55 @@ def is_due(source: Source, record: dict[str, Any] | None, today: str, now: float
 
 @dataclass
 class _Run:
-    """One background refresh: a queue a render can add to while it runs."""
+    """One background refresh: a queue a render can add to while it runs.
+
+    Queue entries carry a ``force`` flag (``?fresh=1``), which skips the
+    due checks. ``completed`` remembers what this run already fetched, so a
+    render working from a snapshot taken before that can't queue it again.
+    """
 
     data_dir: Path
     today: date
-    queue: list[Source] = field(default_factory=list)
+    queue: list[tuple[Source, bool]] = field(default_factory=list)
     active: Source | None = None
+    completed: set[str] = field(default_factory=set)
     done: bool = False
     finished: int = 0
     failed: int = 0
     thread: threading.Thread | None = None
 
     def keys(self) -> set[str]:
-        keys = {s.key for s in self.queue}
+        keys = {s.key for s, _ in self.queue}
         if self.active is not None:
             keys.add(self.active.key)
         return keys
 
+    def alive(self) -> bool:
+        return not self.done and self.thread is not None and self.thread.is_alive()
 
-_RUNS: dict[str, _Run] = {}
-_RUNS_LOCK = threading.Lock()
+
+# Kept outside this module (see images.shared) so a reload of the plugin
+# finds the worker already running instead of starting a second one.
+_RUNS: dict[str, _Run] = images.shared("runs", dict)
+_RUNS_LOCK: threading.Lock = images.shared("runs_lock", threading.Lock)
 
 
-def _enqueue(data_dir: Path, sources: list[Source], today: date) -> _Run:
+def _enqueue(data_dir: Path, sources: list[Source], today: date, *, force: bool = False) -> _Run:
     """Queue ``sources`` on the running refresh, starting one if none runs.
 
+    A run whose thread has died without finishing is replaced, not reused.
     The worker runs in a copy of the caller's context, so the widget's
     capability scope (its ``requires:`` hosts) still applies off-thread.
     """
     with _RUNS_LOCK:
         run = _RUNS.get(str(data_dir))
-        start = run is None or run.done
+        start = run is None or not run.alive()
         if start:
             run = _Run(data_dir=data_dir, today=today)
             _RUNS[str(data_dir)] = run
         assert run is not None
-        known = run.keys()
-        run.queue.extend(s for s in sources if s.key not in known)
+        known = run.keys() | (set() if force else run.completed)
+        run.queue.extend((s, force) for s in sources if s.key not in known)
         if start:
             context = contextvars.copy_context()
             run.thread = threading.Thread(
@@ -634,7 +682,7 @@ def _enqueue(data_dir: Path, sources: list[Source], today: date) -> _Run:
 def _running_keys(data_dir: Path) -> set[str]:
     with _RUNS_LOCK:
         run = _RUNS.get(str(data_dir))
-        return set() if run is None or run.done else run.keys()
+        return run.keys() if run is not None and run.alive() else set()
 
 
 def _report(run: _Run, source: Source) -> None:
@@ -652,34 +700,58 @@ def _report(run: _Run, source: Source) -> None:
         )
 
 
+def _finish_job(run: _Run, crashed: bool) -> None:
+    if jobs is None:
+        return
+    with contextlib.suppress(Exception):
+        summary = f"{run.finished - run.failed} of {run.finished} updated"
+        if crashed or (run.failed and run.failed == run.finished):
+            jobs.fail(PLUGIN_ID, "refresh", summary)
+        else:
+            jobs.finish(PLUGIN_ID, "refresh", summary)
+
+
 def _work(run: _Run) -> None:
-    """Drain the run's queue, one source at a time."""
+    """Drain the run's queue, one source at a time.
+
+    Whatever happens, the run ends marked done with nothing active, so the
+    next render starts a fresh worker rather than waiting on a dead one.
+    """
     store = images.Store(run.data_dir)
     gocomics: GoComics | None = None
     web = Web()
-    while True:
+    crashed = False
+    try:
+        while True:
+            with _RUNS_LOCK:
+                if not run.queue:
+                    run.active = None
+                    run.done = True
+                    break
+                source, force = run.queue.pop(0)
+                run.active = source
+            # The render that queued this read the state before earlier work
+            # in this run landed; ask the state again, now.
+            record = store.sources().get(source.key)
+            if not force and not is_due(source, record, run.today.isoformat(), time.time()):
+                continue
+            _report(run, source)
+            if source.kind == "gocomics" and gocomics is None:
+                gocomics = GoComics(run.data_dir / COOKIE_FILE, run.today)
+            if not refresh_source(store, source, run.today, web=web, gocomics=gocomics):
+                run.failed += 1
+            run.finished += 1
+            run.completed.add(source.key)
+    except Exception:
+        crashed = True
+        logger.exception("comics_daily: the refresh worker stopped")
+    finally:
         with _RUNS_LOCK:
-            if not run.queue:
-                run.active = None
-                run.done = True
-                break
-            source = run.queue.pop(0)
-            run.active = source
-        _report(run, source)
-        if source.kind == "gocomics" and gocomics is None:
-            gocomics = GoComics(run.data_dir / COOKIE_FILE, run.today)
-        if not refresh_source(store, source, run.today, web=web, gocomics=gocomics):
-            run.failed += 1
-        run.finished += 1
-    with contextlib.suppress(Exception):
-        store.prune()
-    if jobs is not None:
+            run.active = None
+            run.done = True
         with contextlib.suppress(Exception):
-            summary = f"{run.finished - run.failed} of {run.finished} updated"
-            if run.failed and run.failed == run.finished:
-                jobs.fail(PLUGIN_ID, "refresh", summary)
-            else:
-                jobs.finish(PLUGIN_ID, "refresh", summary)
+            store.prune()
+        _finish_job(run, crashed)
 
 
 def _fetch_source(source: Source, today: date, web: Web, gocomics: GoComics | None) -> Fetched:
@@ -697,8 +769,13 @@ def _fetch_source(source: Source, today: date, web: Web, gocomics: GoComics | No
 def refresh_source(
     store: Any, source: Source, today: date, *, web: Web, gocomics: GoComics | None
 ) -> bool:
-    """Fetch one source and record the outcome. The previous pictures stay
-    unless new ones were stored, so a failure never blanks the page."""
+    """Fetch one source and record the outcome; True when it fully updated.
+
+    The previous pictures stay unless a complete new set was stored, so a
+    failure never blanks the page and a half-downloaded Far Side row never
+    replaces a whole one. Storage failures (a full disk) are logged and
+    reported as a failed source, never raised into the worker.
+    """
     today_iso = today.isoformat()
     started = time.time()
 
@@ -709,35 +786,63 @@ def refresh_source(
         entry["attempts"] = int(entry.get("attempts") or 0) + 1
         entry["last_attempt"] = started
 
-    store.update(source.key, attempt)
+    try:
+        store.update(source.key, attempt)
+    except Exception:
+        logger.exception("comics_daily: could not record an attempt at %s", source.key)
+        return False
     try:
         fetched = _fetch_source(source, today, web, gocomics)
         stored = _store_pictures(store, source, fetched)
     except SourceError as err:
-        message = str(err)
+        outcome: Callable[[dict[str, Any]], None] = _failed(str(err))
+        complete = False
     except Exception:
         logger.exception("comics_daily: fetching %s failed", source.key)
-        message = f"Couldn't update {source.label}."
+        outcome = _failed(f"Couldn't update {source.label}.")
+        complete = False
     else:
-
-        def success(entry: dict[str, Any]) -> None:
-            entry.update(
-                pictures=stored,
-                edition=fetched.edition,
-                fetched_on=today_iso,
-                last_success=time.time(),
-                error=None,
-            )
-            if fetched.label:
-                entry["label"] = fetched.label
-
-        store.update(source.key, success)
+        expected = max(fetched.expected or 0, len(fetched.pictures))
+        complete = len(stored) >= expected
+        outcome = _succeeded(source, fetched, stored, expected, today_iso)
+    try:
+        entry = store.update(source.key, outcome)
+    except Exception:
+        logger.exception("comics_daily: could not record the outcome for %s", source.key)
+        return False
+    if complete:
         logger.info("comics_daily: updated %s (%s)", source.key, fetched.edition or today_iso)
-        return True
+    else:
+        logger.warning("comics_daily: %s not updated: %s", source.key, entry.get("error"))
+    return complete
 
-    store.update(source.key, lambda entry: entry.update(error=message))
-    logger.warning("comics_daily: %s not updated: %s", source.key, message)
-    return False
+
+def _failed(message: str) -> Callable[[dict[str, Any]], None]:
+    return lambda entry: entry.update(error=message)
+
+
+def _succeeded(
+    source: Source, fetched: Fetched, stored: list[dict[str, Any]], expected: int, today: str
+) -> Callable[[dict[str, Any]], None]:
+    def record(entry: dict[str, Any]) -> None:
+        if len(stored) < expected:
+            # Keep the last complete set; a partial one only stands in when
+            # there is nothing else. Not marked fetched today, so it retries.
+            if not entry.get("pictures"):
+                entry.update(pictures=stored, edition=fetched.edition)
+            entry["error"] = f"Only {len(stored)} of {expected} pictures came through."
+            return
+        entry.update(
+            pictures=stored,
+            edition=fetched.edition,
+            fetched_on=today,
+            last_success=time.time(),
+            error=None,
+        )
+        if fetched.label:
+            entry["label"] = fetched.label
+
+    return record
 
 
 def _store_pictures(store: Any, source: Source, fetched: Fetched) -> list[dict[str, Any]]:
@@ -810,7 +915,7 @@ def fetch(
     records = store.sources()
     force = bool(ctx.get("fresh"))
     due = [s for s in wanted if force or is_due(s, records.get(s.key), today_iso, now)]
-    run = _enqueue(store.root, due, today) if due else None
+    run = _enqueue(store.root, due, today, force=force) if due else None
     if run is not None and not any(_pictures(records.get(s.key) or {}, store) for s in wanted):
         # Nothing to show yet: give a quick source the chance to land in this
         # render rather than painting "fetching" and waiting for the repaint.
@@ -819,6 +924,35 @@ def fetch(
         records = store.sources()
     busy = _running_keys(store.root)
     return _payload(wanted, problems, records, busy, options, store, today_iso)
+
+
+def freshness(
+    source: Source, record: dict[str, Any], has_pictures: bool, busy: bool, today: str
+) -> tuple[str, str | None]:
+    """How current a source's pictures are, and the date a note should show.
+
+    ``ok``, ``stale`` (old pictures up), ``missing`` (none, and the last try
+    failed) or ``pending``. A GoComics strip is judged by its own edition,
+    not by whether today's request went through: a page that keeps answering
+    with an old strip is stale once it is more than a day behind, or a day
+    behind with today's retries spent. Archived sources (Dilbert) and image
+    addresses carry no such date and go by the last success.
+    """
+    error = record.get("error")
+    if not has_pictures:
+        return ("missing" if error and not busy else "pending"), None
+    edition = record.get("edition")
+    if source.kind == "gocomics" and isinstance(edition, str) and edition < today:
+        yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
+        spent = (
+            record.get("attempted_on") == today
+            and int(record.get("attempts") or 0) >= EDITION_ATTEMPTS
+        )
+        if edition < yesterday or spent or (error and record.get("fetched_on") != today):
+            return "stale", edition
+    if error and record.get("fetched_on") != today:
+        return "stale", record.get("fetched_on")
+    return "ok", None
 
 
 def _payload(
@@ -839,10 +973,7 @@ def _payload(
         pictures = _pictures(record, store)
         label = str(record.get("label") or source.label)
         error = record.get("error")
-        if pictures:
-            state = "stale" if error and record.get("fetched_on") != today else "ok"
-        else:
-            state = "missing" if error and source.key not in busy else "pending"
+        state, since = freshness(source, record, bool(pictures), source.key in busy, today)
         sources.append(
             {
                 "id": source.name,
@@ -859,8 +990,8 @@ def _payload(
                 {
                     "label": label,
                     "state": state,
-                    "since": record.get("fetched_on"),
-                    "message": error,
+                    "since": since,
+                    "message": error or "",
                 }
             )
         if source.kind == "farside":

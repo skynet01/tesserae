@@ -8,14 +8,17 @@ they do live. Fixtures are trimmed copies of the live pages (2026-10-26).
 from __future__ import annotations
 
 import email.message
+import gzip
 import importlib.util
 import io
 import json
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 import urllib.response
+import zlib
 from datetime import date
 from http.cookiejar import Cookie, MozillaCookieJar
 from pathlib import Path
@@ -184,7 +187,7 @@ def test_challenge_detection() -> None:
 def test_argon2id_matches_reference_vector() -> None:
     """cryptography's Argon2id with the challenge's parameters reproduces the
     hash argon2-cffi gave for the same inputs."""
-    kdf = bunny.Argon2id(
+    kdf = bunny._argon2id()(
         salt=b"userkey-0123456789", length=32, iterations=2, lanes=1, memory_cost=512
     )
     assert kdf.derive(b"chal-abc1230").hex() == (
@@ -505,3 +508,202 @@ def test_fetch_answers_from_disk_while_refresh_runs(
 def test_no_sources_is_an_error(tmp_path: Path) -> None:
     out = srv.fetch({"strips": "", "far_side": False}, {}, ctx={"data_dir": str(tmp_path)})
     assert "Add some strips" in out["error"]
+
+
+# -- review regressions ------------------------------------------------------------
+
+
+def _load(name: str, file: str = "server.py") -> Any:
+    spec = importlib.util.spec_from_file_location(name, _PLUGIN / file)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _wait_done(data_dir: Path) -> Any:
+    run = srv._RUNS[str(data_dir)]
+    assert run.thread is not None
+    run.thread.join(5)
+    assert run.done and run.active is None
+    return run
+
+
+def test_storage_failure_is_contained(
+    web: FakeWeb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full disk while recording fails the source, never the worker."""
+    store = images.Store(tmp_path)
+    source = srv.parse_strips("garfield https://featureassets.gocomics.com/assets/m")[0][0]
+
+    def broken(*_a: Any, **_k: Any) -> Any:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store, "update", broken)
+    assert not srv.refresh_source(store, source, TODAY, web=srv.Web(), gocomics=None)
+
+
+def test_crashed_worker_ends_its_run_and_is_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def explode(*_a: Any, **_k: Any) -> bool:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(srv, "refresh_source", explode)
+    source = srv.Source("url:x", "url", "x", "https://featureassets.gocomics.com/assets/x")
+    first = srv._enqueue(tmp_path, [source], TODAY)
+    _wait_done(tmp_path)
+    assert srv._running_keys(tmp_path) == set()
+
+    # A run left "not done" by a thread that died anyway is not reused.
+    first.done = False
+    first.active = source
+    monkeypatch.setattr(srv, "refresh_source", lambda *a, **k: True)
+    second = srv._enqueue(tmp_path, [source], TODAY)
+    assert second is not first
+    _wait_done(tmp_path)
+
+
+def test_without_argon2id_only_gocomics_challenges_fail(
+    web: FakeWeb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older cryptography (no Argon2id) still loads the widget."""
+    monkeypatch.setitem(sys.modules, "cryptography.hazmat.primitives.kdf.argon2", None)
+    old = _load("_comics_daily_test_old_crypto.bunny_shield", "bunny_shield.py")
+    assert old.is_challenge({}, CHALLENGE_PAGE)
+    with pytest.raises(old.SolverUnavailable):
+        old.solve(DATA_POW)
+
+    monkeypatch.setattr(srv, "bunny_shield", old)
+    gc = "https://www.gocomics.com"
+    web.routes[("GET", f"{gc}/garfield/2026/10/18")] = [_html(CHALLENGE_PAGE, status=403)]
+    with pytest.raises(srv.SourceError, match="cryptography 44"):
+        srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield")
+
+
+def test_reloaded_module_shares_the_running_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    again = _load("_comics_daily_test_reload.server")
+    assert again._RUNS is srv._RUNS
+    assert again._RUNS_LOCK is srv._RUNS_LOCK
+    assert again.images._LOCK is images._LOCK
+
+    gate = threading.Event()
+    calls: list[str] = []
+
+    def slow(_store: Any, source: Any, *_a: Any, **_k: Any) -> bool:
+        gate.wait(5)
+        calls.append(source.key)
+        return True
+
+    monkeypatch.setattr(srv, "refresh_source", slow)
+    a = srv.Source("url:a", "url", "a", "https://featureassets.gocomics.com/assets/a")
+    b = again.Source("url:b", "url", "b", "https://featureassets.gocomics.com/assets/b")
+    run = srv._enqueue(tmp_path, [a], TODAY)
+    # The reloaded code queues onto the old worker instead of starting another.
+    assert again._enqueue(tmp_path, [b], TODAY) is run
+    assert run.keys() == {"url:a", "url:b"}
+    gate.set()
+    _wait_done(tmp_path)
+    assert calls == ["url:a", "url:b"]
+    assert again._running_keys(tmp_path) == set()
+
+
+def test_finished_source_is_not_fetched_again_from_a_stale_snapshot(
+    web: FakeWeb, tmp_path: Path
+) -> None:
+    store = images.Store(tmp_path)
+    source = srv.parse_strips("garfield https://featureassets.gocomics.com/assets/m")[0][0]
+    web.routes[("GET", source.url)] = [_img(_png())]
+    assert srv.refresh_source(store, source, TODAY, web=srv.Web(), gocomics=None)
+    web.requests.clear()
+    before = store.sources()[source.key]
+
+    # A render that read the state before that landed queues it again.
+    srv._enqueue(tmp_path, [source], TODAY)
+    _wait_done(tmp_path)
+    assert web.requests == []
+    assert store.sources()[source.key]["attempts"] == before["attempts"]
+
+    # And a live run that already did it won't take it back.
+    run = srv._Run(data_dir=tmp_path, today=TODAY, completed={source.key})
+    gate = threading.Event()
+    run.thread = threading.Thread(target=gate.wait, args=(5,), daemon=True)
+    run.thread.start()
+    srv._RUNS[str(tmp_path)] = run
+    try:
+        assert srv._enqueue(tmp_path, [source], TODAY) is run
+        assert run.queue == []
+        srv._enqueue(tmp_path, [source], TODAY, force=True)
+        assert [s.key for s, _ in run.queue] == [source.key]
+    finally:
+        run.queue.clear()
+        gate.set()
+        run.thread.join(5)
+        run.done = True
+
+
+def test_partial_far_side_keeps_the_complete_set(web: FakeWeb, tmp_path: Path) -> None:
+    store = images.Store(tmp_path)
+    web.routes[("GET", srv.FARSIDE_URL)] = [_html(FARSIDE_PAGE)]
+    for name in ("one", "two", "three"):
+        web.routes[("GET", f"https://featureassets.amuniversal.com/assets/{name}")] = [
+            _img(_jpeg((95 + len(name), 110)))
+        ]
+    yesterday = date(2026, 10, 24)
+    assert srv.refresh_source(store, srv.FARSIDE, yesterday, web=srv.Web(), gocomics=None)
+    complete = store.sources()["farside"]["pictures"]
+    assert len(complete) == 3
+
+    web.routes[("GET", "https://featureassets.amuniversal.com/assets/two")] = [(503, {}, b"")]
+    web.routes[("GET", "https://featureassets.amuniversal.com/assets/three")] = [
+        _html("<html>not a picture</html>")
+    ]
+    assert not srv.refresh_source(store, srv.FARSIDE, TODAY, web=srv.Web(), gocomics=None)
+    record = store.sources()["farside"]
+    assert record["pictures"] == complete
+    assert record["fetched_on"] == "2026-10-24"
+    assert record["error"] == "Only 1 of 3 pictures came through."
+    # Not marked done for today, so it is tried again after the back-off.
+    assert srv.is_due(srv.FARSIDE, record, "2026-10-25", time.time() + srv.RETRY_STALE_S)
+
+    # With nothing better on disk, the partial set stands in.
+    fresh = images.Store(tmp_path / "fresh")
+    assert not srv.refresh_source(fresh, srv.FARSIDE, TODAY, web=srv.Web(), gocomics=None)
+    assert len(fresh.sources()["farside"]["pictures"]) == 1
+
+
+def test_gocomics_freshness_follows_the_edition() -> None:
+    go = srv.Source("gocomics:garfield", "gocomics", "garfield")
+    today = "2026-10-25"
+    pics = True
+    ok_today = {"fetched_on": today, "edition": today}
+    assert srv.freshness(go, ok_today, pics, False, today) == ("ok", None)
+    # Yesterday's strip while today's retries remain: not published yet.
+    lagging = {"fetched_on": today, "edition": "2026-10-24", "attempted_on": today, "attempts": 1}
+    assert srv.freshness(go, lagging, pics, False, today) == ("ok", None)
+    spent = dict(lagging, attempts=srv.EDITION_ATTEMPTS)
+    assert srv.freshness(go, spent, pics, False, today) == ("stale", "2026-10-24")
+    # The request "worked" today but the site keeps serving an old strip.
+    old = {"fetched_on": today, "edition": "2026-10-20", "attempted_on": today, "attempts": 1}
+    assert srv.freshness(go, old, pics, False, today) == ("stale", "2026-10-20")
+    # Archived Dilbert carries an old date by design.
+    dilbert = srv.Source("dilbert", "dilbert", "dilbert")
+    assert srv.freshness(dilbert, dict(old), pics, False, today) == ("ok", None)
+    assert srv.freshness(go, {"error": "x"}, False, False, today) == ("missing", None)
+    assert srv.freshness(go, {}, False, True, today) == ("pending", None)
+
+
+def test_decoded_size_is_capped() -> None:
+    big = b"a" * 10_000
+    with pytest.raises(srv.SourceError, match="more than"):
+        srv.decode_body(gzip.compress(big), "gzip", 100, "example.org")
+    assert srv.decode_body(gzip.compress(b"hello"), "gzip", 100, "example.org") == b"hello"
+    raw = zlib.compressobj(wbits=-zlib.MAX_WBITS)
+    deflated = raw.compress(b"hello") + raw.flush()
+    assert srv.decode_body(deflated, "deflate", 100, "example.org") == b"hello"
+    assert srv.decode_body(b"plain", "", 100, "example.org") == b"plain"
+    with pytest.raises(srv.SourceError, match="damaged"):
+        srv.decode_body(b"not gzip", "gzip", 100, "example.org")
