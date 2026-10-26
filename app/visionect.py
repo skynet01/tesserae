@@ -105,6 +105,11 @@ PROBE_TIMEOUT_S = 20.0
 # at most RENDER_HOLD_MAX_S.
 RENDER_HOLD_POLL_S = 5.0
 RENDER_HOLD_MAX_S = 600.0
+# A latest render that couldn't be read or encoded is tried again after
+# FAILED_RETRY_S, doubling to at most FAILED_RETRY_MAX_S, and at once when it
+# is published again.
+FAILED_RETRY_S = 60.0
+FAILED_RETRY_MAX_S = 15 * 60.0
 # A blank device binds the first unknown sign that connects only within this
 # long of being added or having its UUID cleared (the time is stored with the
 # device's settings under AUTO_BIND_KEY); after that an unknown sign is listed
@@ -264,12 +269,17 @@ class _Sign:
     frame: Any = None  # EncodedFrame for frame_digest
     frame_digest: str = ""
     failed_digest: str = ""  # a latest render that couldn't be read or encoded
+    failed_stamp: Any = None  # that render's publication timestamp
+    failed_retry_at: float = 0.0  # monotonic; when to try it again
+    failed_tries: int = 0
+    failed_logged: str = ""  # the failing digest already logged (once each)
     resend_stamp: float = 0.0  # the last History resend honoured (its timestamp)
     hold_since: float = 0.0  # monotonic; sleep held for a render in progress
     shown_digest: str = ""  # acked by the sign during this run
     shown_checksum: int | None = None  # its state checksum (status tag 9)
     shown_at: float = 0.0  # wall clock of that ACK
     crc_corrected: bool = False  # one corrective resend per mismatch
+    corrected_digest: str = ""  # the frame that corrective resend was for
     inflight: _Inflight | None = None  # at most one frame or sleep at a time
     retry_at: float = 0.0  # monotonic; after a refused frame
     sleep_retry_at: float = 0.0  # monotonic; after a refused sleep
@@ -863,10 +873,17 @@ class VisionectService:
         #    can't be read or encoded is noted once and skipped: the sign
         #    keeps (and may sleep on) the frame it has, rather than this
         #    pass failing every minute all night.
+        stamp = (latest or {}).get("timestamp")
+        backing_off = (
+            digest == sign.failed_digest
+            and stamp == sign.failed_stamp
+            and time.monotonic() < sign.failed_retry_at
+        )
         if (
             latest
             and digest
-            and digest not in (sign.frame_digest, sign.failed_digest)
+            and digest != sign.frame_digest
+            and not backing_off
             and status is not None
         ):
             path = artifact_path(ctx.renders_dir, latest)
@@ -875,37 +892,34 @@ class VisionectService:
                     raise FileNotFoundError(f"{path} is missing")
                 frame = await loop.run_in_executor(None, _encode, path, panel)
             except Exception as exc:
-                sign.failed_digest = digest
-                sign.last_error = (
-                    "The latest render couldn't be read, so the sign keeps its last frame."
-                )
-                logger.warning(
-                    "visionect %s: can't send render %s (%s); the sign keeps its last frame",
-                    device.id,
-                    digest[:12],
-                    exc,
-                    exc_info=not isinstance(exc, FileNotFoundError),
-                )
+                self._render_failed(sign, device, digest, stamp, exc)
             else:
                 current = ctx.latest_render_fn(device.id) or {}
                 if (
                     self._ctx_gen != gen
                     or str(current.get("digest") or "") != digest
                     or self._device_for_uuid(sign.uuid) is not device
-                    or sign.status is not status
+                    or getattr(sign.status, "display_type", None) != status.display_type
                 ):
-                    sign.dirty = True  # superseded while encoding; start over
+                    # Superseded while encoding (a newer render, another
+                    # device, a different panel); start over. A new status
+                    # with the same geometry doesn't count.
+                    sign.dirty = True
                     return
                 sign.frame, sign.frame_digest = frame, digest
-                sign.failed_digest = ""
+                sign.failed_digest = sign.failed_logged = ""
+                sign.failed_tries = 0
                 sign.repaint_until = 0.0
                 sign.last_error = ""
-                if not sign.shown_digest and status.display_state_crc == frame.state_checksum:
+                checksum = int(frame.state_checksum)
+                reported = status.display_state_crc
+                if not sign.shown_digest and reported in (checksum, perturbed_checksum(checksum)):
                     # Before our first ACK this run (a restart) the sign's CRC
-                    # is the best evidence: it already shows this frame. Its
-                    # checksum and time arm the glass check, as an ACK would.
+                    # is the best evidence: it already shows this frame (as a
+                    # History resend left it, perhaps). Its checksum and time
+                    # arm the glass check, as an ACK would.
                     sign.shown_digest = digest
-                    sign.shown_checksum = int(frame.state_checksum)
+                    sign.shown_checksum = int(reported)
                     sign.shown_at = time.time()
 
         if not self._alive(sign) or sign.inflight is not None:
@@ -915,8 +929,8 @@ class VisionectService:
         # 2. Send the frame the sign hasn't acked, one at a time. A History
         #    "resend" of the frame it already shows is honoured once, with a
         #    checksum the sign can't hold, so it really repaints (ghosting).
-        stamp = resend_stamp(latest) if digest and digest == sign.frame_digest else 0.0
-        repaint = bool(stamp) and stamp != sign.resend_stamp
+        resend = resend_stamp(latest) if digest and digest == sign.frame_digest else 0.0
+        repaint = bool(resend) and resend != sign.resend_stamp
         if sign.frame is not None and (sign.frame_digest != sign.shown_digest or repaint):
             wait = sign.retry_at - time.monotonic()
             if wait > 0:
@@ -940,7 +954,7 @@ class VisionectService:
                 writer=writer,
                 digest=sign.frame_digest,
                 checksum=checksum,
-                resend_stamp=stamp,
+                resend_stamp=resend,
             )
             sign.inflight = inflight
             self._publish(sign)  # "sending" while the write is under way
@@ -997,6 +1011,34 @@ class VisionectService:
         sign.inflight = inflight
         logger.info("visionect: quiet hours, sign %s sleeps for %d min", sign.uuid, minutes)
         await self._send(sign, inflight, SLEEP_ACK_TIMEOUT_S)
+
+    def _render_failed(
+        self, sign: _Sign, device: Device, digest: str, stamp: Any, exc: Exception
+    ) -> None:
+        """Note a latest render that couldn't be read or encoded. It is tried
+        again with a back-off, or at once if it is published again, and
+        logged once (a traceback only for an encode error)."""
+        if digest != sign.failed_digest:
+            sign.failed_tries = 0
+        sign.failed_digest, sign.failed_stamp = digest, stamp
+        sign.failed_tries += 1
+        backoff = min(FAILED_RETRY_S * 2 ** (sign.failed_tries - 1), FAILED_RETRY_MAX_S)
+        sign.failed_retry_at = time.monotonic() + backoff
+        sign.last_error = "The latest render couldn't be read, so the sign keeps its last frame."
+        if sign.failed_logged == digest:
+            logger.debug(
+                "visionect %s: render %s still unreadable: %s", device.id, digest[:12], exc
+            )
+            return
+        sign.failed_logged = digest
+        logger.warning(
+            "visionect %s: can't send render %s (%s); the sign keeps its last frame and it is "
+            "tried again",
+            device.id,
+            digest[:12],
+            exc,
+            exc_info=not isinstance(exc, FileNotFoundError),
+        )
 
     async def _send(self, sign: _Sign, inflight: _Inflight, ack_timeout: float) -> None:
         """Put what ``inflight`` queued on the wire, then start its ACK clock."""
@@ -1117,7 +1159,11 @@ class VisionectService:
                     sign.shown_digest = inflight.digest
                     sign.shown_checksum = inflight.checksum
                     sign.shown_at = time.time()
-                    sign.crc_corrected = False  # a new frame: its own corrective resend
+                    if inflight.digest != sign.corrected_digest:
+                        # A new desired frame gets its own corrective resend;
+                        # the ACK of that resend itself doesn't re-arm it.
+                        sign.crc_corrected = False
+                        sign.corrected_digest = ""
                     sign.retry_at = 0.0
                     sign.last_error = ""
                     if inflight.resend_stamp:
@@ -1269,6 +1315,7 @@ class VisionectService:
         if time.time() - sign.shown_at < CRC_CONVERGE_S or sign.crc_corrected:
             return
         sign.crc_corrected = True
+        sign.corrected_digest = sign.shown_digest
         logger.info(
             "visionect: sign %s reports state %s, not the acked %s; re-sending",
             sign.uuid,

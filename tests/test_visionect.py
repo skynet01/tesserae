@@ -1647,3 +1647,112 @@ def test_rejected_and_unidentified_identities_leave_no_library_state(
         assert server.stats.last_seen == {}
     finally:
         h.svc.stop()
+
+
+def test_a_corrective_resend_is_spent_until_a_new_frame_is_acked() -> None:
+    """A sign whose CRC never matches gets one corrective resend per frame,
+    not one every convergence period: the resend's own ACK doesn't re-arm."""
+    from pyvisionect.packets import ControlPacket as Control
+    from pyvisionect.session import Acked
+
+    svc = visionect.VisionectService()
+    sign = svc._sign(UUID)
+    conn = SimpleNamespace(device_id=visionect.uuid_bytes(UUID), closed=False)
+    sign.conn = conn
+    sign.shown_digest, sign.shown_checksum = "frame-a", 111
+    wrong = SimpleNamespace(display_state_crc=222)
+    long_ago = time.time() - visionect.CRC_CONVERGE_S - 1
+
+    def _ack(packet_id: int, digest: str) -> None:
+        sign.inflight = visionect._Inflight(
+            kind="image", packet_id=packet_id, conn=conn, writer=None, digest=digest, checksum=111
+        )
+        svc._handle_event(
+            conn,
+            Acked(packet_id=packet_id, control=Control.ack(), device_id=visionect.uuid_bytes(UUID)),
+        )
+
+    sign.shown_at = long_ago
+    svc._check_glass(sign, wrong)
+    assert sign.shown_digest == "" and sign.crc_corrected  # the one corrective resend
+    _ack(1, "frame-a")  # its ACK
+    assert sign.crc_corrected
+    sign.shown_at = long_ago
+    svc._check_glass(sign, wrong)
+    assert sign.shown_digest == "frame-a"  # no second correction cycle
+    _ack(2, "frame-b")  # a new desired frame re-arms it
+    assert not sign.crc_corrected
+
+
+@pytest.mark.parametrize("how", ["published again", "back-off"])
+def test_a_render_that_was_missing_is_sent_once_it_is_back(
+    harness: Harness, monkeypatch, caplog, how: str
+) -> None:
+    monkeypatch.setattr(visionect, "FAILED_RETRY_S", 0.3)
+    harness.render("frame-a")
+    target = harness.renders / "frame-a.png"
+    saved = target.read_bytes()
+    target.unlink()
+    harness.latest = {**harness.latest, "timestamp": 1.0}  # type: ignore[dict-item]
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        assert _wait(
+            lambda: "couldn't be read" in (harness.svc.sign_view(UUID) or {}).get("last_error", "")
+        )
+        harness.push()  # inside the back-off, nothing new: not retried, not logged again
+        target.write_bytes(saved)  # the artifact is back, same digest
+        if how == "published again":
+            harness.latest = {**harness.latest, "timestamp": 2.0}  # type: ignore[dict-item]
+        else:
+            time.sleep(0.4)
+        harness.push()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+    finally:
+        sign.close()
+    notes = [r for r in caplog.records if "can't send render" in r.getMessage()]
+    assert len(notes) == 1
+
+
+def test_a_status_during_an_encode_doesnt_discard_it(harness: Harness, monkeypatch) -> None:
+    calls: list[int] = []
+    real = visionect._encode
+
+    def _slow_encode(path: Path, panel: Any) -> Any:
+        calls.append(1)
+        time.sleep(0.6)
+        return real(path, panel)
+
+    monkeypatch.setattr(visionect, "_encode", _slow_encode)
+    harness.render("frame-a")
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        time.sleep(0.2)
+        sign.status()  # a heartbeat (or a probe's answer) mid-encode, same geometry
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        assert len(calls) == 1
+    finally:
+        sign.close()
+
+
+def test_a_frame_left_by_a_history_resend_is_adopted_after_a_restart(harness: Harness) -> None:
+    """After a resend the sign holds the deliberately altered checksum; a
+    restart must still see that it shows the frame, not repaint it."""
+    harness.render("frame-a")
+    status = StatusPacket(records=STATUS_TAGS, sentinel=0)
+    path = harness.renders / "frame-a.png"
+    checksum = int(visionect._encode(path, visionect.sign_panel(status)).state_checksum)
+    held = visionect.perturbed_checksum(checksum)
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status(with_tag(9, held))
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("in_sync") is True)
+        assert harness.svc._signs[UUID].shown_checksum == held
+        sign.wait_for(lambda s: len(s.images()) > 0, timeout=1.0)
+        assert sign.images() == []
+    finally:
+        sign.close()
