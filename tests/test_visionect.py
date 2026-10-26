@@ -1557,3 +1557,44 @@ def test_a_connection_already_replaced_in_the_library_is_ignored_not_refused() -
     status = StatusPacket(records=STATUS_TAGS, sentinel=0)
     assert svc._connected(stale, UUID, status) == ""
     assert sign.refused is None and sign.status is None
+
+
+def test_rejected_and_unidentified_identities_leave_no_library_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The library allocates store and stats entries for any UUID a frame
+    names, before Tesserae admits a sign. Malformed first statuses and signs
+    refused for being one unknown too many never reach the tracked signs, so
+    they are pruned as their connections close."""
+    monkeypatch.setattr(visionect, "MAX_UNKNOWN_SIGNS", 1)
+    h = Harness(tmp_path, uuid=_other_uuid(999))  # no device free to bind
+    try:
+        assert h.svc.start()
+        server = h.svc._server
+        for n in range(100):
+            sock = _raw(h.svc.port)
+            sock.sendall(device_frame(_other_uuid(n), PacketType.STATUS, b"\x01\x02\x03", 1))
+            sock.close()
+            assert _wait(lambda n=n: server.stats.accepted == n + 1 and server._open == 0)
+        assert server.stats.identified == 100  # each one registered a UUID
+        assert len(h.svc._store) == 0 and server.stats.last_seen == {}
+        # One unknown sign is tracked; the next is refused, and leaves nothing.
+        kept = FakeSign(h.svc.port, uuid=_other_uuid(500))
+        try:
+            kept.status()
+            assert _wait(lambda: _other_uuid(500) in h.svc._signs)
+            extra = FakeSign(h.svc.port, uuid=_other_uuid(501))
+            extra.status()
+            assert extra.dropped(timeout=5)
+            extra.close()
+            assert _wait(lambda: server._open == 1)
+            assert set(server.stats.last_seen) == {visionect.uuid_bytes(_other_uuid(500))}
+            assert len(h.svc._store) == 1
+        finally:
+            kept.close()
+        assert _wait(lambda: server._open == 0)
+        h.svc._call_soon(h.svc._rescan)  # notices it left: an unbound sign is forgotten
+        assert _wait(lambda: not h.svc._signs and len(h.svc._store) == 0)
+        assert server.stats.last_seen == {}
+    finally:
+        h.svc.stop()

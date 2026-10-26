@@ -525,6 +525,7 @@ class VisionectService:
         server = GuardedServer(
             on_events=self._on_events, store=store, host=self.host, port=self.port
         )
+        server.keep_identity = self._keeps_identity
         self._stop_event, self._store, self._server = stop_event, store, server
         await server.start()
         logger.info("visionect: listening for signs on %s:%d", self.host, self.port)
@@ -755,6 +756,10 @@ class VisionectService:
         last_seen = getattr(stats, "last_seen", None)
         if isinstance(last_seen, dict):
             last_seen.pop(key, None)
+
+    def _keeps_identity(self, device_id: bytes) -> bool:
+        """The listener keeps library state only for UUIDs tracked here."""
+        return normalise_uuid(device_id.hex()) in self._signs
 
     def _unknown_signs(self) -> int:
         return sum(1 for uuid in self._signs if self._device_for_uuid(uuid) is None)

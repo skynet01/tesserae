@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
+from collections.abc import Callable
 from typing import Any
 
 from pyvisionect.io import VisionectServer
@@ -193,6 +194,10 @@ class GuardedServer(VisionectServer):
         self.refused_connections = 0
         self.rejected_frames = 0
         self.identify_timeouts = 0
+        # Whether Tesserae keeps state for a UUID (a sign it tracks). The
+        # library allocates store and stats entries for every UUID a frame
+        # names, admitted or not; the rest are pruned as connections close.
+        self.keep_identity: Callable[[bytes], bool] = lambda _device_id: False
 
     def mark_identified(self, writer: Any) -> None:
         """The socket behind ``writer`` identified as a sign Tesserae keeps."""
@@ -234,6 +239,24 @@ class GuardedServer(VisionectServer):
             self._per_peer[ip] -= 1
             if self._per_peer[ip] <= 0:
                 del self._per_peer[ip]
+            self.prune_identities()
+
+    def prune_identities(self) -> None:
+        """Forget the per-UUID state the library keeps (its device store,
+        ``stats.last_seen``) for every UUID with no open connection that
+        Tesserae doesn't keep: a malformed first status, a sign refused for
+        being one unknown too many, a made-up UUID."""
+        live = set(getattr(self, "_connections", None) or ())
+
+        def gone(device_id: bytes) -> bool:
+            return device_id not in live and not self.keep_identity(device_id)
+
+        prune = getattr(self.store, "prune", None)
+        if callable(prune):
+            prune(gone)
+        last_seen = self.stats.last_seen
+        for device_id in [d for d in last_seen if gone(d)]:
+            del last_seen[device_id]
 
     def _identify_deadline(self, writer: Any) -> None:
         guard = self._guards.get(writer)
@@ -268,3 +291,10 @@ class PrunableStore(DeviceStateStore):
         states = getattr(self, "_states", None)
         if isinstance(states, dict):
             states.pop(device_id, None)
+
+    def prune(self, drop: Callable[[bytes], bool]) -> None:
+        """Forget every UUID ``drop`` says to."""
+        states = getattr(self, "_states", None)
+        if isinstance(states, dict):
+            for device_id in [d for d in states if drop(d)]:
+                del states[device_id]
