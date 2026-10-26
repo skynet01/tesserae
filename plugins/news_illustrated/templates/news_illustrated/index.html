@@ -1,12 +1,14 @@
 {% extends "_base.html" %}
 {% from "_components.html" import card_head, button, empty_state %}
-{% block title %}AI News, Tesserae{% endblock %}
+{% block title %}News, AI Illustrated, Tesserae{% endblock %}
 
 {% block main %}
 <div class="page-head">
-  <h1><i class="ph-bold ph-newspaper-clipping" aria-hidden="true"></i> AI News</h1>
-  <p class="page-blurb">One story a day from each of your feeds, summarised and drawn as an ink cartoon. Panels show one story at a time and move to the next on each refresh. Keys, feeds and prompts are under <a href="{{ settings_url }}">this widget's settings</a>.</p>
+  <h1><i class="ph-bold ph-newspaper-clipping" aria-hidden="true"></i> News, AI Illustrated</h1>
+  <p class="page-blurb">One story a day from each of your feeds, summarised and drawn as an ink cartoon. Panels show one story at a time and move to the next on each refresh.</p>
 </div>
+
+{% include "_plugin_admin_settings.html" %}
 
 <section class="card">
   {{ card_head('Making stories', icon_name='clock', level=2) }}

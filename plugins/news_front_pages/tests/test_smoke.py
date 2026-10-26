@@ -340,7 +340,7 @@ def test_the_settings_card_shows_the_old_text_as_rows_and_saving_migrates(
 ) -> None:
     store = app.config["SETTINGS_STORE"]
     store.patch_section("plugins", {"news_front_pages": {"papers": "NY_NYT 3.5\nWSJ 2\n# USAT"}})
-    page = client.get("/settings/plugins")
+    page = client.get("/plugins/news_front_pages/")
     assert page.status_code == 200
     body = page.get_data(as_text=True)
     card = body[body.index('id="plugin-news_front_pages"') :]
@@ -359,6 +359,7 @@ def test_the_settings_card_shows_the_old_text_as_rows_and_saving_migrates(
     # Saving the card as shown stores the rows; the widget reads them the same.
     resp = client.post("/settings/plugin-news_front_pages", data={"papers": json.dumps(shown)})
     assert resp.status_code == 302
+    assert resp.location == "/plugins/news_front_pages/#plugin-news_front_pages"
     saved = store.get_for_runtime("plugins", "news_front_pages", fields)["papers"]
     assert saved == shown
     assert server.parse_papers(saved) == server.parse_papers("NY_NYT 3.5\nWSJ 2\n# USAT")

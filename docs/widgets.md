@@ -152,7 +152,12 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   titled "Melbourne" for no reason. Name the option something else
   (`title`) if it isn't a place.
 * **`settings`**, plugin-wide knobs (one set across all cells using
-  this widget). Surfaces in `/settings/plugins/<id>`. `secret: true`
+  this widget). Surfaces in `/settings/plugins`. A widget with its own admin
+  page can export `ADMIN_SETTINGS = True` from `server.py` and render the
+  shared `_plugin_admin_settings.html` partial with
+  `section=app.plugin_admin.settings_section(plugin)`. Its settings then live
+  under Widgets > Admin pages, and the existing settings save endpoint returns
+  there. The same masking, validation and storage rules apply. `secret: true`
   stores under `<name>_secret` in `settings.json` so an on-disk grep
   for `secret` reveals every sensitive value. `advanced: true` folds a
   setting into the card's "More options" section, as on cell options.

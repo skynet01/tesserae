@@ -1,7 +1,7 @@
 {
   "tesserae_compat": "1.x",
   "name": "News, AI Illustrated",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "kind": "widget",
   "locales": ["en"],
   "description": "AI News: once a day, the top story of each of your feeds, summarised by Groq and drawn as a satirical ink cartoon (kie.ai, Gemini, Pollinations or HuggingFace). Shows one story at a time, poster style, moving to the next on each refresh.",

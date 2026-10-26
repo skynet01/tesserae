@@ -1,0 +1,10 @@
+{% extends "_base.html" %}
+{% block title %}Newspaper, Tesserae{% endblock %}
+{% block main %}
+<header class="page-head">
+  <h1><i class="ph ph-newspaper" aria-hidden="true"></i> Newspaper</h1>
+  <p class="page-blurb">Choose the papers in your rotation. Expand a row to change its paper code or adjust the front-page crop.</p>
+</header>
+{% set collapsible_papers = true %}
+{% include "_plugin_admin_settings.html" %}
+{% endblock %}

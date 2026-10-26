@@ -1057,6 +1057,15 @@
         const all = rows();
         all.forEach((row, i) => {
           row.setAttribute("aria-label", `${rowLabel} ${i + 1} of ${all.length}`);
+          const title = row.querySelector("[data-repeater-title]");
+          const code = row.querySelector('[data-repeater-type="string"]');
+          if (title) title.textContent = (code && code.value.trim()) || `New ${rowLabel.toLowerCase()}`;
+          const toggle = row.querySelector(".repeater-row-toggle input");
+          const toggleLabel = row.querySelector("[data-repeater-toggle-label]");
+          if (toggle && toggleLabel) {
+            toggleLabel.textContent = toggle.checked ? "In rotation" : "Paused";
+            toggle.setAttribute("aria-label", `Include ${title ? title.textContent : rowLabel} in rotation`);
+          }
           setOff(row.querySelector("[data-repeater-up]"), i === 0);
           setOff(row.querySelector("[data-repeater-down]"), i === all.length - 1);
           setOff(row.querySelector("[data-repeater-remove]"), all.length <= min);
@@ -1111,6 +1120,11 @@
         refresh();
       }
 
+      // Browser validation must reveal a required field before focusing it.
+      list.addEventListener("invalid", (ev) => {
+        const details = ev.target.closest("[data-repeater-details]");
+        if (details) details.open = true;
+      }, true);
       list.addEventListener("input", () => serialise(false));
       list.addEventListener("change", () => serialise(false));
 
@@ -1122,6 +1136,8 @@
         const row = newRow(null);
         if (!row) return;
         list.appendChild(row);
+        const details = row.querySelector("[data-repeater-details]");
+        if (details) details.open = true;
         serialise(true);
         const first =
           row.querySelector("input:not([type=checkbox]), textarea, select") ||
@@ -1144,7 +1160,7 @@
           const next = all[at + 1] || all[at - 1] || null;
           row.remove();
           serialise(true);
-          const focusTo = next ? next.querySelector("[data-repeater-remove]") : addBtn;
+          const focusTo = next ? next.querySelector("summary, [data-repeater-remove]") : addBtn;
           if (focusTo) focusTo.focus();
           announce(`${rowLabel} ${at + 1} removed.`);
           return;

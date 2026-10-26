@@ -106,7 +106,7 @@ from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from flask import Blueprint, abort, current_app, send_from_directory
+from flask import Blueprint, abort, current_app, render_template, send_from_directory
 from PIL import Image
 from werkzeug.wrappers import Response
 
@@ -1619,8 +1619,21 @@ def choices(name: str) -> list[dict[str, str]]:
 RENDER_SAFE_ENDPOINTS: tuple[str, ...] = (f"{PLUGIN_ID}.serve_page",)
 
 
+# Settings and controls belong together under Widgets > Admin pages.
+ADMIN_SETTINGS = True
+
+
 def blueprint() -> Blueprint:
-    bp = Blueprint(PLUGIN_ID, __name__)
+    bp = Blueprint(PLUGIN_ID, __name__, template_folder="templates")
+
+    @bp.get("/")
+    def index() -> str:
+        from app.plugin_admin import settings_section
+
+        plugin = _plugin()
+        if plugin is None:
+            abort(404)
+        return render_template("news_front_pages/index.html", section=settings_section(plugin))
 
     @bp.get("/page/<name>")
     def serve_page(name: str) -> Response:

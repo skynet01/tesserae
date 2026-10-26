@@ -408,10 +408,19 @@ macro here instead.
    their own. Rows are drawn here so they show before any script runs; the
    <template> is one empty row for the Add button. ``__i__`` in its ids is
    replaced per new row. -#}
-{%- macro _repeater_row(field_id, view, row, idx, form=None) -%}
-<li class="repeater-row" data-repeater-row>
+{%- macro _repeater_row(field_id, view, row, idx, form=None, collapsible=false) -%}
+{% set toggle = (view.subs|selectattr('type', 'equalto', 'boolean')|first) if collapsible else none %}
+{% set title_field = view.subs|selectattr('type', 'equalto', 'string')|first %}
+<li class="repeater-row{% if collapsible %} repeater-row--collapsible{% endif %}" data-repeater-row>
+  {% if collapsible %}
+  <details data-repeater-details>
+    <summary>
+      <i class="ph ph-caret-right repeater-caret" aria-hidden="true"></i>
+      <span class="repeater-row-title" data-repeater-title>{{ row.get(title_field.name) or 'New ' ~ view.row_label|lower if title_field else view.row_label }}</span>
+    </summary>
+  {% endif %}
   <div class="repeater-row-fields">
-  {%- for sub in view.subs %}
+  {%- for sub in view.subs if not (collapsible and toggle and sub.name == toggle.name) %}
     {%- set cid = field_id ~ '-' ~ idx ~ '-' ~ sub.name %}
     {%- set val = row.get(sub.name) %}
     {%- if sub.type == 'boolean' %}
@@ -471,29 +480,42 @@ macro here instead.
     <button type="button" class="ghost repeater-btn" data-repeater-down aria-label="Move {{ view.row_label }} down" title="Move down"><i class="ph ph-arrow-down" aria-hidden="true"></i></button>
     <button type="button" class="ghost danger repeater-btn" data-repeater-remove aria-label="Remove {{ view.row_label }}" title="Remove"><i class="ph ph-trash" aria-hidden="true"></i></button>
   </div>
+  {% if collapsible %}
+  </details>
+  {% if toggle %}
+  {% set cid = field_id ~ '-' ~ idx ~ '-' ~ toggle.name %}
+  <label class="switch repeater-row-toggle" for="{{ cid }}">
+    <span class="switch-label" data-repeater-toggle-label>{{ 'In rotation' if row.get(toggle.name) else 'Paused' }}</span>
+    <input type="checkbox" id="{{ cid }}" data-repeater-key="{{ toggle.name }}" data-repeater-type="boolean"
+           {% if form %}form="{{ form }}"{% endif %}{% if row.get(toggle.name) %} checked{% endif %}>
+    <span class="switch-track"><span class="switch-thumb"></span></span>
+  </label>
+  {% endif %}
+  {% endif %}
 </li>
 {%- endmacro -%}
 
-{%- macro repeater_field(field_id, name, label, spec, value=None, help=None, form=None) -%}
+{%- macro repeater_field(field_id, name, label, spec, value=None, help=None, form=None, collapsible=false) -%}
 {%- set view = repeater_view(spec, value) -%}
-<div class="field field--repeater" data-repeater role="group" aria-labelledby="{{ field_id }}-label"
+<div class="field field--repeater{% if collapsible %} repeater--collapsible{% endif %}" data-repeater role="group" aria-labelledby="{{ field_id }}-label"
      data-repeater-min="{{ view.min_rows }}" data-repeater-max="{{ view.max_rows }}"
      data-repeater-row-label="{{ view.row_label }}" data-repeater-id="{{ field_id }}">
-  <span class="field-label" id="{{ field_id }}-label">{{ label }}{{ info_pop(help) }}</span>
+  <span class="field-label" id="{{ field_id }}-label">{{ label }}{% if not collapsible %}{{ info_pop(help) }}{% endif %}</span>
   <input type="hidden" name="{{ name }}" value="{{ view.rows|tojson|forceescape }}"
          data-repeater-storage {% if form %}form="{{ form }}"{% endif %}>
   <ol class="repeater-list" data-repeater-list>
     {%- for row in view.rows %}
-    {{ _repeater_row(field_id, view, row, loop.index0, form) }}
+    {{ _repeater_row(field_id, view, row, loop.index0, form, collapsible) }}
     {%- endfor %}
   </ol>
   <p class="repeater-empty" data-repeater-empty{% if view.rows %} hidden{% endif %}>Nothing here yet.</p>
-  <template data-repeater-template>{{ _repeater_row(field_id, view, view.defaults, '__i__', form) }}</template>
+  <template data-repeater-template>{{ _repeater_row(field_id, view, view.defaults, '__i__', form, collapsible) }}</template>
   <div class="repeater-foot">
     <button type="button" class="repeater-add" data-repeater-add
             {% if view.rows|length >= view.max_rows %}aria-disabled="true"{% endif %}>
       <i class="ph ph-plus" aria-hidden="true"></i><span>{{ view.add_label }}</span>
     </button>
+    {% if collapsible %}{{ info_pop(help) }}{% endif %}
     <span class="repeater-count" data-repeater-count>{{ view.rows|length }} of at most {{ view.max_rows }}</span>
   </div>
   <span class="sr-only" data-repeater-status aria-live="polite"></span>

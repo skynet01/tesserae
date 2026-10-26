@@ -69,6 +69,7 @@ _register_package()
 from . import pipeline, store  # noqa: E402
 
 PLUGIN_ID = pipeline.PLUGIN_ID
+ADMIN_SETTINGS = True
 # How often editors and the push follow-ups look again while a run is going.
 LIVE_REFRESH_S = 15
 
@@ -131,6 +132,8 @@ def blueprint() -> Blueprint:
 
     @bp.get("/")
     def index() -> str:
+        from app.plugin_admin import settings_section
+
         data_dir = _data_dir()
         cfg = pipeline.Config.from_settings(_settings())
         tz = _timezone()
@@ -145,7 +148,7 @@ def blueprint() -> Blueprint:
             edition_done=state.get("edition") == current,
             last=last,
             when=lambda ts: datetime.fromtimestamp(int(ts or 0), tz).strftime("%Y-%m-%d %H:%M"),
-            settings_url=_settings_url(),
+            section=settings_section(current_app.config["PLUGIN_REGISTRY"].get(PLUGIN_ID)),
         )
 
     @bp.get("/image/<name>")
@@ -197,13 +200,6 @@ def _settings() -> dict[str, Any]:
     fields = plugin.manifest.get("settings", [])
     got: dict[str, Any] = settings_store.get_for_runtime("plugins", PLUGIN_ID, fields)
     return got
-
-
-def _settings_url() -> str:
-    try:
-        return url_for("auth.settings_area", area="plugins", _anchor=f"plugin-{PLUGIN_ID}")
-    except Exception:
-        return "/settings"
 
 
 def _timezone() -> tzinfo | None:

@@ -1,0 +1,28 @@
+{% from "_components.html" import auto_field, card_head, repeater_field, options_more_open, options_more_close with context %}
+<section class="card widget-admin-settings" id="{{ section.id }}">
+  {{ card_head('Papers' if collapsible_papers|default(false) else 'Settings', icon_name='sliders-horizontal', level=2,
+               blurb='Papers appear in the order below. Turn a paper off to keep it saved without including it in rotation.' if collapsible_papers|default(false) else 'Feeds, daily schedule and provider keys. Saving settings does not start a run.') }}
+  <form method="post" action="{{ section.endpoint }}" class="form" data-dirty-form>
+    {% set groups = option_sections(section.fields, section.state) %}
+    {% for field in groups.basic + groups.advanced %}
+      {% if groups.advanced and loop.index0 == groups.basic|length %}{{ options_more_open() }}{% endif %}
+      {% set field_id = section.id ~ '-' ~ field.name %}
+      {% set value = section.state.get(field.name, field.get('default', '')) %}
+      {% if collapsible_papers|default(false) and field.type == 'repeater' %}
+        {{ repeater_field(field_id, field.name, field.label, field, value, field.get('help'), collapsible=true) }}
+      {% else %}
+        {{ auto_field(field_id, field.name, field, value) }}
+      {% endif %}
+    {% endfor %}
+    {% if groups.advanced %}{{ options_more_close() }}{% endif %}
+    <div class="dx-save-bar dx-save-bar--server" data-save-bar hidden>
+      <span class="dx-save-bar-msg">You have unsaved changes</span>
+      <div class="dx-save-bar-actions">
+        <button type="reset" class="dx-save-bar-discard">Discard</button>
+        <button type="submit" class="dx-save-bar-save"><i class="ph ph-floppy-disk" aria-hidden="true"></i><span>Save changes</span></button>
+      </div>
+    </div>
+    <noscript><button type="submit">Save changes</button></noscript>
+  </form>
+</section>
+<script src="{{ url_for('static', filename='pages/settings.js') }}"></script>

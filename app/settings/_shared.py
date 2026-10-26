@@ -459,6 +459,12 @@ def area_for_section_kind(section_kind: str) -> str:
 
 
 def redirect_to_section(section_kind: str) -> Response:
+    if section_kind.startswith("plugin-"):
+        from app.plugin_admin import settings_in_admin
+
+        plugin = plugins().get(section_kind.removeprefix("plugin-"))
+        if plugin is not None and settings_in_admin(plugin):
+            return redirect(f"{request.script_root}/plugins/{plugin.id}/#{section_kind}")
     return redirect(
         url_for(
             "auth.settings_area",

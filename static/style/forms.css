@@ -2710,3 +2710,80 @@ input[type="range"].slider:focus::-moz-range-thumb {
     grid-template-columns: 1fr;
   }
 }
+
+/* Widget admin forms use the available page width, with one paper per row. */
+.widget-admin-settings .form { display: flex; flex-direction: column; gap: var(--t-space-4); }
+.widget-admin-settings .field { width: 100%; min-width: 0; }
+.widget-admin-settings .field--repeater { display: block; }
+/* Keep the group label available to assistive technology. */
+.repeater--collapsible > .field-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.repeater--collapsible .repeater-list { gap: 0; border: 1px solid var(--t-border); border-radius: var(--t-radius-sm); }
+.repeater-row--collapsible {
+  position: relative;
+  display: block;
+  padding: 0;
+  background: var(--t-surface);
+  border: 0;
+  border-radius: 0;
+  min-width: 0;
+}
+.repeater-row--collapsible + .repeater-row--collapsible { border-top: 1px solid var(--t-border); }
+.repeater-row--collapsible:first-child { border-radius: var(--t-radius-sm) var(--t-radius-sm) 0 0; }
+.repeater-row--collapsible:last-child { border-radius: 0 0 var(--t-radius-sm) var(--t-radius-sm); }
+.repeater-row--collapsible summary {
+  display: flex;
+  align-items: center;
+  gap: var(--t-space-2);
+  min-height: 68px;
+  padding: var(--t-space-3) 170px var(--t-space-3) var(--t-space-4);
+  cursor: pointer;
+  list-style: none;
+}
+.repeater-row--collapsible summary::-webkit-details-marker { display: none; }
+.repeater-row--collapsible summary:hover { background: var(--t-surface-soft); }
+.repeater-row--collapsible summary:focus-visible { outline: 2px solid var(--t-accent); outline-offset: -3px; }
+.repeater-row-title { min-width: 0; overflow-wrap: anywhere; font-weight: 600; font-size: var(--t-size-sm); }
+.repeater-caret { color: var(--t-muted); transition: transform 160ms ease-out; }
+.repeater-row--collapsible details[open] > summary .repeater-caret { transform: rotate(90deg); }
+.repeater-row--collapsible .repeater-row-toggle {
+  display: flex;
+  align-items: center;
+  position: absolute;
+  top: 0;
+  right: var(--t-space-4);
+  min-height: 68px;
+  margin: 0;
+  gap: var(--t-space-2);
+}
+.repeater-row-toggle .switch-label { width: 76px; text-align: right; font-size: var(--t-size-sm); color: var(--t-muted); }
+.repeater-row--collapsible .repeater-row-fields {
+  padding: 0 var(--t-space-4) var(--t-space-3);
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: var(--t-space-3);
+}
+.repeater-row--collapsible .repeater-row-actions {
+  flex-direction: row;
+  justify-content: flex-end;
+  gap: var(--t-space-2);
+  padding: 0 var(--t-space-4) var(--t-space-3);
+}
+.repeater-row--collapsible .repeater-btn { width: 40px; height: 40px; }
+.repeater--collapsible .repeater-foot { justify-content: space-between; margin-top: var(--t-space-3); flex-wrap: wrap; }
+@media (max-width: 480px) {
+  .repeater-row--collapsible summary { padding-left: var(--t-space-3); padding-right: 145px; }
+  .repeater-row--collapsible .repeater-row-toggle { right: var(--t-space-3); }
+  .repeater-row-toggle .switch-label { width: 66px; font-size: var(--t-size-xs); }
+  .repeater-row--collapsible .repeater-row-fields { padding-inline: var(--t-space-3); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .repeater-caret { transition: none; }
+}
+
+.repeater-row-toggle input[type="checkbox"] {
+  position: absolute;
+  width: 0;
+  height: 0;
+  opacity: 0;
+  pointer-events: none;
+}

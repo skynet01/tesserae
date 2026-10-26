@@ -20,7 +20,14 @@ from flask import current_app, flash, redirect, render_template, request, sessio
 from werkzeug.wrappers import Response
 
 from app import backup as _backup_mod
-from app import device_service, device_timetable, palette_profiles, repeater, test_patterns, visionect
+from app import (
+    device_service,
+    device_timetable,
+    palette_profiles,
+    repeater,
+    test_patterns,
+    visionect,
+)
 from app import firmware_check as firmware_check_module
 from app import install_id as install_id_module
 from app import updater as _updater_mod
@@ -29,6 +36,7 @@ from app.device_loader import Device
 from app.ha_options import is_ha_addon
 from app.network import detect_local_ip, docker_bridge_ip_warning, is_docker_bridge_ip, url_host
 from app.panel import PANEL_PRESET_CHOICES, PANEL_PRESETS
+from app.plugin_admin import settings_in_admin, settings_section
 from app.state.settings_store import SECRET_MASK
 
 from ._shared import (
@@ -44,7 +52,6 @@ from ._shared import (
     discovery_cache,
     format_discovered,
     format_relative,
-    mark_unreadable_secrets,
     note_refresh_floor,
     plugins,
     render_for_admin,
@@ -975,29 +982,8 @@ def _build_sections() -> list[dict[str, Any]]:
             sections.append(section)
 
     for plugin in plugins().plugins.values():
-        fields = mark_unreadable_secrets(
-            list(plugin.manifest.get("settings", [])), "plugins", plugin.id
-        )
-        if not fields:
-            continue
-        sid = f"plugin-{plugin.id}"
-        sections.append(
-            {
-                "id": sid,
-                "kind": "plugin",
-                "title": f"Plugin: {plugin.name}",
-                "blurb": plugin.manifest.get("description") or "",
-                "fields": fields,
-                # A repeater shows rows; a value stored before the setting
-                # became one is offered to the plugin's legacy_rows() hook.
-                "state": repeater.prepare_state(
-                    fields,
-                    render_for_admin("plugins", plugin.id, fields),
-                    getattr(plugin.server_module, "legacy_rows", None),
-                ),
-                "endpoint": url_for("auth.settings_update", section_kind=sid),
-            }
-        )
+        if plugin.manifest.get("settings") and not settings_in_admin(plugin):
+            sections.append(settings_section(plugin))
 
     return sections
 

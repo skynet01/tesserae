@@ -53,7 +53,7 @@ SETTING: dict[str, Any] = {
 
 
 @pytest.fixture
-def live(tmp_path: Path) -> Iterator[tuple[str, Flask]]:
+def live(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[tuple[str, Flask]]:
     from werkzeug.serving import make_server
 
     folder = tmp_path / "plugins" / "rep_demo"
@@ -68,7 +68,10 @@ def live(tmp_path: Path) -> Iterator[tuple[str, Flask]]:
     }
     (folder / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
     (folder / "client.js").write_text("export default function () {}\n", encoding="utf-8")
-    app = create_app(testing=False, data_root=tmp_path / "data", plugins_dir=tmp_path / "plugins")
+    plugins_dir = tmp_path / "plugins"
+    if getattr(request, "param", None) == "news":
+        plugins_dir = Path(__file__).resolve().parents[1] / "plugins"
+    app = create_app(testing=False, data_root=tmp_path / "data", plugins_dir=plugins_dir)
     app.config["TESTING"] = True
     store = app.config["SETTINGS_STORE"]
     store.patch_section("app", {"onboarded": True})
@@ -260,3 +263,93 @@ def test_the_browser_reads_every_accepted_pattern_the_same_way() -> None:
     assert refused == [True, True]
     for pattern in ("a{١}", "a{１}"):
         assert repeater.pattern_error(pattern) is not None
+
+
+@pytest.mark.parametrize("live", ["news"], indirect=True)
+def test_newspaper_rows_expand_toggle_validate_and_save(live):
+    from playwright.sync_api import sync_playwright
+
+    base, app = live
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        errors = []
+        page.on("pageerror", lambda err: errors.append(str(err)))
+        page.goto(f"{base}/plugins/news_front_pages/", wait_until="networkidle")
+        card = page.locator("#plugin-news_front_pages")
+        rows = card.locator("[data-repeater-row]")
+        first = rows.first
+        code = first.locator('[data-repeater-key="code"]')
+        assert code.is_hidden()
+        toggle = first.locator('[data-repeater-key="enabled"]')
+        first.locator(".repeater-row-toggle").click()
+        assert not toggle.is_checked()
+        toggle.focus()
+        page.keyboard.press("Space")
+        assert toggle.is_checked()
+        page.keyboard.press("Space")
+        assert not toggle.is_checked()
+        assert code.is_hidden()  # toggling never expands the editor
+        first.locator("summary").focus()
+        page.keyboard.press("Enter")
+        assert code.is_visible()
+        code.fill("WSJ2")
+        assert "WSJ2" in first.locator("summary").inner_text()
+        first.locator("summary").click()
+        card.locator("[data-repeater-add]").click()
+        last = rows.last
+        assert last.locator('[data-repeater-key="code"]').is_visible()
+        last.locator("summary").click()
+        card.locator(".dx-save-bar-save").click()
+        # Native required-field validation reveals the collapsed invalid row.
+        assert last.locator('[data-repeater-key="code"]').is_visible()
+        assert last.locator('[data-repeater-key="code"]').evaluate(
+            "el => el === document.activeElement"
+        )
+        last.locator('[data-repeater-key="code"]').fill("NEW_TEST")
+        with page.expect_navigation():
+            card.locator(".dx-save-bar-save").click()
+        assert "/plugins/news_front_pages/" in page.url
+        assert not page.locator('[data-repeater-key="enabled"]').first.is_checked()
+        assert page.locator('[data-repeater-key="code"]').first.input_value() == "WSJ2"
+        browser.close()
+    assert errors == []
+    fields = app.config["PLUGIN_REGISTRY"].get("news_front_pages").manifest["settings"]
+    papers = app.config["SETTINGS_STORE"].get_for_runtime("plugins", "news_front_pages", fields)[
+        "papers"
+    ]
+    assert papers[0]["enabled"] is False
+    assert papers[-1]["code"] == "NEW_TEST"
+
+
+@pytest.mark.parametrize("live", ["news"], indirect=True)
+def test_news_admin_rows_fit_desktop_and_mobile(live):
+    import os
+
+    from playwright.sync_api import sync_playwright
+
+    base, _ = live
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page()
+        for width, theme in ((1280, "light"), (390, "light"), (390, "dark")):
+            page.emulate_media(color_scheme=theme)
+            page.set_viewport_size({"width": width, "height": 950})
+            for pid in ("news_front_pages", "news_illustrated"):
+                page.goto(f"{base}/plugins/{pid}/", wait_until="networkidle")
+                assert page.locator(f"#plugin-{pid}").is_visible()
+                if pid == "news_front_pages":
+                    rows = page.locator("[data-repeater-row]")
+                    rows.first.locator("summary").click()
+                    box = rows.first.bounding_box()
+                    form = page.locator(".widget-admin-settings form").bounding_box()
+                    assert box["width"] >= form["width"] - 2
+                    assert box["width"] > width * (0.6 if width > 640 else 0.7)
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                artifacts = os.environ.get("TESSERAE_UI_ARTIFACT_DIR")
+                if artifacts:
+                    Path(artifacts).mkdir(parents=True, exist_ok=True)
+                    page.screenshot(
+                        path=str(Path(artifacts) / f"{pid}-{width}-{theme}.png"), full_page=True
+                    )
+        browser.close()
