@@ -12,6 +12,7 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -148,9 +149,9 @@ def test_a_good_declaration_passes_both_checks() -> None:
         ),
         (
             lambda s: s["fields"].append(
-                {"name": "x", "type": "string", "label": "X", "pattern": "("}
+                {"name": "x", "type": "string", "label": "X", "pattern": "[a-z"}
             ),
-            "pattern doesn't compile",
+            "pattern has a [ that isn't closed",
         ),
         (
             lambda s: s["fields"].append(
@@ -502,3 +503,182 @@ def test_a_value_stored_before_the_repeater_shows_as_rows_until_saved(app: Flask
     assert _stored(app)["items"] == "AA BB"  # reading the card doesn't write
     client.post("/settings/plugin-rep_demo", data={"title": "", "items": json.dumps(shown)})
     assert _stored(app)["items"] == shown
+
+
+# ----- audit regressions: patterns, defaults, huge numbers ----------------------
+
+
+@pytest.mark.parametrize(
+    ("pattern", "problem"),
+    [
+        ("(a+)+$", "uses ("),  # the classic catastrophic backtracker
+        ("(a|aa)*", "uses ("),
+        ("a|b", "uses |"),
+        ("^abc", "uses ^"),
+        ("abc$", "uses $"),
+        ("(?:ab)", "uses ("),
+        ("(a)\\1", "uses ("),
+        ("a\\1", "uses \\1"),
+        ("\\s+", "uses \\s"),
+        ("a**", "counts one part twice"),
+        ("a+?", "counts one part twice"),
+        ("a{2}+", "counts one part twice"),
+        ("[a-z]+[0-9]+", "only one part vary"),  # polynomial backtracking in re
+        ("a*a*a*b", "only one part vary"),
+        ("+a", "nothing before it"),
+        ("[a-z-]", "has - inside [ ]"),
+        ("[-a]", "has - inside [ ]"),
+        ("[a/b]", "has / inside [ ]"),
+        ("[a&&b]", "reserves"),
+        ("[z-a]", "bad range"),
+        ("[]", "empty [ ]"),
+        ("[abc", "isn't closed"),
+        ("a{5000}", "count over"),
+        ("a{3,1}", "count over"),
+        ("a{x}", "isn't a count"),
+        ("x" * 201, "must be 1 to 200"),
+        ("", "must be 1 to 200"),
+    ],
+)
+def test_patterns_outside_the_safe_subset_are_refused(pattern: str, problem: str) -> None:
+    spec = _spec()
+    spec["fields"].append({"name": "x", "type": "string", "label": "X", "pattern": pattern})
+    errors = spec_errors(spec)
+    assert any(problem in e for e in errors), errors
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "[A-Za-z0-9_\\-]+",
+        "[A-Z]{2}_[A-Z0-9]+",
+        "#[0-9a-fA-F]{6}",
+        "\\d{3}-\\d{4}",
+        "[^ ]*",
+        "v\\.\\d?",
+        "x.y",
+        "[\\w.]{1,8}",
+        "a/b",
+        "[a\\-z]+",
+        "\\(\\d+\\)",
+    ],
+)
+def test_the_safe_subset_matches_like_python_re(pattern: str) -> None:
+    """Every pattern the subset accepts means what ``re`` means by it; the
+    matcher just never backtracks. Checked on a spread of inputs."""
+    assert repeater.pattern_error(pattern) is None
+    parts = repeater._compile_pattern(pattern)
+    samples = [
+        "",
+        "a",
+        "A_9-z",
+        "AB_X1",
+        "AB_",
+        "ab_X1",
+        "#00ffAA",
+        "#00ffA",
+        "#00ffAAA",
+        "555-1234",
+        "5551234",
+        "no spaces",
+        "nospaces",
+        "v.",
+        "v.1",
+        "v.12",
+        "xzy",
+        "x\ny",
+        "a.b_c",
+        "abcdefghi",
+        "a/b",
+        "a-z",
+        "(42)",
+        "(4a)",
+    ]
+    for text in samples:
+        expected = re.fullmatch(pattern, text, flags=re.ASCII) is not None
+        assert repeater._pattern_matches(parts, text) == expected, (pattern, text)
+
+
+def test_a_pattern_never_takes_long() -> None:
+    parts = repeater._compile_pattern("[a-z]+")
+    start = time.monotonic()
+    for text in ("a" * 20_000 + "!", "a" * 20_000):
+        repeater._pattern_matches(parts, text)
+    assert time.monotonic() - start < 0.5
+
+
+def test_a_save_with_a_pattern_is_checked_by_the_safe_matcher() -> None:
+    spec = _spec()
+    _sub(spec, "code")["pattern"] = "[a-z]+"
+    _sub(spec, "code")["max_length"] = 500
+    start = time.monotonic()
+    with pytest.raises(RepeaterValueError, match="letters, digits"):
+        parse_rows(spec, [{**ROW, "code": "a" * 400 + "!"}])
+    assert time.monotonic() - start < 0.5
+    assert parse_rows(spec, [{**ROW, "code": "abc"}])[0]["code"] == "abc"
+
+
+@pytest.mark.parametrize(
+    ("sub", "problem"),
+    [
+        ({"type": "string", "default": ["not text"]}, "can't hold a list"),
+        ({"type": "string", "default": 5}, "must be text"),
+        ({"type": "string", "default": "x" * 20, "max_length": 10}, "longer than 10"),
+        ({"type": "string", "default": "a b", "pattern": "[a-z]+"}, "expected format"),
+        ({"type": "string", "default": "two\nlines"}, "one line"),
+        ({"type": "textarea", "default": {"a": 1}}, "can't hold a list"),
+        ({"type": "number", "default": 50, "max": 10}, "at most 10"),
+        ({"type": "number", "default": "5"}, "as stored"),
+        ({"type": "number", "default": True}, "must be a number"),
+        ({"type": "boolean", "default": "yes"}, "as stored"),
+        ({"type": "boolean", "default": 1}, "as stored"),
+        (
+            {"type": "select", "default": "c", "choices": [{"value": "a", "label": "A"}]},
+            "isn't one of the choices",
+        ),
+        (
+            {"type": "select", "default": "2", "choices": [{"value": 2, "label": "Two"}]},
+            "as stored",
+        ),
+    ],
+)
+def test_sub_field_defaults_are_checked_at_load(sub: dict[str, Any], problem: str) -> None:
+    spec = _spec()
+    spec["fields"].append({"name": "x", "label": "X", **sub})
+    errors = spec_errors(spec)
+    assert any(problem in e for e in errors), errors
+
+
+def test_a_row_saved_without_a_key_gets_a_checked_default() -> None:
+    assert parse_rows(_spec(), [{"code": "AB"}]) == [
+        {"on": True, "code": "AB", "note": "", "n": None, "mode": "a"}
+    ]
+    # A declaration that never went through the load checks still can't
+    # slip a bad default into storage.
+    unchecked = _spec()
+    unchecked["fields"].append({"name": "x", "type": "string", "label": "X", "default": ["no"]})
+    with pytest.raises(RepeaterValueError, match="X can't hold a list"):
+        parse_rows(unchecked, [{"code": "AB"}])
+    unchecked = _spec()
+    _sub(unchecked, "n")["default"] = 99
+    with pytest.raises(RepeaterValueError, match="N must be at most 10"):
+        parse_rows(unchecked, [{"code": "AB", "n": ""}])
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        [{**ROW, "n": 10**400}],
+        '[{"code": "AB", "n": 1' + "0" * 400 + "}]",
+        [{**ROW, "n": "1" + "0" * 400}],
+        '[{"code": "AB", "n": 1e400}]',
+    ],
+    ids=["int", "json-int", "text", "json-float"],
+)
+def test_a_number_too_big_for_a_float_is_refused_not_raised(raw: Any) -> None:
+    with pytest.raises(RepeaterValueError, match="finite number"):
+        parse_rows(_spec(), raw)
+    assert normalise_rows(_spec(), [{**ROW, "n": 10**400}])[0]["n"] is None
+    spec = _spec()
+    _sub(spec, "n")["max"] = 10**400
+    assert any("max must be a number" in e for e in spec_errors(spec))

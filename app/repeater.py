@@ -40,11 +40,13 @@ no rows.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any, TypeGuard
 
 logger = logging.getLogger(__name__)
@@ -137,12 +139,225 @@ def _choice_values(sub: Mapping[str, Any]) -> list[Any]:
     return [c.get("value") for c in choices if isinstance(c, Mapping) and "value" in c]
 
 
+def _finite(value: int | float) -> bool:
+    """``math.isfinite`` that says no, rather than raising OverflowError, to
+    an integer too big for a float (a JSON number with 400 digits)."""
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _is_number(value: Any) -> TypeGuard[int | float]:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    )
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and _finite(value)
+
+
+# ----- pattern: a safe subset, matched without backtracking -----------------
+#
+# A string sub-field's ``pattern`` is checked by the browser (the input's
+# pattern attribute) and again on save. Python's ``re`` backtracks and can't
+# be given a time limit, so an arbitrary regex is a way to hang a server
+# thread on one save (``(a+)+$`` against thirty a's and a "!"), and the
+# manifest's default rows are checked at startup too. So a pattern is held
+# to a small subset with no backtracking in it, and matched here by a plain
+# scan, never by ``re``:
+#
+# * a sequence of parts: a literal character, ``.`` (any character), or a
+#   ``[...]`` class (characters, ``a-z`` ranges, ``^`` negation, ``\d``,
+#   ``\w``), each optionally counted with ``*``, ``+``, ``?``, ``{n}``,
+#   ``{n,}`` or ``{n,m}``;
+# * at most one part whose length can vary;
+# * no groups, alternation, anchors, back-references or lookarounds.
+#
+# That covers what a settings field usually asks for ("letters, digits and
+# - only", ``[A-Z]{2}_[A-Z0-9]+``, ``#[0-9a-fA-F]{6}``). With one variable
+# part, a match is the fixed parts at each end and that part in between: one
+# linear pass. Escaping follows the browser's ``v`` flag (a literal ``-`` or
+# ``/`` inside a class is ``\-``, ``\/``), so the browser reads the same
+# pattern the same way.
+
+_PATTERN_MAX_CHARS = 200
+_PATTERN_MAX_PARTS = 32
+_PATTERN_MAX_COUNT = 1000
+_PATTERN_SYNTAX = frozenset("^$\\.*+?()[]{}|")
+_PATTERN_LITERAL_ESCAPES = _PATTERN_SYNTAX | {"/"}
+_CLASS_SYNTAX = frozenset("()[]{}/-\\|")
+_CLASS_ESCAPES = _PATTERN_LITERAL_ESCAPES | frozenset("-&!#%,:;<=>@`~")
+_CLASS_DOUBLES = frozenset("&!#$%*+,.:;<=>?@^`~")
+_DIGIT_RANGES = (("0", "9"),)
+_WORD_RANGES = (("0", "9"), ("A", "Z"), ("a", "z"), ("_", "_"))
+_COUNT_RE = re.compile(r"\{(\d{1,4})(?:(,)(\d{0,4}))?\}")
+
+
+class _PatternError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class _Part:
+    """One part of a pattern: which characters it takes, and how many."""
+
+    ranges: tuple[tuple[str, str], ...]
+    negated: bool = False
+    anything: bool = False
+    low: int = 1
+    high: int | None = 1  # None: no upper bound
+
+    def takes(self, ch: str) -> bool:
+        if self.anything:  # "." stops at line ends, as in the browser
+            return ch not in "\n\r\u2028\u2029"
+        return any(a <= ch <= b for a, b in self.ranges) != self.negated
+
+
+def _class_char(pattern: str, i: int) -> tuple[str | None, tuple[tuple[str, str], ...], int]:
+    r"""One item inside a class at ``i``: a character (``str``) or a set
+    (``\d``, ``\w``) as ranges, and where the next item starts."""
+    ch = pattern[i]
+    if ch == "\\":
+        if i + 1 >= len(pattern):
+            raise _PatternError("ends in a lone \\")
+        nxt = pattern[i + 1]
+        if nxt == "d":
+            return None, _DIGIT_RANGES, i + 2
+        if nxt == "w":
+            return None, _WORD_RANGES, i + 2
+        if nxt in _CLASS_ESCAPES:
+            return nxt, ((nxt, nxt),), i + 2
+        raise _PatternError(f"uses \\{nxt}, which isn't supported")
+    if ch in _CLASS_SYNTAX:
+        raise _PatternError(f"has {ch} inside [ ]; write \\{ch}")
+    if ch in _CLASS_DOUBLES and pattern[i + 1 : i + 2] == ch:
+        raise _PatternError(f"has {ch}{ch} inside [ ], which the browser reserves")
+    return ch, ((ch, ch),), i + 1
+
+
+def _parse_class(pattern: str, i: int) -> tuple[_Part, int]:
+    i += 1  # past "["
+    negated = pattern[i : i + 1] == "^"
+    if negated:
+        i += 1
+    ranges: list[tuple[str, str]] = []
+    while True:
+        if i >= len(pattern):
+            raise _PatternError("has a [ that isn't closed")
+        if pattern[i] == "]":
+            if not ranges:
+                raise _PatternError("has an empty [ ]")
+            return _Part(tuple(ranges), negated), i + 1
+        start, items, i = _class_char(pattern, i)
+        if (
+            pattern[i : i + 1] == "-"
+            and start is not None
+            and pattern[i + 1 : i + 2] not in ("", "]")
+        ):
+            end, _, i = _class_char(pattern, i + 1)
+            if end is None or end < start:
+                raise _PatternError(f"has a bad range {start}-{end or '?'}")
+            ranges.append((start, end))
+        else:
+            ranges.extend(items)
+
+
+def _parse_count(pattern: str, i: int) -> tuple[int, int | None, int]:
+    q = pattern[i : i + 1]
+    if q == "*":
+        return 0, None, i + 1
+    if q == "+":
+        return 1, None, i + 1
+    if q == "?":
+        return 0, 1, i + 1
+    if q == "{":
+        match = _COUNT_RE.match(pattern, i)
+        if match is None:
+            raise _PatternError("has a { that isn't a count like {3} or {1,8}")
+        low = int(match.group(1))
+        high = (int(match.group(3)) if match.group(3) else None) if match.group(2) else low
+        if low > _PATTERN_MAX_COUNT or (high is not None and not low <= high <= _PATTERN_MAX_COUNT):
+            raise _PatternError(f"has a count over {_PATTERN_MAX_COUNT} or backwards")
+        return low, high, match.end()
+    return 1, 1, i
+
+
+@functools.lru_cache(maxsize=128)
+def _compile_pattern(pattern: str) -> tuple[_Part, ...]:
+    """``pattern`` as parts, or :class:`_PatternError` saying what's outside
+    the subset (see the notes above)."""
+    if not pattern or len(pattern) > _PATTERN_MAX_CHARS:
+        raise _PatternError(f"must be 1 to {_PATTERN_MAX_CHARS} characters")
+    parts: list[_Part] = []
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "[":
+            part, i = _parse_class(pattern, i)
+        elif ch == ".":
+            part, i = _Part((), anything=True), i + 1
+        elif ch == "\\":
+            nxt = pattern[i + 1 : i + 2]
+            if nxt == "d":
+                part = _Part(_DIGIT_RANGES)
+            elif nxt == "w":
+                part = _Part(_WORD_RANGES)
+            elif nxt and nxt in _PATTERN_LITERAL_ESCAPES:
+                part = _Part(((nxt, nxt),))
+            else:
+                raise _PatternError(f"uses \\{nxt}, which isn't supported")
+            i += 2
+        elif ch in "*+?{":
+            raise _PatternError(f"has a {ch} with nothing before it to count")
+        elif ch in _PATTERN_SYNTAX:
+            raise _PatternError(
+                f"uses {ch}: groups, alternation and anchors aren't supported "
+                "(the whole value is matched anyway)"
+            )
+        else:
+            part, i = _Part(((ch, ch),)), i + 1
+        low, high, i = _parse_count(pattern, i)
+        if pattern[i : i + 1] in ("*", "+", "?", "{"):
+            raise _PatternError(
+                "counts one part twice (lazy and possessive forms aren't supported)"
+            )
+        parts.append(_Part(part.ranges, part.negated, part.anything, low, high))
+    if len(parts) > _PATTERN_MAX_PARTS:
+        raise _PatternError(f"has more than {_PATTERN_MAX_PARTS} parts")
+    if sum(1 for p in parts if p.high != p.low) > 1:
+        raise _PatternError("can let only one part vary in length")
+    return tuple(parts)
+
+
+def _pattern_matches(parts: tuple[_Part, ...], text: str) -> bool:
+    """Whether ``text`` is exactly ``parts``, in one pass: the fixed-length
+    parts either side of the one that varies take their share from each
+    end, and that part takes what's left."""
+    variable = next((k for k, part in enumerate(parts) if part.high != part.low), None)
+    fixed = sum(part.low for part in parts)
+    if variable is None:
+        if len(text) != fixed:
+            return False
+        middle = 0
+    else:
+        middle = len(text) - fixed + parts[variable].low
+        high = parts[variable].high
+        if middle < parts[variable].low or (high is not None and middle > high):
+            return False
+    pos = 0
+    for k, part in enumerate(parts):
+        for _ in range(middle if k == variable else part.low):
+            if not part.takes(text[pos]):
+                return False
+            pos += 1
+    return pos == len(text)
+
+
+def pattern_error(pattern: Any) -> str | None:
+    """Why ``pattern`` can't be used, or None when it can."""
+    if not isinstance(pattern, str):
+        return "must be a string"
+    try:
+        _compile_pattern(pattern)
+    except _PatternError as err:
+        return str(err)
+    return None
 
 
 def subfield_default(sub: Mapping[str, Any]) -> Any:
@@ -198,15 +413,11 @@ def _subfield_errors(sub: Any, index: int, seen: set[str]) -> list[str]:
         ):
             errors.append(f"{where}.max_length must be an integer from 1 to {HARD_MAX_LENGTH}")
     if "pattern" in sub:
+        problem = pattern_error(sub["pattern"])
         if kind != "string":
             errors.append(f"{where}.pattern only applies to string")
-        elif not isinstance(sub["pattern"], str):
-            errors.append(f"{where}.pattern must be a string")
-        else:
-            try:
-                re.compile(sub["pattern"])
-            except re.error as err:
-                errors.append(f"{where}.pattern doesn't compile: {err}")
+        elif problem is not None:
+            errors.append(f"{where}.pattern {problem}")
     if "unique" in sub and kind not in ("string", "select"):
         errors.append(f"{where}.unique only applies to string and select")
     if kind == "select":
@@ -224,6 +435,19 @@ def _subfield_errors(sub: Any, index: int, seen: set[str]) -> list[str]:
         low, high = sub.get("min"), sub.get("max")
         if _is_number(low) and _is_number(high) and low > high:
             errors.append(f"{where}.min is above its max")
+    if not errors and "default" in sub and sub["default"] is not None:
+        # The default fills every new row and every row saved without the
+        # key, so it has to pass what a typed value would: type, length,
+        # pattern, bounds, choices. Exactly, not after coercion: "yes" for a
+        # switch or "2" for a choice of 2 would be read differently later.
+        default = sub["default"]
+        try:
+            accepted = _strict_value(sub, default, where)
+        except RepeaterValueError as err:
+            errors.append(f"default: {err}")
+        else:
+            if accepted != default or type(accepted) is not type(default):
+                errors.append(f"{where}.default must be a {kind} value as stored, not {default!r}")
     return errors
 
 
@@ -288,7 +512,11 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str) -> Any:
     kind = sub.get("type")
     label = str(sub.get("label") or sub.get("name"))
     if raw is None:
-        return subfield_default(sub)
+        # A row saved without this key takes the default, which goes through
+        # the same checks as a typed value (a number may have none at all).
+        raw = subfield_default(sub)
+        if raw is None:
+            return None
     if isinstance(raw, (dict, list)):
         raise RepeaterValueError(f"{where}: {label} can't hold a list or an object")
     if kind in ("string", "textarea"):
@@ -301,7 +529,14 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str) -> Any:
         if kind == "string" and "\n" in value:
             raise RepeaterValueError(f"{where}: {label} must be one line")
         pattern = sub.get("pattern")
-        if isinstance(pattern, str) and value.strip() and not re.fullmatch(pattern, value.strip()):
+        if (
+            isinstance(pattern, str)
+            and value.strip()
+            and (
+                pattern_error(pattern) is not None
+                or not _pattern_matches(_compile_pattern(pattern), value.strip())
+            )
+        ):
             hint = sub.get("pattern_hint")
             if isinstance(hint, str) and hint.strip():
                 raise RepeaterValueError(f"{where}: {label}: {hint.strip()}")
@@ -324,7 +559,7 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str) -> Any:
         elif isinstance(raw, str):
             text = raw.strip()
             if not text:
-                return subfield_default(sub)
+                return None if sub.get("default") is None else _strict_value(sub, None, where)
             try:
                 number = int(text)
             except ValueError:
@@ -334,7 +569,7 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str) -> Any:
                     raise RepeaterValueError(f"{where}: {label} must be a number") from None
         else:
             raise RepeaterValueError(f"{where}: {label} must be a number")
-        if not math.isfinite(number):
+        if not _finite(number):
             raise RepeaterValueError(f"{where}: {label} must be a finite number")
         low, high = sub.get("min"), sub.get("max")
         if _is_number(low) and number < low:

@@ -27,6 +27,7 @@ from typing import Any
 
 import jsonschema
 
+from app import repeater
 from app.state.page_store import Panel
 
 logger = logging.getLogger(__name__)
@@ -427,6 +428,16 @@ def discover(
             field_path = ".".join(str(p) for p in err.absolute_path) or "<root>"
             registry.errors.append(
                 LoaderError(renderer_id, child, f"manifest schema [{field_path}]: {err.message}")
+            )
+            continue
+
+        # A renderer's settings render and save through the same card code as
+        # a widget's, so a repeater there gets the same checks (no secret
+        # rows, which would sit in settings.json unencrypted).
+        repeater_problems = repeater.manifest_errors(manifest)
+        if repeater_problems:
+            registry.errors.append(
+                LoaderError(renderer_id, child, f"manifest {repeater_problems[0]}")
             )
             continue
 

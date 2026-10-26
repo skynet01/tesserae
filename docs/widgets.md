@@ -178,13 +178,24 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   `select` (with inline `choices`). A sub-field may set `required`,
   `unique` (string or select; compared ignoring case and surrounding
   spaces), `max_length` (string 500 and textarea 5000 by default),
-  `pattern` with a `pattern_hint` (string), `min` / `max` / `step`
+  `pattern` with a `pattern_hint` (string; see below), `min` / `max` / `step`
   (number), `rows` and `monospace` (textarea), `placeholder` and `help`.
   The repeater itself takes `min_rows`, `max_rows` (50 by default, at most
   200), `add_label` and `row_label`. `secret`, `show_if` and
   `choices_from` aren't supported inside one, and the loader refuses a
   declaration that uses them, names a sub-field twice or has a `default`
   that doesn't fit.
+
+  A `pattern` is checked in the browser and again on save, and Python's
+  regex engine can't be given a time limit, so it is held to a subset with
+  no backtracking: literal characters, `.` and `[classes]` (ranges, `^`,
+  `\d`, `\w`), each optionally counted (`*`, `+`, `?`, `{n}`, `{n,}`,
+  `{n,m}`), with at most one part varying in length and no groups,
+  alternation or anchors (the whole value is matched anyway). That covers
+  `[A-Za-z0-9_\-]+`, `[A-Z]{2}_[A-Z0-9]+` or `#[0-9a-fA-F]{6}`. Inside a
+  class, write a literal `-` or `/` as `\-` and `\/`, as the browser
+  requires. A sub-field's `default` has to pass the same checks as a typed
+  value, exactly as it would be stored.
 
   The value is a JSON list of objects, one per row, each carrying exactly
   the declared sub-fields. A save whose rows don't fit (too many, a blank
