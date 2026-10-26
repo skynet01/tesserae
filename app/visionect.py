@@ -201,6 +201,13 @@ class VisionectService:
         self.autostart = True
         self._ctx: _Context | None = None
         self._ctx_gen = 0
+        # Lifecycle. start(), stop(), maybe_start() and the retry timer run
+        # on request, push and timer threads; they serialise on this lock,
+        # and a run never starts while the previous run's thread is alive,
+        # so two runs never share the state below.
+        self._lifecycle = threading.RLock()
+        self._lifecycle_gen = 0  # bumped by stop(): a retry armed before it is void
+        self._stopping = False  # stop() timed out joining; that thread still winds down
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._server: Any = None  # pyvisionect.io.VisionectServer
@@ -208,7 +215,7 @@ class VisionectService:
         self._stop_event: asyncio.Event | None = None
         self._ready = threading.Event()
         self._last_start_attempt = 0.0
-        # Touched on the loop thread only.
+        # Per run, replaced by start(). Touched on the loop thread only.
         self._signs: dict[str, _Sign] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._warned_unbound: set[str] = set()
@@ -221,7 +228,8 @@ class VisionectService:
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive() and self._ready.is_set()
+        thread = self._thread
+        return thread is not None and thread.is_alive() and self._ready.is_set()
 
     def attach(self, ctx: _Context) -> None:
         """Point the service at a (possibly rebuilt) app. Signs already
@@ -233,76 +241,127 @@ class VisionectService:
 
     def start(self, timeout: float = 5.0) -> bool:
         """Bind the listener on a daemon thread. Returns whether it is up."""
-        if self._thread is not None and self._thread.is_alive():
-            return self._ready.is_set()
-        self._last_start_attempt = time.monotonic()
-        self.start_error = None
-        self._ready.clear()
-        self._thread = threading.Thread(target=self._run, name="visionect-listener", daemon=True)
-        self._thread.start()
-        background_loops.track(self)
-        # Return as soon as the bind succeeds or the thread dies (port busy),
-        # not after the full timeout: register() runs on every rebuild.
-        deadline = time.monotonic() + timeout
-        while not self._ready.is_set() and self._thread.is_alive():
-            if time.monotonic() >= deadline:
-                break
-            self._ready.wait(0.05)
-        return self._ready.is_set()
+        with self._lifecycle:
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                if self._stopping:
+                    # The last stop() gave up waiting for it. A new run now
+                    # would race its teardown for the port and the state.
+                    self.start_error = "the previous listener is still shutting down"
+                    return False
+                return self._ready.is_set()
+            self._stopping = False
+            self._last_start_attempt = time.monotonic()
+            self.start_error = None
+            # Fresh per-run state: the finished run's thread cleared its own.
+            ready = threading.Event()
+            self._ready = ready
+            self._signs = {}
+            self._tasks = set()
+            self._warned_unbound = set()
+            with self._snapshot_lock:
+                self._snapshot = {}
+            thread = threading.Thread(
+                target=self._run,
+                args=(ready, self._signs, self._snapshot),
+                name="visionect-listener",
+                daemon=True,
+            )
+            self._thread = thread
+            thread.start()
+            background_loops.track(self)
+            # Return as soon as the bind succeeds or the thread dies (port
+            # busy), not after the full timeout: register() runs on every
+            # rebuild.
+            deadline = time.monotonic() + timeout
+            while not ready.is_set() and thread.is_alive():
+                if time.monotonic() >= deadline:
+                    break
+                ready.wait(0.05)
+            return ready.is_set()
 
     def maybe_start(self) -> bool:
         """Start if wanted and not running, at most every START_RETRY_S, so a
         port held by the old Visionect server is retried without hammering."""
-        if self.running or not self.autostart or not self._visionect_devices():
-            return self.running
-        if time.monotonic() - self._last_start_attempt < START_RETRY_S:
-            return False
-        ok = self.start()
-        if not ok:
-            logger.warning(
-                "visionect: can't listen on port %d (%s); retrying. Is the old Visionect "
-                "server still running?",
-                self.port,
-                self.start_error or "timed out",
-            )
-            self._arm_retry()
-        return ok
+        with self._lifecycle:
+            if self.running or not self.autostart or not self._visionect_devices():
+                return self.running
+            if time.monotonic() - self._last_start_attempt < START_RETRY_S:
+                return False
+            ok = self.start()
+            if not ok:
+                logger.warning(
+                    "visionect: can't listen on port %d (%s); retrying. Is the old Visionect "
+                    "server still running?",
+                    self.port,
+                    self.start_error or "timed out",
+                )
+                self._arm_retry()
+            return ok
 
     def _arm_retry(self) -> None:
         """Retry the bind on a timer, independent of pushes, until it works
         or no Visionect device is left."""
-        timer = self._retry_timer
-        if timer is not None and timer.is_alive():
-            return
-        timer = threading.Timer(START_RETRY_S, self._retry_fire)
-        timer.daemon = True
-        self._retry_timer = timer
-        timer.start()
+        with self._lifecycle:
+            timer = self._retry_timer
+            if timer is not None and timer.is_alive():
+                return
+            timer = threading.Timer(START_RETRY_S, self._retry_fire, args=(self._lifecycle_gen,))
+            timer.daemon = True
+            self._retry_timer = timer
+            timer.start()
 
-    def _retry_fire(self) -> None:
-        self._retry_timer = None
-        self._last_start_attempt = 0.0
-        self.maybe_start()
+    def _retry_fire(self, gen: int) -> None:
+        with self._lifecycle:
+            if gen != self._lifecycle_gen:
+                return  # stopped since this retry was armed
+            self._retry_timer = None
+            self._last_start_attempt = 0.0
+            self.maybe_start()
 
     def stop(self, timeout: float = 5.0) -> None:
-        timer, self._retry_timer = self._retry_timer, None
-        if timer is not None:
-            timer.cancel()
-        loop, stop_event = self._loop, self._stop_event
-        if loop is not None and stop_event is not None and not loop.is_closed():
-            with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(stop_event.set)
-        thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout)
-        self._thread = None
+        with self._lifecycle:
+            self._lifecycle_gen += 1
+            timer, self._retry_timer = self._retry_timer, None
+            if timer is not None:
+                timer.cancel()
+            self._ready.clear()  # not "running" while it winds down
+            loop, stop_event = self._loop, self._stop_event
+            if loop is not None and stop_event is not None and not loop.is_closed():
+                with contextlib.suppress(RuntimeError):
+                    loop.call_soon_threadsafe(stop_event.set)
+            thread = self._thread
+            if thread is None:
+                return
+            if thread is not threading.current_thread():
+                thread.join(timeout)
+            if thread.is_alive():
+                # Still closing sockets or draining its executor. Keep the
+                # handle: start() refuses until this thread has exited.
+                self._stopping = True
+                logger.warning(
+                    "visionect: listener still shutting down after %.0fs; it is not "
+                    "restarted until it has",
+                    timeout,
+                )
+                return
+            self._thread = None
+            self._stopping = False
 
-    def _run(self) -> None:
+    def _run(
+        self,
+        ready: threading.Event,
+        signs: dict[str, _Sign],
+        snapshot: dict[str, dict[str, Any]],
+    ) -> None:
+        """The listener thread. Tears down only what this run created: the
+        arguments are its own, and shared handles are cleared only while
+        they are still the ones it set."""
         loop = asyncio.new_event_loop()
         self._loop = loop
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._serve())
+            loop.run_until_complete(self._serve(ready))
         except Exception as exc:
             self.start_error = str(exc)
             logger.debug("visionect: listener stopped: %s", exc)
@@ -312,40 +371,41 @@ class VisionectService:
             with contextlib.suppress(Exception):
                 loop.run_until_complete(loop.shutdown_default_executor())
             loop.close()
-            self._loop = None
-            self._ready.clear()
-            self._signs.clear()
+            if self._loop is loop:
+                self._loop = None
+            ready.clear()
+            signs.clear()
             with self._snapshot_lock:
-                self._snapshot.clear()
+                snapshot.clear()
 
-    async def _serve(self) -> None:
+    async def _serve(self, ready: threading.Event) -> None:
         from pyvisionect.io import VisionectServer
         from pyvisionect.session import DeviceStateStore
 
-        self._stop_event = asyncio.Event()
-        self._store = DeviceStateStore()
-        self._server = VisionectServer(
-            on_events=self._on_events, store=self._store, host=self.host, port=self.port
+        stop_event = asyncio.Event()
+        store = DeviceStateStore()
+        server = VisionectServer(
+            on_events=self._on_events, store=store, host=self.host, port=self.port
         )
-        await self._server.start()
+        self._stop_event, self._store, self._server = stop_event, store, server
+        await server.start()
         logger.info("visionect: listening for signs on %s:%d", self.host, self.port)
-        self._ready.set()
+        ready.set()
         try:
-            while not self._stop_event.is_set():
+            while not stop_event.is_set():
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop_event.wait(), timeout=TICK_S)
-                if not self._stop_event.is_set():
+                    await asyncio.wait_for(stop_event.wait(), timeout=TICK_S)
+                if not stop_event.is_set():
                     self._rescan()
         finally:
-            await self._shutdown()
+            await self._shutdown(server)
 
-    async def _shutdown(self) -> None:
+    async def _shutdown(self, server: Any) -> None:
         """Close the listener and every sign's socket, then the tasks.
 
         A sign holds its socket open, and on Python < 3.13 asyncio.Server has
         no close_clients()/abort_clients(), so wait_closed() would wait for
         it forever: abort the transports ourselves first."""
-        server = self._server
         writers = getattr(server, "_writers", None)
         if isinstance(writers, dict):
             for writer in list(writers.values()):
@@ -1039,6 +1099,10 @@ def register(app: Flask) -> None:
     with _SERVICE_LOCK:
         svc = _SERVICE
         if svc is not None and svc.port != port:
+            # Retired for good: a push still reaching its listener must not
+            # bring it back up on the old port.
+            svc.autostart = False
+            push_mgr.remove_listener(svc.on_push)
             svc.stop()
             svc = None
         if svc is None:

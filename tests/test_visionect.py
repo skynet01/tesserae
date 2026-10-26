@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import json
 import socket
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -317,8 +318,6 @@ def test_conform_panel_never_writes_a_deleted_device_back(tmp_path: Path) -> Non
 def test_conform_panel_waits_for_other_instance_file_writers(tmp_path: Path) -> None:
     """A rename (or any other instance-file save) that runs while the sign
     conforms the panel isn't lost: both hold the instance-file lock."""
-    import threading
-
     from app.device_service import INSTANCE_FILE_LOCK
 
     device: Any = FakeDevice("joan", "visionect", SIGN_PANEL, tmp_path / "joan.json")
@@ -559,7 +558,12 @@ def test_register_moves_the_listener_when_the_port_changes(tmp_path: Path, monke
     monkeypatch.setattr(visionect, "_SERVICE", None)
     monkeypatch.delenv("TESSERAE_VISIONECT_PORT", raising=False)
     h = Harness(tmp_path)
-    push_mgr = SimpleNamespace(latest_render_for=lambda _d: None, add_listener=lambda cb: None)
+    listeners: list[Any] = []
+    push_mgr = SimpleNamespace(
+        latest_render_for=lambda _d: None,
+        add_listener=listeners.append,
+        remove_listener=listeners.remove,
+    )
     h.app.config.update(
         PUSH_MANAGER=push_mgr, DEVICE_REGISTRY=h.registry, RENDERS_DIR=h.renders, TESTING=True
     )
@@ -572,6 +576,9 @@ def test_register_moves_the_listener_when_the_port_changes(tmp_path: Path, monke
     visionect.register(h.app)
     assert h.app.config["VISIONECT_SERVICE"] is not first
     assert h.app.config["VISIONECT_SERVICE"].port == 12001
+    # The retired listener is off the push manager and never restarts itself.
+    assert listeners == [h.app.config["VISIONECT_SERVICE"].on_push]
+    assert not first.autostart
 
 
 def test_refused_sleep_backs_off(tmp_path: Path) -> None:
@@ -666,6 +673,77 @@ def test_glass_check_resends_once_after_the_crc_has_had_time() -> None:
     assert sign.shown_digest == "frame-a"  # never a loop
     svc._check_glass(sign, SimpleNamespace(display_state_crc=111))
     assert not sign.crc_corrected  # a match re-arms the check
+
+
+def test_a_slow_stop_never_lets_a_new_run_share_its_state(harness: Harness, monkeypatch) -> None:
+    """stop() gives up joining after its timeout. The old run's teardown must
+    not then wipe a new run's loop, readiness, signs and snapshot: start()
+    refuses until that thread is gone, and a run only clears its own."""
+    import asyncio
+
+    real_shutdown = harness.svc._shutdown
+
+    async def _slow_shutdown(server: Any) -> None:
+        await asyncio.sleep(1.0)
+        await real_shutdown(server)
+
+    monkeypatch.setattr(harness.svc, "_shutdown", _slow_shutdown)
+    assert harness.svc.start()
+    old_thread = harness.svc._thread
+    harness.svc.stop(timeout=0.1)
+    assert old_thread is not None and old_thread.is_alive()
+    assert not harness.svc.running
+    assert not harness.svc.start()  # refused while the old run winds down
+    assert "still shutting down" in (harness.svc.start_error or "")
+    listeners = [t for t in threading.enumerate() if t.name == "visionect-listener"]
+    assert listeners == [old_thread]
+    old_thread.join(5)
+    monkeypatch.setattr(harness.svc, "_shutdown", real_shutdown)
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        deadline = time.monotonic() + 5
+        while not (harness.svc.sign_view(UUID) or {}).get("connected"):
+            assert time.monotonic() < deadline, "the new run lost its state"
+            time.sleep(0.05)
+        assert harness.svc.running
+    finally:
+        sign.close()
+
+
+def test_concurrent_starts_run_one_listener(harness: Harness) -> None:
+    results: list[bool] = []
+    starters = [
+        threading.Thread(target=lambda: results.append(harness.svc.start())) for _ in range(4)
+    ]
+    for t in starters:
+        t.start()
+    for t in starters:
+        t.join(10)
+    assert results == [True] * 4
+    assert len([t for t in threading.enumerate() if t.name == "visionect-listener"]) == 1
+
+
+def test_a_retry_armed_before_stop_does_not_restart_the_listener(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(visionect, "START_RETRY_S", 0.2)
+    h = Harness(tmp_path)
+    blocker = socket.socket()
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", h.svc.port))
+    blocker.listen()
+    try:
+        assert not h.svc.maybe_start()  # arms the retry timer
+        gen = h.svc._lifecycle_gen
+        h.svc.stop()
+    finally:
+        blocker.close()
+    h.svc._retry_fire(gen)  # a timer that fired just as stop() ran
+    time.sleep(0.5)
+    assert not h.svc.running
+    h.svc.stop()
 
 
 def test_busy_port_is_retried_on_a_timer(tmp_path: Path, monkeypatch) -> None:
