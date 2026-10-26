@@ -113,6 +113,7 @@ class FakeCdn:
     def __init__(self, pages: dict[str, bytes | _Resp] | None = None) -> None:
         self.pages = pages or {}
         self.calls: list[str] = []
+        self.agents: list[str | None] = []
         self.down = False
         self.gate: threading.Event | None = None
         self.contexts: list[str] = []
@@ -120,6 +121,7 @@ class FakeCdn:
     def __call__(self, req: Any, timeout: float | None = None) -> _Resp:
         url = req if isinstance(req, str) else req.full_url
         self.calls.append(url)
+        self.agents.append(None if isinstance(req, str) else req.get_header("User-agent"))
         self.contexts.append(CONTEXT_PROBE.get())
         if self.gate is not None:
             assert self.gate.wait(10), "test gate never opened"
@@ -496,8 +498,71 @@ def test_css_with_long_whitespace_runs_is_quick() -> None:
     assert time.monotonic() - start < 0.5
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "scale: 4",  # over the per-axis bound on its own
+        "transform: scale(4)",
+        "scale: 10 0.1",  # one axis far over
+        "transform: scaleX(10) scaleY(0.1)",
+        "transform: scaleX(2) scaleX(2)",
+        "scale: 2 2 2",  # a z value
+        "transform: scale()",
+        "transform: skewX(89.999deg)",  # skew isn't offered
+        "transform: skew(10deg)",
+        "transform: translateX(5000px)",
+        "transform: translate(80%)",
+        "margin-top: -90%",
+        "margin: 2000px",
+        "width: 1000%",
+        "width: 5000px",
+        "height: 300vh",
+        "width: 10",  # a unitless length that isn't 0
+        "object-position: 50% 300%",
+        "transform: 5px",  # a number with no context
+        "rotate: 1 1 0 45deg",
+        "filter: contrast(50)",
+        "opacity: 3000%",
+    ],
+)
+def test_css_sizes_and_moves_are_bounded(raw: str) -> None:
+    assert server.sanitize_css(raw) == ""
+
+
+def test_scale_counts_the_property_and_the_transform_together() -> None:
+    # 2 x 2 = 4, over the bound together: the scale property goes.
+    assert server.sanitize_css("scale: 2; transform: scale(2)") == "transform: scale(2)"
+    assert server.sanitize_css("transform: scale(2) translateY(-2%); scale: 1 2") == (
+        "transform: scale(2) translateY(-2%)"
+    )
+    # 1.5 x 2 = 3, on the bound: both stay.
+    assert server.sanitize_css("scale: 1.5; transform: scale(2)") == (
+        "scale: 1.5; transform: scale(2)"
+    )
+    assert server.sanitize_css("transform: scaleX(1.5) scaleX(2)") == (
+        "transform: scaleX(1.5) scaleX(2)"
+    )
+    # A declaration set again replaces the first, so the bound sees the last:
+    # 1.2 x 2 is inside it, 3 x 2 would not have been.
+    assert server.sanitize_css("transform: scale(3); transform: scale(1.2); scale: 2") == (
+        "transform: scale(1.2); scale: 2"
+    )
+    assert server.sanitize_css("transform: scale(1.2); transform: scale(3); scale: 2") == (
+        "transform: scale(3)"
+    )
+
+
 def test_css_keeps_at_most_a_dozen_declarations() -> None:
-    assert server.sanitize_css("opacity: 1;" * 30).count("opacity") == server.CSS_MAX_DECLARATIONS
+    props = ["margin", "margin-top", "margin-right", "margin-bottom", "margin-left"]
+    props += ["width", "height", "max-width", "max-height", "min-width", "min-height"]
+    props += ["object-position", "transform-origin"]
+    kept = server.sanitize_css("; ".join(f"{p}: 0" for p in props))
+    assert kept.count(": 0") == server.CSS_MAX_DECLARATIONS
+    # A property set twice counts once: the last one, as in CSS.
+    assert server.sanitize_css("opacity: 1;" * 30) == "opacity: 1"
+    assert server.sanitize_css("opacity: 0.5; filter: invert(1); opacity: 0.8") == (
+        "filter: invert(1); opacity: 0.8"
+    )
 
 
 def test_each_paper_gets_its_own_css(tmp_path: Path, cdn: FakeCdn, clocks: Clocks) -> None:
@@ -1180,30 +1245,61 @@ def test_todays_blurry_page_is_redrawn_from_the_pdf_once(
 
 
 @needs_pdfium
-def test_a_redraw_that_finds_no_pdf_is_not_tried_again_that_day(
+def test_a_redraw_that_finds_no_pdf_backs_off_then_stops(
     tmp_path: Path, pdf: FakeCdn, clocks: Clocks
 ) -> None:
-    _seed(tmp_path, "WSJ_20261025.jpg")
-    first = _fetch_settled(tmp_path, paper="WSJ")
-    assert first["url"].endswith("?w=700")  # kept: the redraw found nothing
+    _seed(tmp_path, "WSJ_20261025.jpg")  # 700 px wide
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
     assert pdf.calls == [_pdf_url("WSJ", 25)]
-    assert _state(tmp_path)["jpeg_only"] == {"WSJ": "2026-10-25"}
-    clocks.wall += 2 * server.RECHECK_S
+    retry = _state(tmp_path)["pdf_retry"]["WSJ"]
+    assert (retry["day"], retry["tries"]) == ("2026-10-25", 1)
+    assert retry["after"] == pytest.approx(clocks.wall + server.PDF_RETRY_S, abs=5)
+    # Inside the backoff (and the recheck wait) nothing is asked for.
+    clocks.wall += server.PDF_RETRY_S - 60
     _fetch_settled(tmp_path, paper="WSJ")
     assert len(pdf.calls) == 1
+    # Each later try waits twice as long, up to the cap, and the tries stop.
+    asked = []
+    for _ in range(3 * server.PDF_MAX_TRIES):
+        clocks.wall += server.PDF_RETRY_MAX_S
+        _fetch_settled(tmp_path, paper="WSJ")
+        asked.append(len(pdf.calls))
+    assert asked[-1] == server.PDF_MAX_TRIES
+    assert _state(tmp_path)["pdf_retry"]["WSJ"]["tries"] == server.PDF_MAX_TRIES
+    # A forced refresh asks again whatever the count.
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
+    forced = _fetch_settled(tmp_path, paper="WSJ", fresh=True)
+    assert forced["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+    assert "WSJ" not in _state(tmp_path)["pdf_retry"]
 
 
 @needs_pdfium
-def test_a_jpeg_saved_while_the_pdf_failed_is_not_redrawn(
+def test_a_pdf_published_after_the_jpeg_is_still_fetched(
     tmp_path: Path, pdf: FakeCdn, clocks: Clocks
 ) -> None:
+    """The PDF 404s (not out yet) while the JPEG is there: the JPEG is
+    shown, and the PDF is asked for again later, not given up on."""
+    pdf.pages = {_url("WSJ", 25): PAGE}
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
+    assert _state(tmp_path)["pdf_retry"]["WSJ"]["tries"] == 1
+    pdf.pages[_pdf_url("WSJ", 25)] = _pdf()
+    clocks.wall += server.PDF_RETRY_S
+    data = _fetch_settled(tmp_path, paper="WSJ")
+    assert data["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+    assert "WSJ" not in _state(tmp_path)["pdf_retry"]
+
+
+@needs_pdfium
+def test_a_forced_refresh_skips_the_backoff(tmp_path: Path, pdf: FakeCdn, clocks: Clocks) -> None:
     pdf.pages = {_pdf_url("WSJ", 25): b"<html>", _url("WSJ", 25): PAGE}
     assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
-    assert _state(tmp_path)["jpeg_only"] == {"WSJ": "2026-10-25"}
     calls = len(pdf.calls)
-    clocks.wall += 2 * server.RECHECK_S
-    _fetch_settled(tmp_path, paper="WSJ")
+    clocks.wall += 60
+    pdf.pages[_pdf_url("WSJ", 25)] = _pdf()
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")  # backing off
     assert len(pdf.calls) == calls
+    data = _fetch_settled(tmp_path, paper="WSJ", fresh=True)
+    assert data["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
 
 
 @needs_pdfium
@@ -1213,21 +1309,78 @@ def test_an_outage_during_a_redraw_is_tried_again_later(
     _seed(tmp_path, "WSJ_20261025.jpg")
     pdf.down = True
     assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
-    assert _state(tmp_path).get("jpeg_only") == {}
+    assert _state(tmp_path)["pdf_retry"]["WSJ"]["tries"] == 1
     pdf.down = False
     pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
-    clocks.wall += server.RECHECK_S
+    clocks.wall += server.PDF_RETRY_S
     data = _fetch_settled(tmp_path, paper="WSJ")
     assert data["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
 
 
-def test_old_jpeg_only_marks_are_dropped(tmp_path: Path, cdn: FakeCdn) -> None:
+def test_old_retry_records_and_the_old_give_up_record_are_dropped(
+    tmp_path: Path, cdn: FakeCdn
+) -> None:
     server._write_json(
-        tmp_path / "state.json", {"jpeg_only": {"OLD": "2026-10-01", "BAD": 3, "NEW": "2026-10-25"}}
+        tmp_path / "state.json",
+        {
+            "jpeg_only": {"WSJ": "2026-10-25"},
+            "pdf_retry": {
+                "OLD": {"day": "2026-10-01", "tries": 2, "after": 0},
+                "BAD": 3,
+                "NEW": {"day": "2026-10-25", "tries": 1, "after": 0},
+            },
+        },
     )
     cdn.pages = {_url("WSJ", 25): PAGE}
     _fetch_settled(tmp_path, paper="WSJ")
-    assert _state(tmp_path)["jpeg_only"] == {"NEW": "2026-10-25"}
+    state = _state(tmp_path)
+    assert "jpeg_only" not in state
+    assert set(state["pdf_retry"]) == {"NEW"}
+
+
+@needs_pdfium
+def test_a_slow_pdf_leaves_the_jpeg_its_time(pdf: FakeCdn, clocks: Clocks) -> None:
+    """A PDF that trickles in uses up its own share of the edition's time,
+    not the JPEG's: the fallback is still fetched."""
+
+    def tick() -> None:
+        clocks.mono += 1.0
+
+    pdf.pages = {_pdf_url("WSJ", 25): _Resp(_pdf(), on_read=tick), _url("WSJ", 25): PAGE}
+    start = clocks.mono
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    assert clocks.mono - start <= server.DOWNLOAD_BUDGET_S - server.JPEG_RESERVE_S + 1
+    assert pdf.calls == [_pdf_url("WSJ", 25), _url("WSJ", 25)]
+
+
+def test_drawing_gets_only_the_pdfs_time_left(
+    monkeypatch: pytest.MonkeyPatch, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    timeouts: list[float] = []
+
+    def fake_rasterise(body: bytes, width: int = 0, timeout: float = 0) -> bytes | None:
+        timeouts.append(timeout)
+        return None
+
+    monkeypatch.setattr(server, "rasterise_pdf", fake_rasterise)
+    pdf.pages = {_pdf_url("WSJ", 25): b"%PDF-1.4", _url("WSJ", 25): PAGE}
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    assert timeouts == [pytest.approx(server.DOWNLOAD_BUDGET_S - server.JPEG_RESERVE_S)]
+    # Too little left in the job: not drawn at all, and the JPEG still comes.
+    timeouts.clear()
+    deadline = clocks.mono + server.JPEG_RESERVE_S + server.RASTER_MIN_S - 1
+    assert server.download_edition("WSJ", TODAY, deadline) == PAGE
+    assert timeouts == []
+
+
+@needs_pdfium
+def test_every_request_says_who_is_asking(pdf: FakeCdn) -> None:
+    """cdn.freedomforum.org answers Python's default urllib User-Agent with a
+    403, so the PDF and the JPEG requests both carry the widget's own."""
+    pdf.pages = {_url("WSJ", 25): PAGE}
+    server.download_edition("WSJ", TODAY)
+    assert pdf.agents == [server.USER_AGENT, server.USER_AGENT]
+    assert server.USER_AGENT.startswith("tesserae/") and "Python-urllib" not in server.USER_AGENT
 
 
 def test_client_snaps_the_page_to_whole_pixels() -> None:

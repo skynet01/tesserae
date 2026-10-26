@@ -27,8 +27,10 @@ code below:
   address space, so a PDF that hangs or balloons costs that process, never
   the server; the PDF itself is capped at ``MAX_PDF_BYTES``. When there is
   no PDF, it can't be drawn, or pypdfium2 isn't installed, the JPEG stands
-  in, and today's page is redrawn once the PDF can be had (``jpeg_only`` in
-  state.json stops it retrying an edition whose PDF failed).
+  in, and today's page is redrawn once the PDF can be had: asked for again
+  on a backoff (``pdf_retry`` in state.json), a bounded number of times,
+  and at once on a forced refresh. The PDF leaves ``JPEG_RESERVE_S`` of an
+  edition's time for the JPEG, so a slow PDF can't starve the fallback.
 
 How a render works:
 
@@ -95,7 +97,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -152,13 +154,27 @@ JOB_BUDGET_S = 90.0
 # CPU time and address space capped where the platform allows.
 RASTER_WIDTH_PX = 1440
 RASTER_TIMEOUT_S = 45.0
+# Below this much time left in the PDF's share of an edition's window, the
+# page isn't drawn (the JPEG gets its turn instead).
+RASTER_MIN_S = 5.0
+# Of an edition's DOWNLOAD_BUDGET_S, what the PDF (download and drawing)
+# leaves for the JPEG fallback, so a slow PDF can't use up the fallback's time.
+JPEG_RESERVE_S = 20.0
+# Today's page saved from the JPEG asks for its PDF again on a backoff
+# (PDF_RETRY_S, doubling, up to PDF_RETRY_MAX_S), at most PDF_MAX_TRIES
+# times an edition; a forced refresh asks at once whatever the count.
+PDF_RETRY_S = 30 * 60
+PDF_RETRY_MAX_S = 6 * 60 * 60
+PDF_MAX_TRIES = 6
 RASTER_CPU_S = 30
 RASTER_MEMORY_BYTES = 1536 * 1024 * 1024
 RASTER_MAX_ASPECT = 4.0
 MAX_PDF_BYTES = 30 * 1024 * 1024
 # A saved page narrower than this came from the JPEG fallback.
 SHARP_MIN_WIDTH_PX = 1000
-JOB_WORST_S = JOB_BUDGET_S + HTTP_TIMEOUT_S + RASTER_TIMEOUT_S
+# Drawing runs inside the job's deadline; a request in flight can overrun it
+# by one socket timeout.
+JOB_WORST_S = JOB_BUDGET_S + HTTP_TIMEOUT_S
 # The host follows a push up at most this many times in a row
 # (FOLLOWUP_LIMIT in app/push.py); the hint is spread so they cover the wait.
 HOST_FOLLOW_UPS = 8
@@ -402,10 +418,14 @@ def parse_papers(value: Any) -> list[Paper]:
 #   Comments are removed first; an unclosed one drops it all too.
 # * Each declaration is ``property: value``. The property must be in
 #   ``_CSS_PROPERTIES``; every function in the value must be in
-#   ``_CSS_FUNCTIONS`` (no url(), image-set(), var(), attr(), env(), calc(),
-#   expression()), at most one level deep; every number must carry a known
-#   unit and stay inside its bound; the scale factors together stay under
-#   ``CSS_MAX_SCALE``. A declaration that fails is dropped on its own.
+#   ``_CSS_FUNCTION_CONTEXT`` (no url(), image-set(), var(), attr(), env(),
+#   calc(), expression(), skew()), at most one level deep; every number must
+#   carry a unit its context allows and stay inside that context's bound
+#   (``_css_limits``: moves within half the page, sizes within twice the
+#   cell); the page is enlarged at most ``CSS_MAX_SCALE`` along each axis,
+#   the scale property and transform's scale functions counted together.
+#   A declaration that fails is dropped on its own; of two for the same
+#   property, the last one counts, as in CSS.
 # * No position, z-index or anything else that could put the page outside
 #   its cell; nothing that loads anything. The ``translate`` property is
 #   client.js's, to put the page on whole pixels; ``transform: translate()``
@@ -415,7 +435,9 @@ CSS_MAX_CHARS = 1000
 CSS_MAX_DECLARATIONS = 12
 CSS_MAX_VALUE_CHARS = 200
 CSS_MAX_FUNCTIONS = 6
-CSS_MAX_SCALE = 4.0
+# How far the page may be enlarged along each axis, the scale property and
+# the transform's scale functions counted together.
+CSS_MAX_SCALE = 3.0
 
 _CSS_PROPERTIES = frozenset(
     {
@@ -442,46 +464,75 @@ _CSS_PROPERTIES = frozenset(
         "image-rendering",
     }
 )
-_CSS_FUNCTIONS = frozenset(
-    {
-        "translate",
-        "translatex",
-        "translatey",
-        "scale",
-        "scalex",
-        "scaley",
-        "rotate",
-        "skew",
-        "skewx",
-        "skewy",
-        "brightness",
-        "contrast",
-        "grayscale",
-        "invert",
-        "opacity",
-        "saturate",
-        "sepia",
-        "hue-rotate",
-        "inset",
-    }
-)
-_CSS_SCALE_FUNCTIONS = frozenset({"scale", "scalex", "scaley"})
-# The largest magnitude a number may have, per unit ("" is unitless).
-_CSS_UNIT_LIMITS: dict[str, float] = {
-    "": 10.0,
-    "%": 500.0,
-    "px": 3000.0,
-    "em": 100.0,
-    "rem": 100.0,
-    "vw": 300.0,
-    "vh": 300.0,
-    "vmin": 300.0,
-    "vmax": 300.0,
-    "deg": 360.0,
-    "turn": 1.0,
-    "rad": 6.3,
-    "grad": 400.0,
+# Every number is read in a context, which bounds it: the function it sits
+# in, else its property. A number with no context (``transform: 5px``) is
+# refused. Skew isn't offered: near 90deg it stretches the page without
+# bound, and a newspaper page has no use for it.
+_CSS_FUNCTION_CONTEXT: dict[str, str] = {
+    "translate": "move",
+    "translatex": "move",
+    "translatey": "move",
+    "scale": "scale",
+    "scalex": "scale",
+    "scaley": "scale",
+    "rotate": "angle",
+    "hue-rotate": "angle",
+    "brightness": "tone",
+    "contrast": "tone",
+    "grayscale": "tone",
+    "invert": "tone",
+    "opacity": "tone",
+    "saturate": "tone",
+    "sepia": "tone",
+    "inset": "place",
 }
+_CSS_PROPERTY_CONTEXT: dict[str, str] = {
+    "scale": "scale",
+    "rotate": "angle",
+    "opacity": "tone",
+    "margin": "move",
+    "margin-top": "move",
+    "margin-right": "move",
+    "margin-bottom": "move",
+    "margin-left": "move",
+    "width": "size",
+    "height": "size",
+    "max-width": "size",
+    "max-height": "size",
+    "min-width": "size",
+    "min-height": "size",
+    "object-position": "place",
+    "transform-origin": "place",
+}
+_CSS_VIEWPORT_UNITS = ("vw", "vh", "vmin", "vmax")
+
+
+def _css_limits(context: str) -> Mapping[str, float]:
+    """The largest magnitude a number may have in ``context``, per unit
+    ("" is unitless). A unit not listed is refused. Moves stay within half
+    the page, sizes within twice the cell; a bare 0 is the only unitless
+    length."""
+    if context == "move":
+        return {"": 0, "%": 50, "px": 1000, "em": 50, "rem": 50} | dict.fromkeys(
+            _CSS_VIEWPORT_UNITS, 50
+        )
+    if context == "size":
+        return {"": 0, "%": 200, "px": 3000, "em": 100, "rem": 100} | dict.fromkeys(
+            _CSS_VIEWPORT_UNITS, 200
+        )
+    if context == "place":
+        return {"": 0, "%": 100, "px": 3000, "em": 100, "rem": 100} | dict.fromkeys(
+            _CSS_VIEWPORT_UNITS, 100
+        )
+    if context == "angle":
+        return {"": 0, "deg": 360, "turn": 1, "rad": 6.3, "grad": 400}
+    if context == "tone":
+        return {"": 4, "%": 400}
+    if context == "scale":
+        return {"": CSS_MAX_SCALE, "%": 100 * CSS_MAX_SCALE}
+    return {}
+
+
 _CSS_CHARS_RE = re.compile(r"^[A-Za-z0-9 \t\r\n.,:;%()+\-!/*]*$")
 _CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 # Matched against a stripped chunk, so the value needs no lazy trailing
@@ -500,45 +551,78 @@ _CSS_TOKEN_RE = re.compile(
 )
 
 
-def _css_value_ok(prop: str, value: str) -> bool:
+def _apply_scale(
+    name: str, factors: list[float], sx: float, sy: float
+) -> tuple[float, float] | None:
+    """Fold one scale (a ``scale*()`` function's arguments, or the scale
+    property's values) into the running per-axis factors."""
+    if name == "scalex" and len(factors) == 1:
+        return sx * factors[0], sy
+    if name == "scaley" and len(factors) == 1:
+        return sx, sy * factors[0]
+    if name == "scale" and len(factors) == 1:
+        return sx * factors[0], sy * factors[0]
+    if name == "scale" and len(factors) == 2:
+        return sx * factors[0], sy * factors[1]
+    return None  # a third (z) value, or none at all
+
+
+def _css_value(prop: str, value: str) -> tuple[float, float] | None:
+    """Check one declaration's value; its scale along x and y (1 for none)
+    when it's allowed, else None."""
     if len(value) > CSS_MAX_VALUE_CHARS:
-        return False
-    pos, depth, functions, scale = 0, 0, 0, 1.0
+        return None
+    pos, functions, sx, sy = 0, 0, 1.0, 1.0
     current: str | None = None  # the function we're inside, if any
-    factor = 0.0  # the largest argument of the scale function we're inside
+    factors: list[float] = []  # scale values seen in the current scope
     while pos < len(value):
         match = _CSS_TOKEN_RE.match(value, pos)
         if match is None:
-            return False
+            return None
         pos = match.end()
         if match.group("func"):
             name = match.group("func").lower()
             functions += 1
-            if depth or name not in _CSS_FUNCTIONS or functions > CSS_MAX_FUNCTIONS:
-                return False
-            depth, current, factor = 1, name, 0.0
+            if current is not None or name not in _CSS_FUNCTION_CONTEXT:
+                return None
+            if functions > CSS_MAX_FUNCTIONS:
+                return None
+            current, factors = name, []
         elif match.group("close"):
-            if not depth:
-                return False
-            if current in _CSS_SCALE_FUNCTIONS:
-                scale *= factor
-            depth, current = 0, None
+            if current is None:
+                return None
+            if _CSS_FUNCTION_CONTEXT[current] == "scale":
+                scaled = _apply_scale(current, factors, sx, sy)
+                if scaled is None:
+                    return None
+                sx, sy = scaled
+            current, factors = None, []
         elif match.group("num"):
+            context = (
+                _CSS_FUNCTION_CONTEXT[current]
+                if current is not None
+                else _CSS_PROPERTY_CONTEXT.get(prop)
+            )
             unit = (match.group("unit") or "").lower()
+            limit = _css_limits(context or "").get(unit)
             try:
                 number = float(match.group("num"))
             except ValueError:
-                return False
-            limit = _CSS_UNIT_LIMITS.get(unit)
+                return None
             if limit is None or not math.isfinite(number) or abs(number) > limit:
-                return False
-            if current in _CSS_SCALE_FUNCTIONS or (prop == "scale" and not depth):
-                magnitude = abs(number) / 100 if unit == "%" else abs(number)
-                if current in _CSS_SCALE_FUNCTIONS:
-                    factor = max(factor, magnitude)
-                else:
-                    scale *= magnitude
-    return depth == 0 and scale <= CSS_MAX_SCALE
+                return None
+            if context == "scale":
+                factors.append(abs(number) / 100 if unit == "%" else abs(number))
+    if current is not None:
+        return None
+    if prop == "scale" and factors:
+        scaled = _apply_scale("scale", factors, sx, sy)
+        if scaled is None:
+            return None
+        sx, sy = scaled
+    if max(sx, sy) > CSS_MAX_SCALE:
+        return None
+    return sx, sy
 
 
 def _without_important(value: str) -> str:
@@ -564,18 +648,27 @@ def _sanitize_css(raw: str) -> str:
     text = _CSS_COMMENT_RE.sub(" ", raw)
     if "/*" in text or "*/" in text:
         return ""
-    kept: list[str] = []
+    # The last declaration of a property is the one that applies, as in CSS.
+    kept: dict[str, tuple[str, tuple[float, float]]] = {}
     for chunk in text.split(";"):
         match = _CSS_DECLARATION_RE.match(chunk.strip())
         if match is None:
             continue
         prop = match.group(1).lower()
         value = _without_important(match.group(2))
-        if prop in _CSS_PROPERTIES and value and _css_value_ok(prop, value):
-            kept.append(f"{prop}: {' '.join(value.split())}")
-        if len(kept) >= CSS_MAX_DECLARATIONS:
-            break
-    return "; ".join(kept)
+        scale = _css_value(prop, value) if prop in _CSS_PROPERTIES and value else None
+        if scale is not None:
+            kept.pop(prop, None)
+            kept[prop] = (" ".join(value.split()), scale)
+    # The scale property and the transform's scale functions multiply: past
+    # the bound together, the scale property goes.
+    if "scale" in kept and "transform" in kept:
+        (ax, ay), (bx, by) = kept["scale"][1], kept["transform"][1]
+        if max(ax * bx, ay * by) > CSS_MAX_SCALE:
+            del kept["scale"]
+    return "; ".join(
+        f"{prop}: {value}" for prop, (value, _) in list(kept.items())[:CSS_MAX_DECLARATIONS]
+    )
 
 
 # ----- small file helpers ----------------------------------------------------
@@ -749,13 +842,17 @@ def rasteriser_available() -> bool:
     return importlib.util.find_spec("pypdfium2") is not None
 
 
-def rasterise_pdf(body: bytes, width: int = RASTER_WIDTH_PX) -> bytes | None:
+def rasterise_pdf(
+    body: bytes, width: int = RASTER_WIDTH_PX, timeout: float = RASTER_TIMEOUT_S
+) -> bytes | None:
     """Page one of the PDF ``body`` as a JPEG ``width`` pixels wide, drawn
     at that width from the PDF's own vectors and fonts (never an upscaled
     bitmap), or None when it can't be drawn: no rasteriser, a broken or odd
-    PDF, the child over its time or memory. Blocks for at most
-    ``RASTER_TIMEOUT_S``; the worker thread is the only caller."""
-    if not rasteriser_available():
+    PDF, the child over its time or memory. Blocks for at most ``timeout``
+    (and never more than ``RASTER_TIMEOUT_S``); the worker thread is the
+    only caller."""
+    timeout = min(timeout, RASTER_TIMEOUT_S)
+    if not rasteriser_available() or timeout <= 0:
         return None
     command = [
         sys.executable,
@@ -769,7 +866,7 @@ def rasterise_pdf(body: bytes, width: int = RASTER_WIDTH_PX) -> bytes | None:
     ]
     try:
         done = subprocess.run(
-            command, input=body, capture_output=True, timeout=RASTER_TIMEOUT_S, check=False
+            command, input=body, capture_output=True, timeout=timeout, check=False
         )
     except subprocess.TimeoutExpired:
         logger.warning("%s: PDF rasteriser timed out", PLUGIN_ID)
@@ -811,7 +908,11 @@ def _pdf_edition(code: str, day: date, deadline: float, *, quiet: bool) -> bytes
     if not body.startswith(b"%PDF"):
         logger.info("%s: %s PDF for %s is not a PDF", PLUGIN_ID, code, day)
         return None
-    return rasterise_pdf(body)
+    left = deadline - _clock()
+    if left < RASTER_MIN_S:
+        logger.info("%s: no time left to draw the %s PDF for %s", PLUGIN_ID, code, day)
+        return None
+    return rasterise_pdf(body, timeout=left)
 
 
 def download_edition(
@@ -820,15 +921,18 @@ def download_edition(
     """The ``code`` front page for ``day``, validated, or None when that
     edition isn't there. The PDF comes first, drawn at panel width; the
     ``lg`` JPEG (about 700 px wide) is the fallback, skipped when
-    ``pdf_only``. Raises :class:`CdnUnreachable` when the CDN fails or
-    ``deadline`` (on ``_clock``) passes."""
-    deadline = min(deadline or math.inf, _clock() + DOWNLOAD_BUDGET_S)
+    ``pdf_only``. The two share one ``DOWNLOAD_BUDGET_S`` window (and
+    ``deadline``, on ``_clock``), of which the PDF, download and drawing
+    together, leaves ``JPEG_RESERVE_S`` for the JPEG. Raises
+    :class:`CdnUnreachable` when the CDN fails or the time runs out."""
+    deadline = min(deadline if deadline is not None else math.inf, _clock() + DOWNLOAD_BUDGET_S)
     if deadline <= _clock():
         raise CdnUnreachable("out of time")
     if pdf_only:
         return _pdf_edition(code, day, deadline, quiet=False) if rasteriser_available() else None
-    if rasteriser_available():
-        sharp = _pdf_edition(code, day, deadline, quiet=True)
+    pdf_deadline = deadline - JPEG_RESERVE_S
+    if rasteriser_available() and pdf_deadline > _clock():
+        sharp = _pdf_edition(code, day, pdf_deadline, quiet=True)
         if sharp is not None:
             return sharp
     got = _get(
@@ -933,18 +1037,33 @@ def _saved_width(path: Path) -> int | None:
         return None
 
 
-def _wants_sharper(code: str, day: date, width: int | None, state: dict[str, Any]) -> bool:
+def _pdf_retry(state: dict[str, Any], code: str, day: date) -> tuple[int, float]:
+    """How many times the PDF of ``code``'s ``day`` edition has been asked
+    for and failed, and when it may be asked for again (wall time)."""
+    entry = _section(state, "pdf_retry").get(code)
+    if not isinstance(entry, dict) or entry.get("day") != day.isoformat():
+        return 0, 0.0
+    tries, after = entry.get("tries"), entry.get("after")
+    if isinstance(tries, bool) or not isinstance(tries, int) or not isinstance(after, (int, float)):
+        return 0, 0.0
+    return tries, float(after)
+
+
+def _wants_sharper(
+    code: str, day: date, width: int | None, state: dict[str, Any], now: float, force: bool
+) -> bool:
     """Whether the saved ``day`` page of ``code``, ``width`` pixels wide, is
-    the blurry JPEG fallback that the PDF could replace: the rasteriser is
-    there and no PDF attempt for that edition has failed yet. Pages saved
-    before the PDF path existed are all of this kind, so today's are
-    redrawn once; older ones age out."""
-    return (
-        width is not None
-        and width < SHARP_MIN_WIDTH_PX
-        and rasteriser_available()
-        and _section(state, "jpeg_only").get(code) != day.isoformat()
-    )
+    the blurry JPEG fallback and its PDF may be asked for now. A PDF that
+    wasn't there (not out yet, say) or didn't draw is asked for again on a
+    backoff, up to ``PDF_MAX_TRIES`` times an edition; a forced refresh asks
+    at once. Pages saved before the PDF path existed are of this kind too,
+    so today's are redrawn; older ones age out."""
+    if width is None or width >= SHARP_MIN_WIDTH_PX or not rasteriser_available():
+        return False
+    if force:
+        return True
+    tries, after = _pdf_retry(state, code, day)
+    return tries < PDF_MAX_TRIES and now >= after
 
 
 # ----- rotation --------------------------------------------------------------
@@ -1169,7 +1288,11 @@ def _refresh(data_dir: Path, job: _Job) -> None:
             return
         have = newest_page(pages, job.code, job.today)
     current = have is not None and have.day >= job.today
-    sharpen = current and have is not None and _wants_sharper(job.code, have.day, have.width, state)
+    sharpen = (
+        current
+        and have is not None
+        and _wants_sharper(job.code, have.day, have.width, state, _wall(), job.force)
+    )
     if current and not sharpen:
         return
     saved: tuple[date, bytes] | None = None
@@ -1188,15 +1311,18 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if body is not None:
             saved = (day, body)
             break
-    # The edition whose PDF failed, so it isn't tried again: a JPEG saved in
-    # its place, or a redraw that came to nothing. An outage isn't a failure
-    # of the PDF, and leaves the next job to try again.
+    # The edition left on its JPEG by this job, whose PDF is asked for again
+    # later: a JPEG saved in its place, or a redraw that came to nothing
+    # (no PDF yet, one that didn't draw, an outage).
     blurry_day: date | None = None
+    sharp_day: date | None = None
     if saved is not None and rasteriser_available():
         size = page_size(saved[1])
         if size is not None and size[0] < SHARP_MIN_WIDTH_PX:
             blurry_day = saved[0]
-    elif sharpen and saved is None and failure != "unreachable" and have is not None:
+        else:
+            sharp_day = saved[0]
+    elif sharpen and saved is None and have is not None:
         blurry_day = have.day
     now = _wall()
     with _LOCK:
@@ -1220,14 +1346,21 @@ def _refresh(data_dir: Path, job: _Job) -> None:
             failed[job.code] = failure
         state["failed"] = failed
         oldest = (job.today - timedelta(days=LOOKBACK_DAYS)).isoformat()
-        jpeg_only = {
-            code: day
-            for code, day in _section(state, "jpeg_only").items()
-            if isinstance(day, str) and day >= oldest
+        retry = {
+            code: entry
+            for code, entry in _section(state, "pdf_retry").items()
+            if isinstance(entry, dict)
+            and isinstance(entry.get("day"), str)
+            and entry["day"] >= oldest
         }
         if blurry_day is not None:
-            jpeg_only[job.code] = blurry_day.isoformat()
-        state["jpeg_only"] = jpeg_only
+            tries = _pdf_retry(state, job.code, blurry_day)[0] + 1
+            wait = min(PDF_RETRY_S * 2 ** min(tries - 1, 16), PDF_RETRY_MAX_S)
+            retry[job.code] = {"day": blurry_day.isoformat(), "tries": tries, "after": now + wait}
+        elif sharp_day is not None:
+            retry.pop(job.code, None)
+        state["pdf_retry"] = retry
+        state.pop("jpeg_only", None)  # this file's earlier, give-up-for-the-day record
         _write_json(state_path, state)
 
 
@@ -1315,7 +1448,12 @@ def _select(
             and (
                 not edition_path(pages, code, today).is_file()
                 or _wants_sharper(
-                    code, today, _saved_width(edition_path(pages, code, today)), state
+                    code,
+                    today,
+                    _saved_width(edition_path(pages, code, today)),
+                    state,
+                    now,
+                    force,
                 )
             )
         ]
