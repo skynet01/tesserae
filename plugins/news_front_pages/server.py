@@ -44,11 +44,18 @@ How a render works:
   paper per shown frame": a warm-ahead, its send and the follow-ups show one
   paper. The accepted cost: two separate sends inside the hold repeat a paper,
   and a warm-ahead that leads its send by more than the hold moves on early.
+* The ``papers`` setting is a list of rows (code, in-rotation switch, CSS),
+  edited on the settings card. The rotation remembers the paper shown and
+  the order it came from, never a position, so rows added, removed,
+  reordered or switched off while it runs can't leave it pointing past the
+  end. Each paper's CSS is sanitised here (``sanitize_css``) and applied by
+  client.js to that paper's image only.
 
 Layout under ``data_dir``::
 
     pages/<CODE>_<YYYYMMDD>.jpg   one validated download per paper and edition
-    state.json                    paper shown + since when, download attempts and failures
+    state.json                    paper shown, since when and the order it came from;
+                                  download attempts and failures
     directory.json                Freedom Forum's paper list, for the editor's picker
 
 A downloaded edition is kept until it is more than ``KEEP_DAYS`` old, a newer
@@ -153,9 +160,18 @@ PAGES_DIR = "pages"
 STATE_FILE = "state.json"
 DIRECTORY_FILE = "directory.json"
 
-DEFAULT_PAPERS = "NY_NYT 3.5\nWSJ 2\nUSAT\n# AZ_ADS"
+# The ``papers`` setting's default, as in plugin.json. Two papers carry the
+# printer's slug line above the masthead; their CSS moves the page up past it.
+DEFAULT_PAPERS: list[dict[str, Any]] = [
+    {"enabled": True, "code": "NY_NYT", "css": "transform: translateY(-3.5%)"},
+    {"enabled": True, "code": "WSJ", "css": "transform: translateY(-2%)"},
+    {"enabled": True, "code": "USAT", "css": ""},
+    {"enabled": False, "code": "AZ_ADS", "css": ""},
+]
+# Rows read from the setting (the settings card allows as many).
+MAX_PAPERS = 40
 
-CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+CODE_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _PAGE_FILE_RE = re.compile(r"^([A-Z0-9_-]+)_(\d{8})\.jpg$")
 _SITEMAP_SLUG_RE = re.compile(r"<loc>\s*https://frontpages\.freedomforum\.org/newspapers/([^<\s]+)")
 
@@ -222,11 +238,11 @@ class CdnUnreachable(Exception):
 
 @dataclass(frozen=True)
 class Paper:
-    """One line of the ``papers`` setting."""
+    """One row of the ``papers`` setting."""
 
     code: str
-    enabled: bool = True
-    trim: float = 0.0  # percent of the page height cut off the top
+    enabled: bool = True  # in the rotation; a cell pinned to it shows it anyway
+    css: str = ""  # sanitised declarations for this paper's page image
 
 
 @dataclass(frozen=True)
@@ -246,8 +262,22 @@ def clean_code(raw: Any) -> str | None:
     """A paper code as the CDN spells it (upper case), or None if it isn't one.
     Freedom Forum's own page URLs carry the code in lower case, so a code
     copied from there is accepted too."""
-    code = str(raw or "").strip().upper()
+    code = str(raw or "").strip().upper() if isinstance(raw, (str, type(None))) else ""
     return code if CODE_RE.match(code) else None
+
+
+def _flag(raw: Any, default: bool = True) -> bool:
+    """A row's ``enabled``: a real boolean from the settings card, or one of
+    the usual spellings from a hand-edited settings file."""
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "on", "yes")
+    if isinstance(raw, (int, float)):
+        return raw != 0
+    return False
 
 
 def _parse_trim(raw: str) -> float | None:
@@ -258,13 +288,21 @@ def _parse_trim(raw: str) -> float | None:
     return min(max(value, 0.0), MAX_TRIM_PCT) if math.isfinite(value) else None
 
 
-def parse_papers(text: Any) -> list[Paper]:
-    """Parse the ``papers`` setting: ``CODE`` or ``CODE TRIM`` per line, ``#``
-    to disable a line. Anything else (a ``# heading`` comment, a typo) is
-    skipped rather than guessed at, and a repeated code keeps its first line."""
-    papers: list[Paper] = []
+def _trim_css(trim: float) -> str:
+    """The old per-line trim (percent of the page height cut off the top) as
+    the CSS that does the same: a translate percentage is of the element's
+    own height."""
+    return f"transform: translateY(-{trim:g}%)" if trim > 0 else ""
+
+
+def legacy_text_rows(text: str) -> list[dict[str, Any]]:
+    """Rows for the setting's old form, a textarea with ``CODE`` or
+    ``CODE TRIM`` per line and ``#`` to switch a line off. Anything else (a
+    ``# heading`` comment, a typo) is skipped rather than guessed at, and a
+    repeated code keeps its first line, so the rows always save as they are."""
+    rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for raw_line in str(text or "").splitlines():
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         enabled = not line.startswith("#")
         parts = line.lstrip("#").split()
@@ -275,8 +313,229 @@ def parse_papers(text: Any) -> list[Paper]:
         if code is None or trim is None or code in seen:
             continue
         seen.add(code)
-        papers.append(Paper(code, enabled, trim))
+        rows.append({"enabled": enabled, "code": code, "css": _trim_css(trim)})
+        if len(rows) >= MAX_PAPERS:
+            break
+    return rows
+
+
+def legacy_rows(name: str, value: Any) -> list[dict[str, Any]] | None:
+    """Host hook (app/repeater.py): the settings card shows a ``papers``
+    value saved before the setting became rows as rows; saving stores them."""
+    if name != "papers" or not isinstance(value, str):
+        return None
+    return legacy_text_rows(value)
+
+
+def _rows(value: Any) -> list[dict[str, Any]]:
+    """The setting's rows, whichever form it was saved in: the list the
+    settings card stores, the same as a JSON string, or the old text."""
+    if isinstance(value, str):
+        if not value.lstrip().startswith("["):
+            return legacy_text_rows(value)
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return []
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]
+
+
+def parse_papers(value: Any) -> list[Paper]:
+    """The ``papers`` setting as papers, in order. A row without a valid
+    code (blank, spaces, ``../x``) is skipped, and so are keys a row
+    doesn't know. A code listed twice uses its first row that is in the
+    rotation (else its first row), at the first row's place."""
+    papers: list[Paper] = []
+    at: dict[str, int] = {}
+    for row in _rows(value)[:MAX_PAPERS]:
+        code = clean_code(row.get("code"))
+        if code is None:
+            continue
+        paper = Paper(code, _flag(row.get("enabled")), sanitize_css(row.get("css")))
+        if code not in at:
+            at[code] = len(papers)
+            papers.append(paper)
+        elif paper.enabled and not papers[at[code]].enabled:
+            papers[at[code]] = paper
     return papers
+
+
+# ----- per-paper CSS ---------------------------------------------------------
+#
+# Each paper's CSS is a list of declarations applied to that paper's page
+# image and nothing else: client.js sets them as the <img>'s inline style
+# (``style.cssText``), so there is no selector, no rule and no stylesheet for
+# them to escape from, and other papers and widgets never see them. The page
+# is drawn by the headless Chromium that composes the panel's frame, so they
+# are also cut down here to a small, closed vocabulary before they reach it:
+#
+# * Only the characters CSS declarations of that vocabulary need. Anything
+#   else (``<``, ``>``, braces, quotes, backslash escapes, ``@``, ``#``,
+#   ``&``, non-ASCII, control characters) drops the paper's CSS entirely,
+#   since past that point there is no telling where a declaration ends.
+#   Comments are removed first; an unclosed one drops it all too.
+# * Each declaration is ``property: value``. The property must be in
+#   ``_CSS_PROPERTIES``; every function in the value must be in
+#   ``_CSS_FUNCTIONS`` (no url(), image-set(), var(), attr(), env(), calc(),
+#   expression()), at most one level deep; every number must carry a known
+#   unit and stay inside its bound; the scale factors together stay under
+#   ``CSS_MAX_SCALE``. A declaration that fails is dropped on its own.
+# * No position, z-index or anything else that could put the page outside
+#   its cell; nothing that loads anything.
+
+CSS_MAX_CHARS = 1000
+CSS_MAX_DECLARATIONS = 12
+CSS_MAX_VALUE_CHARS = 200
+CSS_MAX_FUNCTIONS = 6
+CSS_MAX_SCALE = 4.0
+
+_CSS_PROPERTIES = frozenset(
+    {
+        "filter",
+        "opacity",
+        "transform",
+        "transform-origin",
+        "translate",
+        "scale",
+        "rotate",
+        "object-fit",
+        "object-position",
+        "margin",
+        "margin-top",
+        "margin-right",
+        "margin-bottom",
+        "margin-left",
+        "width",
+        "height",
+        "max-width",
+        "max-height",
+        "min-width",
+        "min-height",
+        "clip-path",
+        "image-rendering",
+    }
+)
+_CSS_FUNCTIONS = frozenset(
+    {
+        "translate",
+        "translatex",
+        "translatey",
+        "scale",
+        "scalex",
+        "scaley",
+        "rotate",
+        "skew",
+        "skewx",
+        "skewy",
+        "brightness",
+        "contrast",
+        "grayscale",
+        "invert",
+        "opacity",
+        "saturate",
+        "sepia",
+        "hue-rotate",
+        "inset",
+    }
+)
+_CSS_SCALE_FUNCTIONS = frozenset({"scale", "scalex", "scaley"})
+# The largest magnitude a number may have, per unit ("" is unitless).
+_CSS_UNIT_LIMITS: dict[str, float] = {
+    "": 10.0,
+    "%": 500.0,
+    "px": 3000.0,
+    "em": 100.0,
+    "rem": 100.0,
+    "vw": 300.0,
+    "vh": 300.0,
+    "vmin": 300.0,
+    "vmax": 300.0,
+    "deg": 360.0,
+    "turn": 1.0,
+    "rad": 6.3,
+    "grad": 400.0,
+}
+_CSS_CHARS_RE = re.compile(r"^[A-Za-z0-9 \t\r\n.,:;%()+\-!/*]*$")
+_CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+_CSS_DECLARATION_RE = re.compile(r"^([A-Za-z-]+)\s*:\s*(.+?)\s*$", re.S)
+_CSS_IMPORTANT_RE = re.compile(r"\s*!\s*important\s*$", re.I)
+_CSS_TOKEN_RE = re.compile(
+    r"""
+      (?P<ws>\s+)
+    | (?P<func>[A-Za-z][A-Za-z0-9-]*)\(
+    | (?P<close>\))
+    | (?P<comma>,)
+    | (?P<num>[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?P<unit>%|[A-Za-z]+)?
+    | (?P<ident>-?[A-Za-z][A-Za-z0-9-]*)
+    """,
+    re.X,
+)
+
+
+def _css_value_ok(prop: str, value: str) -> bool:
+    if len(value) > CSS_MAX_VALUE_CHARS:
+        return False
+    pos, depth, functions, scale = 0, 0, 0, 1.0
+    current: str | None = None  # the function we're inside, if any
+    factor = 0.0  # the largest argument of the scale function we're inside
+    while pos < len(value):
+        match = _CSS_TOKEN_RE.match(value, pos)
+        if match is None:
+            return False
+        pos = match.end()
+        if match.group("func"):
+            name = match.group("func").lower()
+            functions += 1
+            if depth or name not in _CSS_FUNCTIONS or functions > CSS_MAX_FUNCTIONS:
+                return False
+            depth, current, factor = 1, name, 0.0
+        elif match.group("close"):
+            if not depth:
+                return False
+            if current in _CSS_SCALE_FUNCTIONS:
+                scale *= factor
+            depth, current = 0, None
+        elif match.group("num"):
+            unit = (match.group("unit") or "").lower()
+            try:
+                number = float(match.group("num"))
+            except ValueError:
+                return False
+            limit = _CSS_UNIT_LIMITS.get(unit)
+            if limit is None or not math.isfinite(number) or abs(number) > limit:
+                return False
+            if current in _CSS_SCALE_FUNCTIONS or (prop == "scale" and not depth):
+                magnitude = abs(number) / 100 if unit == "%" else abs(number)
+                if current in _CSS_SCALE_FUNCTIONS:
+                    factor = max(factor, magnitude)
+                else:
+                    scale *= magnitude
+    return depth == 0 and scale <= CSS_MAX_SCALE
+
+
+def sanitize_css(raw: Any) -> str:
+    """``raw`` cut down to the declarations it's safe to give one paper's
+    page image, re-serialised as ``prop: value; prop: value``; "" when
+    nothing survives. See the notes above for what survives."""
+    if not isinstance(raw, str) or len(raw) > CSS_MAX_CHARS or not _CSS_CHARS_RE.match(raw):
+        return ""
+    text = _CSS_COMMENT_RE.sub(" ", raw)
+    if "/*" in text or "*/" in text:
+        return ""
+    kept: list[str] = []
+    for chunk in text.split(";"):
+        match = _CSS_DECLARATION_RE.match(chunk.strip())
+        if match is None:
+            continue
+        prop = match.group(1).lower()
+        value = _CSS_IMPORTANT_RE.sub("", match.group(2))
+        if prop in _CSS_PROPERTIES and value and _css_value_ok(prop, value):
+            kept.append(f"{prop}: {' '.join(value.split())}")
+        if len(kept) >= CSS_MAX_DECLARATIONS:
+            break
+    return "; ".join(kept)
 
 
 # ----- small file helpers ----------------------------------------------------
@@ -492,10 +751,29 @@ def prune(pages: Path, today: date, now: float) -> None:
 # ----- rotation --------------------------------------------------------------
 
 
-def rotation(enabled: list[str], last: str | None) -> list[str]:
-    """Enabled codes from the one after ``last`` on round the list, ``last`` at the end."""
-    start = enabled.index(last) + 1 if last in enabled else 0
+def rotation(enabled: list[str], last: str | None, previous: list[str] | None = None) -> list[str]:
+    """Enabled codes from the one after ``last`` on round the list, ``last``
+    at the end. The rotation remembers papers, not a position, so an edited
+    list can't leave it pointing past the end. When ``last`` has left the
+    list (removed, switched off, its code edited), the rotation resumes at
+    the first paper still listed that came after it in ``previous``, the
+    order it was shown from, rather than starting over."""
+    if last in enabled:
+        start = enabled.index(last) + 1
+    elif previous and last in previous:
+        at = previous.index(last)
+        after = previous[at + 1 :] + previous[:at]
+        resume = next((code for code in after if code in enabled), None)
+        start = enabled.index(resume) if resume is not None else 0
+    else:
+        start = 0
     return enabled[start:] + enabled[:start]
+
+
+def _codes(raw: Any) -> list[str] | None:
+    if not isinstance(raw, list):
+        return None
+    return [code for code in raw if isinstance(code, str)][:MAX_PAPERS]
 
 
 def plan(enabled: list[str], state: dict[str, Any], now: float) -> tuple[list[str], str | None]:
@@ -506,7 +784,7 @@ def plan(enabled: list[str], state: dict[str, Any], now: float) -> tuple[list[st
     current = state.get("current")
     current = current if isinstance(current, str) else None
     since = state.get("since")
-    order = rotation(enabled, current)
+    order = rotation(enabled, current, _codes(state.get("order")))
     held = isinstance(since, (int, float)) and 0 <= now - since < ROTATION_HOLD_S
     if current in enabled and held:
         return [current, *order[:-1]], current
@@ -806,6 +1084,7 @@ def _select(
         # next but never moves the rotation; repeating the held paper doesn't either.
         if chosen and not pinned and not preview and chosen[0] != held:
             state["current"], state["since"] = chosen[0], now
+            state["order"] = list(candidates)  # where to resume if the list changes
             _write_json(state_path, state)
         due = [
             code
@@ -829,12 +1108,13 @@ def fetch(
     pinned_raw = str(options.get("paper") or "").strip()
     pinned = clean_code(pinned_raw) if pinned_raw else None
     if pinned_raw and pinned is None:
-        return {"error": f"'{pinned_raw}' isn't a Freedom Forum paper code."}
+        return {"error": f"'{pinned_raw[:60]}' isn't a Freedom Forum paper code."}
     candidates = [pinned] if pinned else [p.code for p in papers if p.enabled]
     if not candidates:
-        return {
-            "error": "No papers to show. Add paper codes under Settings → Widgets → News, Front Pages."
-        }
+        where = "under Settings → Widgets → News, Front Pages"
+        if papers:
+            return {"error": f"Every paper in the list is switched off. Turn one on {where}."}
+        return {"error": f"No papers to show. Add paper codes {where}."}
 
     data_dir = Path(ctx["data_dir"])
     today = _edition_today()
@@ -873,14 +1153,16 @@ def fetch(
         return _missing_error(candidates, picked.state, pinned)
 
     code, page = picked.chosen
-    trims = {p.code: p.trim for p in papers}
+    styles = {p.code: p.css for p in papers}
     payload: dict[str, Any] = {
         "url": f"/plugins/{PLUGIN_ID}/page/{page.path.name}",
         "code": code,
         "date": page.day.isoformat(),
         "width": page.width,
         "height": page.height,
-        "trim": trims.get(code, 0.0),
+        # This paper's own CSS, sanitised (see sanitize_css); a pinned paper
+        # uses its row's CSS too, whether or not the row is in the rotation.
+        "css": styles.get(code, ""),
     }
     _LAST_CLAIMED[key] = (now, payload)
     if code in line:
@@ -949,10 +1231,14 @@ def choices(name: str) -> list[dict[str, str]]:
     plugin = _plugin()
     names = directory(Path(plugin.data_dir)) if plugin is not None else dict(FALLBACK_DIRECTORY)
     rows = [{"value": "", "label": "Rotate through the paper list"}]
-    listed = [p.code for p in parse_papers(_settings().get("papers", DEFAULT_PAPERS))]
+    papers = parse_papers(_settings().get("papers", DEFAULT_PAPERS))
+    listed = [p.code for p in papers]
+    off = {p.code for p in papers if not p.enabled}
     rest = sorted((c for c in names if c not in listed), key=lambda c: names[c].casefold())
     for code in [*listed, *rest]:
         label = f"{names[code]} ({code})" if code in names else code
+        if code in off:
+            label += ", not in the rotation"
         rows.append({"value": code, "label": label})
     return rows
 
