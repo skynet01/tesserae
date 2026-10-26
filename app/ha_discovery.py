@@ -1870,9 +1870,12 @@ class HomeAssistantDiscovery:
         ones reference current devices/pages/lineups, and blank everything
         else under our discovery namespace. The same goes for entity groups
         switched off in settings while Tesserae wasn't publishing (the
-        per-dashboard buttons, the lineup controls) and per-display
-        entities whose hook is missing: this session won't publish them,
-        so nothing else would ever retire them."""
+        per-dashboard buttons, the lineup controls) and for Next / Previous
+        without their hook: this session won't publish them, so nothing
+        else would ever retire them. Other hook-gated entities are left
+        alone: some hooks are built before their service exists at boot
+        (the scheduler behind Next change), and blanking would drop those
+        entities from HA on every restart."""
         import time
 
         live_device_ids = {str(d.id) for d in self._bindable_devices()}
@@ -1892,7 +1895,7 @@ class HomeAssistantDiscovery:
             if lineups_on
             else set()
         )
-        skip_leaves = self._device_skip_leaves(lineups_on)
+        skip_leaves = self._device_skip_leaves(lineups_on) & {"lineup", "next", "prev"}
         to_blank: set[str] = set()
 
         def on_config(topic: str, payload: bytes) -> None:
@@ -1927,8 +1930,8 @@ class HomeAssistantDiscovery:
                 return
             if isinstance(primary, str) and primary.startswith("tesserae_dev_"):
                 device_id = primary[len("tesserae_dev_") :]
-                # A display that's gone, or one of its entities this
-                # session won't publish (setting off, hook missing).
+                # A display that's gone, or its Lineup select / Next /
+                # Previous when this session won't publish them.
                 unpublished = (
                     obj is not None and obj.removeprefix(f"dev_{device_id}_") in skip_leaves
                 )

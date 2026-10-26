@@ -1027,12 +1027,19 @@ def test_sweep_blanks_retained_next_prev_when_the_hook_is_gone(tmp_path: Path) -
                 "object_id": "tesserae_dev_lounge_refresh",
                 "device": lounge,
             },
+            # Its scheduler hook is missing too, but at boot that only means
+            # the scheduler isn't built yet: the entity must survive.
+            "homeassistant/sensor/tesserae/dev_lounge_next_change/config": {
+                "object_id": "tesserae_dev_lounge_next_change",
+                "device": lounge,
+            },
         },
     )
     ha._sweep_stale_retained()
     blanked = _blanked(client)
     assert "homeassistant/button/tesserae/dev_lounge_next/config" in blanked
     assert "homeassistant/button/tesserae/dev_lounge_refresh/config" not in blanked
+    assert "homeassistant/sensor/tesserae/dev_lounge_next_change/config" not in blanked
 
 
 def test_sweep_keeps_lineup_buttons_only_while_they_can_act(tmp_path: Path) -> None:

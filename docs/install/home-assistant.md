@@ -148,9 +148,11 @@ to the hub via `via_device`):
     - After a manually sent dashboard, *Next* goes to the page after the
       one the lineup was on.
     - They still work while *Automation* is off, during quiet hours, and
-      while a *Hold* is running (the hold stays), like other manual
-      sends. A remapped panel button doesn't change them, and they don't
-      fire the *Input* event.
+      while a *Hold* is running (on a lineup the hold stays as it was),
+      like other manual sends. If the page fails to render, the display
+      stays where it was and the error shows on *Last error*. A remapped
+      panel button doesn't change them, and they don't fire the *Input*
+      event.
 - **event** *Input*, fires for physical buttons (`button`) and touch
   gestures (`tap`, `swipe`, `slide`) with the button name, gesture,
   action, slider value and the page landed on as attributes. Use it as
