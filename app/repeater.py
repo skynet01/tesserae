@@ -186,7 +186,9 @@ _CLASS_ESCAPES = _PATTERN_LITERAL_ESCAPES | frozenset("-&!#%,:;<=>@`~")
 _CLASS_DOUBLES = frozenset("&!#$%*+,.:;<=>?@^`~")
 _DIGIT_RANGES = (("0", "9"),)
 _WORD_RANGES = (("0", "9"), ("A", "Z"), ("a", "z"), ("_", "_"))
-_COUNT_RE = re.compile(r"\{(\d{1,4})(?:(,)(\d{0,4}))?\}")
+# ASCII digits only: re's \d takes any Unicode digit (a{١}), which the
+# browser refuses, and a pattern the browser refuses checks nothing there.
+_COUNT_RE = re.compile(r"\{([0-9]{1,4})(?:(,)([0-9]{0,4}))?\}")
 
 
 class _PatternError(ValueError):
@@ -508,15 +510,17 @@ def manifest_errors(manifest: Mapping[str, Any]) -> list[str]:
 # ----- saving (strict) -------------------------------------------------------
 
 
-def _strict_value(sub: Mapping[str, Any], raw: Any, where: str) -> Any:
+def _strict_value(sub: Mapping[str, Any], raw: Any, where: str, *, is_default: bool = False) -> Any:
     kind = sub.get("type")
     label = str(sub.get("label") or sub.get("name"))
     if raw is None:
+        if is_default:
+            return None
         # A row saved without this key takes the default, which goes through
         # the same checks as a typed value (a number may have none at all).
-        raw = subfield_default(sub)
-        if raw is None:
-            return None
+        # Once: a default that itself means "no value" (a blank number) ends
+        # there rather than asking for the default again.
+        return _strict_value(sub, subfield_default(sub), where, is_default=True)
     if isinstance(raw, (dict, list)):
         raise RepeaterValueError(f"{where}: {label} can't hold a list or an object")
     if kind in ("string", "textarea"):
@@ -559,7 +563,7 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str) -> Any:
         elif isinstance(raw, str):
             text = raw.strip()
             if not text:
-                return None if sub.get("default") is None else _strict_value(sub, None, where)
+                return None if is_default else _strict_value(sub, None, where)
             try:
                 number = int(text)
             except ValueError:

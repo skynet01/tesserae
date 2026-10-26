@@ -682,3 +682,43 @@ def test_a_number_too_big_for_a_float_is_refused_not_raised(raw: Any) -> None:
     spec = _spec()
     _sub(spec, "n")["max"] = 10**400
     assert any("max must be a number" in e for e in spec_errors(spec))
+
+
+# ----- audit re-check regressions ---------------------------------------------
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_number_default_is_refused_without_recursing(blank: str) -> None:
+    spec = _spec()
+    spec["fields"].append({"name": "x", "type": "number", "label": "X", "default": blank})
+    errors = spec_errors(spec)  # used to recurse until RecursionError
+    assert any("must be a number value as stored" in e for e in errors), errors
+    manifest = {
+        "tesserae_compat": "1.x",
+        "name": "Blank",
+        "version": "0.0.1",
+        "kind": "widget",
+        "supports": {"sizes": ["sm"]},
+        "settings": [spec],
+    }
+    with pytest.raises(InstallError) as caught:
+        _validate_manifest(manifest, SCHEMA)
+    assert caught.value.status == 422
+    # An unchecked declaration saves the row with no number, once.
+    assert parse_rows(spec, [{"code": "AB"}])[0]["x"] is None
+    assert parse_rows(spec, [{"code": "AB", "x": blank}])[0]["x"] is None
+
+
+def test_a_blank_number_default_keeps_a_plugin_from_loading(tmp_path: Path) -> None:
+    spec = _spec()
+    spec["fields"].append({"name": "x", "type": "number", "label": "X", "default": ""})
+    _write_plugin(tmp_path / "plugins", "rep_blank", [spec])
+    app = create_app(testing=True, data_root=tmp_path / "data", plugins_dir=tmp_path / "plugins")
+    registry = app.config["PLUGIN_REGISTRY"]
+    assert registry.get("rep_blank") is None
+    assert any("number value as stored" in e.message for e in registry.errors)
+
+
+@pytest.mark.parametrize("pattern", ["a{١}", "a{１}", "a{1,٣}", "a{１,2}"])
+def test_counts_take_ascii_digits_only(pattern: str) -> None:
+    assert repeater.pattern_error(pattern) == "has a { that isn't a count like {3} or {1,8}"

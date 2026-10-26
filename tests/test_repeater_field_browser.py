@@ -104,7 +104,10 @@ def test_rows_add_remove_move_discard_and_save(live: tuple[str, Flask]) -> None:
         bar = card.locator("[data-save-bar]")
 
         def codes() -> list[str]:
-            return [rows.nth(i).locator('[data-repeater-key="code"]').input_value() for i in range(rows.count())]
+            return [
+                rows.nth(i).locator('[data-repeater-key="code"]').input_value()
+                for i in range(rows.count())
+            ]
 
         def stored_codes() -> list[str]:
             return [r["code"] for r in json.loads(storage.input_value())]
@@ -184,3 +187,76 @@ def test_a_blank_required_code_blocks_the_save_in_the_browser(live: tuple[str, F
 
     assert invalid == 1
     assert _stored(app) == SETTING["default"]
+
+
+ACCEPTED_PATTERNS = [
+    "[A-Za-z0-9_\\-]+",
+    "[A-Z]{2}_[A-Z0-9]+",
+    "#[0-9a-fA-F]{6}",
+    "\\d{3}-\\d{4}",
+    "[^ ]*",
+    "v\\.\\d?",
+    "x.y",
+    "[\\w.]{1,8}",
+    "a/b",
+    "[a\\-z]+",
+    "\\(\\d+\\)",
+    "[\\/]",
+    "é+",
+]
+SAMPLES = [
+    "",
+    "a",
+    "A_9-z",
+    "AB_X1",
+    "#00ffAA",
+    "555-1234",
+    "no spaces",
+    "v.1",
+    "xzy",
+    "a.b_c",
+    "a/b",
+    "a-z",
+    "(42)",
+    "/",
+    "éé",
+    "١٢٣-٤٥٦٧",
+    "١",
+    "ab١",
+]
+
+
+def test_the_browser_reads_every_accepted_pattern_the_same_way() -> None:
+    """The input's pattern attribute compiles with the v flag. Every pattern
+    the server accepts compiles there too, and matches exactly what the
+    server's own matcher matches, Unicode digits included; patterns with
+    Unicode digits in a count are refused here as they are there."""
+    from playwright.sync_api import sync_playwright
+
+    from app import repeater
+
+    expected = {
+        p: [repeater._pattern_matches(repeater._compile_pattern(p), t) for t in SAMPLES]
+        for p in ACCEPTED_PATTERNS
+    }
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        page = browser.new_page()
+        got = page.evaluate(
+            """([patterns, samples]) => Object.fromEntries(patterns.map((p) => {
+                 const re = new RegExp(`^(?:${p})$`, "v");
+                 return [p, samples.map((s) => re.test(s))];
+               }))""",
+            [ACCEPTED_PATTERNS, SAMPLES],
+        )
+        refused = page.evaluate(
+            """(patterns) => patterns.map((p) => {
+                 try { new RegExp(`^(?:${p})$`, "v"); return false; } catch { return true; }
+               })""",
+            ["a{١}", "a{１}"],
+        )
+        browser.close()
+    assert got == expected
+    assert refused == [True, True]
+    for pattern in ("a{١}", "a{１}"):
+        assert repeater.pattern_error(pattern) is not None
