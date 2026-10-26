@@ -422,8 +422,9 @@ def parse_papers(value: Any) -> list[Paper]:
 #   calc(), expression(), skew()), at most one level deep; every number must
 #   carry a unit its context allows and stay inside that context's bound
 #   (``_css_limits``: moves within half the page, sizes within twice the
-#   cell); the page is enlarged at most ``CSS_MAX_SCALE`` along each axis,
-#   the scale property and transform's scale functions counted together.
+#   cell); every scale (the scale property and each of the transform's
+#   scale functions, at its largest factor, rotations notwithstanding)
+#   multiplies into one bound of ``CSS_MAX_SCALE``.
 #   A declaration that fails is dropped on its own; of two for the same
 #   property, the last one counts, as in CSS.
 # * No position, z-index or anything else that could put the page outside
@@ -435,8 +436,8 @@ CSS_MAX_CHARS = 1000
 CSS_MAX_DECLARATIONS = 12
 CSS_MAX_VALUE_CHARS = 200
 CSS_MAX_FUNCTIONS = 6
-# How far the page may be enlarged along each axis, the scale property and
-# the transform's scale functions counted together.
+# How far the page may be enlarged: every scale in its CSS multiplied
+# together at its largest factor (see _css_value).
 CSS_MAX_SCALE = 3.0
 
 _CSS_PROPERTIES = frozenset(
@@ -551,28 +552,26 @@ _CSS_TOKEN_RE = re.compile(
 )
 
 
-def _apply_scale(
-    name: str, factors: list[float], sx: float, sy: float
-) -> tuple[float, float] | None:
-    """Fold one scale (a ``scale*()`` function's arguments, or the scale
-    property's values) into the running per-axis factors."""
-    if name == "scalex" and len(factors) == 1:
-        return sx * factors[0], sy
-    if name == "scaley" and len(factors) == 1:
-        return sx, sy * factors[0]
-    if name == "scale" and len(factors) == 1:
-        return sx * factors[0], sy * factors[0]
-    if name == "scale" and len(factors) == 2:
-        return sx * factors[0], sy * factors[1]
-    return None  # a third (z) value, or none at all
+def _scale_factor(name: str, factors: list[float]) -> float | None:
+    """How much one scale (a ``scale*()`` function's arguments, or the
+    scale property's values) can enlarge the page: its largest factor, and
+    never less than 1, since shrinking one axis doesn't make up for
+    growing another. None for a third (z) value or no value at all."""
+    expected = (1,) if name in ("scalex", "scaley") else (1, 2)
+    if len(factors) not in expected:
+        return None
+    return max(1.0, *factors)
 
 
-def _css_value(prop: str, value: str) -> tuple[float, float] | None:
-    """Check one declaration's value; its scale along x and y (1 for none)
-    when it's allowed, else None."""
+def _css_value(prop: str, value: str) -> float | None:
+    """Check one declaration's value; how much it can enlarge the page (1
+    for not at all) when it's allowed, else None. The bound is
+    deliberately coarse: every scale in the value multiplies in at its
+    largest factor, whatever lies between (a rotate turns one axis's scale
+    into the other's, so per-axis sums can't be trusted)."""
     if len(value) > CSS_MAX_VALUE_CHARS:
         return None
-    pos, functions, sx, sy = 0, 0, 1.0, 1.0
+    pos, functions, growth = 0, 0, 1.0
     current: str | None = None  # the function we're inside, if any
     factors: list[float] = []  # scale values seen in the current scope
     while pos < len(value):
@@ -592,10 +591,10 @@ def _css_value(prop: str, value: str) -> tuple[float, float] | None:
             if current is None:
                 return None
             if _CSS_FUNCTION_CONTEXT[current] == "scale":
-                scaled = _apply_scale(current, factors, sx, sy)
-                if scaled is None:
+                factor = _scale_factor(current, factors)
+                if factor is None:
                     return None
-                sx, sy = scaled
+                growth *= factor
             current, factors = None, []
         elif match.group("num"):
             context = (
@@ -616,13 +615,11 @@ def _css_value(prop: str, value: str) -> tuple[float, float] | None:
     if current is not None:
         return None
     if prop == "scale" and factors:
-        scaled = _apply_scale("scale", factors, sx, sy)
-        if scaled is None:
+        factor = _scale_factor("scale", factors)
+        if factor is None:
             return None
-        sx, sy = scaled
-    if max(sx, sy) > CSS_MAX_SCALE:
-        return None
-    return sx, sy
+        growth *= factor
+    return growth if growth <= CSS_MAX_SCALE else None
 
 
 def _without_important(value: str) -> str:
@@ -649,7 +646,7 @@ def _sanitize_css(raw: str) -> str:
     if "/*" in text or "*/" in text:
         return ""
     # The last declaration of a property is the one that applies, as in CSS.
-    kept: dict[str, tuple[str, tuple[float, float]]] = {}
+    kept: dict[str, tuple[str, float]] = {}
     for chunk in text.split(";"):
         match = _CSS_DECLARATION_RE.match(chunk.strip())
         if match is None:
@@ -662,10 +659,12 @@ def _sanitize_css(raw: str) -> str:
             kept[prop] = (" ".join(value.split()), scale)
     # The scale property and the transform's scale functions multiply: past
     # the bound together, the scale property goes.
-    if "scale" in kept and "transform" in kept:
-        (ax, ay), (bx, by) = kept["scale"][1], kept["transform"][1]
-        if max(ax * bx, ay * by) > CSS_MAX_SCALE:
-            del kept["scale"]
+    if (
+        "scale" in kept
+        and "transform" in kept
+        and kept["scale"][1] * kept["transform"][1] > CSS_MAX_SCALE
+    ):
+        del kept["scale"]
     return "; ".join(
         f"{prop}: {value}" for prop, (value, _) in list(kept.items())[:CSS_MAX_DECLARATIONS]
     )

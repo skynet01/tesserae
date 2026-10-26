@@ -529,6 +529,30 @@ def test_css_sizes_and_moves_are_bounded(raw: str) -> None:
     assert server.sanitize_css(raw) == ""
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A rotate turns one axis's scale into the other's: 9x along one axis.
+        "transform: scaleX(3) rotate(90deg) scaleY(3)",
+        "transform: scale(3, 1) rotate(90deg) scale(3, 1)",
+        "transform: scaleX(3) rotate(90deg) scaleX(3) rotate(90deg) scaleX(3) rotate(90deg)",
+        # Shrinking one axis doesn't buy growth on another.
+        "transform: scaleX(0.1) rotate(90deg) scaleY(3) scaleX(3)",
+        "transform: scale(0.5) scale(3) scale(3)",
+    ],
+)
+def test_every_scale_counts_at_its_largest_whatever_turns_it(raw: str) -> None:
+    assert server.sanitize_css(raw) == ""
+
+
+def test_the_scale_property_on_top_of_a_rotated_transform_is_dropped() -> None:
+    raw = "scale: 3; transform: scaleX(3) rotate(90deg)"
+    assert server.sanitize_css(raw) == "transform: scaleX(3) rotate(90deg)"
+    assert server.sanitize_css("scale: 1.5; transform: rotate(90deg) scaleY(2)") == (
+        "scale: 1.5; transform: rotate(90deg) scaleY(2)"
+    )
+
+
 def test_scale_counts_the_property_and_the_transform_together() -> None:
     # 2 x 2 = 4, over the bound together: the scale property goes.
     assert server.sanitize_css("scale: 2; transform: scale(2)") == "transform: scale(2)"
