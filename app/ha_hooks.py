@@ -381,6 +381,29 @@ def _notify(app: Flask, device_id: str | None, message: str) -> str | None:
     return None
 
 
+def _step_device(app: Flask, device_id: str, delta: int) -> str | None:
+    """Step one display a page forward (``delta > 0``) or back through the
+    button service, the same path a physical next / previous press takes
+    (see ``ButtonService.step`` for what differs and why).
+
+    The service is looked up per call, not when the hooks are built: the
+    first transport wiring (which starts HA discovery) runs before the
+    button service exists at boot, and a captured ``None`` would leave the
+    entities dead until the next settings save."""
+    svc = app.config.get("BUTTON_SERVICE")
+    step = getattr(svc, "step", None)
+    if not callable(step):
+        return "Button service not ready."
+    device = app.config["DEVICE_REGISTRY"].get(device_id)
+    if device is None or device.kind_of is None:
+        return f"Unknown device {device_id!r}."
+    result = step(device_id=device_id, forward=delta > 0, source="home_assistant")
+    push = getattr(result, "push_result", None)
+    if push is not None and push.status == "failed":
+        return f"{device.display_name}: {push.error or 'push failed'}"
+    return None
+
+
 def build_ha_hooks(app: Flask) -> HaHooks:
     """Assemble the hooks from ``app.config``. Anything not wired yet on
     this install (no OTA store, no scheduler in tests) is simply left
@@ -413,4 +436,5 @@ def build_ha_hooks(app: Flask) -> HaHooks:
         ),
         notify_fn=lambda device_id, message: _notify(app, device_id, message),
         expected_interval_fn=lambda device_id: _expected_interval(app, device_id),
+        step_device_fn=lambda device_id, delta: _step_device(app, device_id, delta),
     )

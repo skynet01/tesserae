@@ -9,7 +9,7 @@ Hub device entities:
 
 * **button** per saved dashboard, pressing it calls
   ``PushManager.push(page_id)`` (fans out to every display the dashboard
-  is bound to).
+  is bound to). Off with ``ha_discovery_dashboard_buttons``.
 * **select** ``active dashboard``, same, driven by a dropdown.
 * **image** ``last render``, the composition PNG of the most-recent
   push (covers the legacy / virtual-panel case with no devices).
@@ -19,7 +19,8 @@ Hub device entities:
   automated push holds) and **switch** ``Quiet hours`` (the app-level
   window toggle).
 * **switch** per lineup (its ``enabled`` flag) plus **buttons** to push
-  the lineup live and step it forward / back.
+  the lineup live and step it forward / back. Off, together with the
+  per-display ``Lineup`` select, with ``ha_discovery_lineup_controls``.
 * **notify** ``Notify all displays``: HA's ``notify.send_message`` renders
   the text onto every display.
 
@@ -36,7 +37,9 @@ via ``via_device``):
   rotation) and, when the kind carries one, ``Wake interval``.
 * **switch** ``Quiet hours override`` and **binary_sensors** ``In quiet
   hours``, ``Online``, ``Low battery``.
-* **button** ``Refresh now``, **event** ``Input`` (physical buttons and
+* **button** ``Refresh now``, **buttons** ``Next`` / ``Previous`` (step
+  whatever the display follows right now, for this display only, see
+  ``ButtonService.step``), **event** ``Input`` (physical buttons and
   touch gestures), **notify** (text onto this display) and, once the
   device advertises OTA, an **update** entity for its firmware.
 * lazily, where the heartbeat provides them: **Battery**, **Signal**,
@@ -51,7 +54,11 @@ that depend on it, so the module stays testable with fakes.
 
 The same MQTT broker the rest of Tesserae publishes to is reused, no
 second connection. Default-off in settings; users opt in by toggling
-``ha_discovery_enabled`` in the App section.
+``ha_discovery_enabled`` in the App section. Two more App switches, both
+default on, trim what gets published: ``ha_discovery_lineup_controls``
+and ``ha_discovery_dashboard_buttons``. Turning one off blanks those
+entities' retained configs, so HA drops them live; the command topics
+behind them keep working for anything that publishes to them directly.
 
 mypy --strict applies to this module, see pyproject.toml.
 """
@@ -105,6 +112,12 @@ LINEUP_NONE = "(none)"
 
 # Hold entity bounds (minutes). 0 clears the hold.
 HOLD_MAX_MINUTES = 720
+
+# App-section switches (Settings -> Server -> Network & integrations) that
+# trim what's published. Both default ON when absent, so an install that
+# never saved them keeps every entity it had.
+SETTING_LINEUP_CONTROLS = "ha_discovery_lineup_controls"
+SETTING_DASHBOARD_BUTTONS = "ha_discovery_dashboard_buttons"
 
 # A display counts as online while its last heartbeat is younger than
 # ``max(2 x interval + grace, floor)``; sleepy panels legitimately go
@@ -190,6 +203,9 @@ class HaHooks:
     * ``notify_fn(device_id | None, message) -> error``: render text onto one
       display (``None`` = every display).
     * ``expected_interval_fn(device_id) -> seconds`` between heartbeats.
+    * ``step_device_fn(device_id, delta) -> error``: step what the display
+      follows one page forward (``delta > 0``) or back, as a physical next
+      / previous press would (``ButtonService.step``).
     """
 
     deck_store: Any = None
@@ -208,6 +224,18 @@ class HaHooks:
     firmware_install_fn: Callable[[str], str | None] | None = None
     notify_fn: Callable[[str | None, str], str | None] | None = None
     expected_interval_fn: Callable[[str], int | None] | None = None
+    step_device_fn: Callable[[str, int], str | None] | None = None
+
+
+def _switch_on(section: dict[str, Any], key: str) -> bool:
+    """A default-ON App switch: absent / None reads as on, a stored bool
+    as itself, a hand-edited string by the usual truthy spellings."""
+    value = section.get(key)
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
 
 
 def _iso(epoch_or_dt: float | datetime) -> str:
@@ -648,6 +676,28 @@ def build_device_configs(
             ),
         ),
         (
+            _discovery_topic("button", f"dev_{device_id}_next"),
+            _entity(
+                f"dev_{device_id}_next",
+                "Next",
+                dev,
+                command_topic=_dev_cmd(device_id, "action"),
+                payload_press="next",
+                icon="mdi:skip-next",
+            ),
+        ),
+        (
+            _discovery_topic("button", f"dev_{device_id}_prev"),
+            _entity(
+                f"dev_{device_id}_prev",
+                "Previous",
+                dev,
+                command_topic=_dev_cmd(device_id, "action"),
+                payload_press="prev",
+                icon="mdi:skip-previous",
+            ),
+        ),
+        (
             _discovery_topic("event", f"dev_{device_id}_input"),
             _entity(
                 f"dev_{device_id}_input",
@@ -798,7 +848,6 @@ class HomeAssistantDiscovery:
         # we can tear down entities for pages / devices since removed.
         self._published_button_ids: set[str] = set()
         self._published_device_ids: set[str] = set()
-        self._published_lineup_ids: set[str] = set()
         # (device_id, dyn-key) pairs whose lazy sensor config we've sent.
         self._published_dyn: set[tuple[str, str]] = set()
         # Every (component, object_id) config we've published this session,
@@ -880,7 +929,8 @@ class HomeAssistantDiscovery:
     def _lineup_for_device(self, device_id: str) -> Any | None:
         """The lineup a display is following: the one it's navigating (nav
         store) when that deck still binds it, else the first enabled deck
-        bound to it."""
+        bound to it. Keep in step with ``ButtonService.following_deck``,
+        which applies the same rule to choose what Next / Previous step."""
         decks = self._decks()
         nav = self._hooks.deck_nav_store
         if nav is not None:
@@ -914,6 +964,15 @@ class HomeAssistantDiscovery:
         except Exception:
             return {}
         return dict(section) if isinstance(section, dict) else {}
+
+    def _lineup_controls_on(self) -> bool:
+        """Whether the per-lineup hub entities and the per-display Lineup
+        select are published. On without a settings store or the key."""
+        return _switch_on(self._app_settings(), SETTING_LINEUP_CONTROLS)
+
+    def _dashboard_buttons_on(self) -> bool:
+        """Whether the hub publishes a button per saved dashboard."""
+        return _switch_on(self._app_settings(), SETTING_DASHBOARD_BUTTONS)
 
     # -- lifecycle ------------------------------------------------------
 
@@ -998,7 +1057,6 @@ class HomeAssistantDiscovery:
             self._publish_str(_discovery_topic(component, object_id), "", retain=True)
         self._published_button_ids.clear()
         self._published_device_ids.clear()
-        self._published_lineup_ids.clear()
         self._published_dyn.clear()
         self._published_configs.clear()
         self._publish_str(AVAILABILITY_TOPIC, "offline", retain=True)
@@ -1441,8 +1499,16 @@ class HomeAssistantDiscovery:
                 if on is not None:
                     self._set_device_quiet_override(device, on)
             elif leaf == "action":
-                if text == "refresh":
+                # Exact press payloads only: undecodable bytes don't get
+                # stripped down into a valid action.
+                try:
+                    action = payload.decode("utf-8").strip()
+                except UnicodeDecodeError:
+                    action = ""
+                if action == "refresh":
                     self._refresh_device(device)
+                elif action in ("next", "prev"):
+                    self._step_device(device, 1 if action == "next" else -1)
             elif leaf == "wake_interval":
                 self._set_wake_interval(device, text)
             elif leaf == "firmware_install":
@@ -1567,6 +1633,31 @@ class HomeAssistantDiscovery:
             self._publish_str(STATE_TOPIC_BUSY, "0", retain=True)
             raise
 
+    def _step_device(self, device: Any, delta: int) -> None:
+        """Next / Previous button: step what this display follows right now
+        one page, for this display only. The hook runs the physical-button
+        path (``ButtonService.step``): within the lineup on the glass, else
+        the display's rotation; a no-op when it follows neither. Busy is
+        cleared here because a promoted warm frame produces no push result
+        to clear it."""
+        fn = self._hooks.step_device_fn
+        if fn is None:
+            return
+        logger.info(
+            "HA discovery: %s on display %r", "next" if delta > 0 else "previous", device.id
+        )
+        self._publish_str(STATE_TOPIC_BUSY, "1", retain=True)
+        try:
+            err = fn(str(device.id), delta)
+        except Exception:
+            logger.exception("HA discovery: step failed for %r", device.id)
+            err = "step failed"
+        finally:
+            self._publish_str(STATE_TOPIC_BUSY, "0", retain=True)
+        if err:
+            self._publish_str(STATE_TOPIC_LAST_ERROR, err[:240], retain=True)
+        self._publish_device_runtime(self._device(device.id) or device)
+
     def _set_wake_interval(self, device: Any, text: str) -> None:
         fn = self._hooks.set_device_config_fn
         bounds = self._wake_interval_bounds(device)
@@ -1610,6 +1701,9 @@ class HomeAssistantDiscovery:
         )
 
     def _publish_lineup_states(self) -> None:
+        # No lineup switches published, so no one to read their state.
+        if not self._lineup_controls_on():
+            return
         for deck in self._decks():
             self._publish_str(
                 _lineup_state(str(deck.id), "enabled"),
@@ -1650,7 +1744,7 @@ class HomeAssistantDiscovery:
         name, model = device.display_name, self._device_model(device)
         now = datetime.now(UTC)
 
-        if self._hooks.deck_store is not None:
+        if self._hooks.deck_store is not None and self._lineup_controls_on():
             deck = self._lineup_for_device(device_id)
             self._publish_str(
                 _dev_state(device_id, "lineup"),
@@ -1774,21 +1868,32 @@ class HomeAssistantDiscovery:
 
         We collect retained configs for a short window, identify which
         ones reference current devices/pages/lineups, and blank everything
-        else under our discovery namespace."""
+        else under our discovery namespace. The same goes for entity groups
+        switched off in settings while Tesserae wasn't publishing (the
+        per-dashboard buttons, the lineup controls) and per-display
+        entities whose hook is missing: this session won't publish them,
+        so nothing else would ever retire them."""
         import time
 
-        live_device_ids = {d.id for d in self._bindable_devices()}
-        live_page_ids = {p.id for p in self._page_store.list_active()}
-        live_deck_ids = {str(d.id) for d in self._decks()}
+        live_device_ids = {str(d.id) for d in self._bindable_devices()}
+        live_page_ids = (
+            {p.id for p in self._page_store.list_active()}
+            if self._dashboard_buttons_on()
+            else set()
+        )
+        lineups_on = self._lineup_controls_on()
+        base = self._base_url()
+        live_lineup_objects = (
+            {
+                topic.split("/")[3]
+                for deck in self._decks()
+                for topic, _payload in build_lineup_configs(deck, base_url=base)
+            }
+            if lineups_on
+            else set()
+        )
+        skip_leaves = self._device_skip_leaves(lineups_on)
         to_blank: set[str] = set()
-
-        def lineup_is_live(rest: str) -> bool:
-            if rest in live_deck_ids:
-                return True
-            for suffix in ("_push", "_next", "_prev"):
-                if rest.endswith(suffix) and rest[: -len(suffix)] in live_deck_ids:
-                    return True
-            return False
 
         def on_config(topic: str, payload: bytes) -> None:
             if not payload:
@@ -1805,24 +1910,29 @@ class HomeAssistantDiscovery:
             device = cfg.get("device") or {}
             ids = device.get("identifiers") if isinstance(device, dict) else None
             primary = ids[0] if isinstance(ids, list) and ids else None
+            obj = cfg.get("object_id")
+            obj = obj.removeprefix("tesserae_") if isinstance(obj, str) else None
             if primary == "tesserae":
                 # Hub-owned entity. The hub entities that come and go are the
                 # per-dashboard buttons (``page_<page_id>``) and the per-lineup
                 # switch + buttons (``lineup_<deck_id>[_push|_next|_prev]``);
                 # the fixed ones always belong, so leave them alone.
-                obj = cfg.get("object_id")
-                if not isinstance(obj, str):
+                if obj is None:
                     return
-                obj = obj.removeprefix("tesserae_")
                 if obj.startswith("page_"):
                     if obj[len("page_") :] not in live_page_ids:
                         to_blank.add(topic)
-                elif obj.startswith("lineup_") and not lineup_is_live(obj[len("lineup_") :]):
+                elif obj.startswith("lineup_") and obj not in live_lineup_objects:
                     to_blank.add(topic)
                 return
             if isinstance(primary, str) and primary.startswith("tesserae_dev_"):
                 device_id = primary[len("tesserae_dev_") :]
-                if device_id not in live_device_ids:
+                # A display that's gone, or one of its entities this
+                # session won't publish (setting off, hook missing).
+                unpublished = (
+                    obj is not None and obj.removeprefix(f"dev_{device_id}_") in skip_leaves
+                )
+                if device_id not in live_device_ids or unpublished:
                     to_blank.add(topic)
                 return
             # Unknown identifier shape under our prefix, leave it; HA will
@@ -1847,19 +1957,27 @@ class HomeAssistantDiscovery:
             logger.info("HA discovery: cleared %d stale retained config(s)", len(to_blank))
 
     def _publish_entity_configs(self) -> None:
-        # Archived dashboards drop their button and leave the select options;
-        # the blank-what-we-no-longer-see pass below retires them on the broker.
+        """Publish every entity config we want right now and blank the ones
+        we published before but no longer want: archived / deleted
+        dashboards, deleted lineups (or ones that lost the displays / pages
+        their buttons need), deleted displays, and whole groups switched
+        off in settings (the per-dashboard buttons, the lineup controls).
+        Stale configs are blanked before the live ones go out, so blanking
+        one can never take a live entity with it."""
         pages = self._page_store.list_active()
         decks = self._decks()
         base = self._base_url()
+        lineups_on = self._lineup_controls_on()
 
-        seen_ids: set[str] = set()
-        for page in pages:
-            topic, payload = build_button_config(page.id, page.name, base_url=base)
-            self._publish_config(topic, payload)
-            seen_ids.add(page.id)
+        # Hub: one button per saved dashboard, unless switched off. The
+        # Active dashboard select below stays either way.
+        seen_ids: set[str] = {p.id for p in pages} if self._dashboard_buttons_on() else set()
         for page_id in self._published_button_ids - seen_ids:
             self._blank_config("button", f"page_{page_id}")
+        for page in pages:
+            if page.id in seen_ids:
+                topic, payload = build_button_config(page.id, page.name, base_url=base)
+                self._publish_config(topic, payload)
         self._published_button_ids = seen_ids
 
         page_names = sorted({p.name for p in pages})
@@ -1879,59 +1997,83 @@ class HomeAssistantDiscovery:
                     continue
                 self._publish_config(topic, payload)
 
-        # Per-lineup hub entities.
-        seen_decks: set[str] = set()
-        for deck in decks:
-            for topic, payload in build_lineup_configs(deck, base_url=base):
-                self._publish_config(topic, payload)
-            seen_decks.add(str(deck.id))
-        for deck_id in self._published_lineup_ids - seen_decks:
-            self._blank_configs_with_prefix(f"lineup_{deck_id}")
-        # A lineup that lost its displays / pages drops its action buttons.
-        live_lineup_objects = {
-            topic.split("/")[3]
-            for deck in decks
-            for topic, _payload in build_lineup_configs(deck, base_url=base)
-        }
-        for component, object_id in list(self._published_configs):
+        # Per-lineup hub entities, unless switched off. Matching exact object
+        # ids covers deleted lineups, lineups that lost their displays /
+        # pages (their action buttons go) and the switch-off alike, without
+        # the prefix overlap of ids like ``a`` / ``a_b``.
+        lineup_configs = [
+            config
+            for deck in (decks if lineups_on else [])
+            for config in build_lineup_configs(deck, base_url=base)
+        ]
+        live_lineup_objects = {topic.split("/")[3] for topic, _payload in lineup_configs}
+        for component, object_id in sorted(self._published_configs):
             if object_id.startswith("lineup_") and object_id not in live_lineup_objects:
                 self._blank_config(component, object_id)
-        self._published_lineup_ids = seen_decks
+        for topic, payload in lineup_configs:
+            self._publish_config(topic, payload)
 
-        # Per-display devices.
+        # Per-display devices. Tear down displays that no longer exist
+        # first (incl. their lazily published sensors).
+        devices = self._bindable_devices()
+        seen_devices = {str(d.id) for d in devices}
+        removed = self._published_device_ids - seen_devices
+        if removed:
+            self._blank_removed_device_configs(removed, seen_devices)
+        self._published_dyn = {pair for pair in self._published_dyn if pair[0] in seen_devices}
         lineup_names = sorted({str(d.name) for d in decks}) if self._hooks.deck_store else None
-        seen_devices: set[str] = set()
-        for device in self._bindable_devices():
-            bound = sorted({p.name for p in self._pages_for_device(device.id)})
+        # Entities that need a hook (or a setting) to do anything stay
+        # unpublished without it, so a bare install doesn't show dead
+        # controls; one published earlier is blanked.
+        skip_leaves = self._device_skip_leaves(lineups_on)
+        for device in devices:
+            device_id = str(device.id)
+            bound = sorted({p.name for p in self._pages_for_device(device_id)})
             configs = build_device_configs(
-                device.id, device.display_name, self._device_model(device), bound, lineup_names
+                device_id, device.display_name, self._device_model(device), bound, lineup_names
             )
+            prefix = f"dev_{device_id}_"
             for topic, payload in configs:
-                # Entities that need a hook to do anything stay unpublished
-                # without it, so a bare install doesn't show dead controls.
-                object_id = topic.split("/")[3]
-                if object_id.endswith("_lineup") and self._hooks.deck_store is None:
-                    continue
-                if object_id.endswith("_hold") and self._hooks.rotation_state_store is None:
-                    continue
-                if (
-                    object_id.endswith(("_quiet_override", "_quiet_now"))
-                    and self._hooks.settings_store is None
-                ):
-                    continue
-                if object_id.endswith("_next_change") and self._hooks.scheduler is None:
-                    continue
-                if object_id.endswith("_notify") and self._hooks.notify_fn is None:
-                    continue
-                if object_id.endswith("_input") and self._hooks.button_service is None:
+                component, object_id = topic.split("/")[1], topic.split("/")[3]
+                if object_id.removeprefix(prefix) in skip_leaves:
+                    if (component, object_id) in self._published_configs:
+                        self._blank_config(component, object_id)
                     continue
                 self._publish_config(topic, payload)
-            seen_devices.add(device.id)
-        # Tear down displays that no longer exist (incl. their dyn sensors).
-        for device_id in self._published_device_ids - seen_devices:
-            self._blank_configs_with_prefix(f"dev_{device_id}_")
-        self._published_dyn = {pair for pair in self._published_dyn if pair[0] in seen_devices}
         self._published_device_ids = seen_devices
+
+    def _device_skip_leaves(self, lineups_on: bool) -> set[str]:
+        """Leaves of the always-present per-display entities
+        (``dev_<id>_<leaf>``) that this session doesn't publish: their hook
+        is missing, or (the Lineup select) lineup controls are off."""
+        skip: set[str] = set()
+        if self._hooks.deck_store is None or not lineups_on:
+            skip.add("lineup")
+        if self._hooks.rotation_state_store is None:
+            skip.add("hold")
+        if self._hooks.settings_store is None:
+            skip.update(("quiet_override", "quiet_now"))
+        if self._hooks.scheduler is None:
+            skip.add("next_change")
+        if self._hooks.notify_fn is None:
+            skip.add("notify")
+        if self._hooks.button_service is None:
+            skip.add("input")
+        if self._hooks.step_device_fn is None:
+            skip.update(("next", "prev"))
+        return skip
+
+    def _blank_removed_device_configs(self, removed: set[str], live: set[str]) -> None:
+        """Blank every config owned by a removed display. A config belongs
+        to the longest known device id its object id starts with, so
+        removing ``a`` leaves ``a_b``'s ``dev_a_b_...`` entities alone."""
+        known = sorted(removed | live, key=len, reverse=True)
+        for component, object_id in sorted(self._published_configs):
+            if not object_id.startswith("dev_"):
+                continue
+            owner = next((d for d in known if object_id.startswith(f"dev_{d}_")), None)
+            if owner in removed:
+                self._blank_config(component, object_id)
 
     def _device_config_topics(self, device_id: str) -> list[str]:
         prefix = f"dev_{device_id}_"
@@ -1975,11 +2117,6 @@ class HomeAssistantDiscovery:
     def _blank_config(self, component: str, object_id: str) -> None:
         self._published_configs.discard((component, object_id))
         self._publish_str(_discovery_topic(component, object_id), "", retain=True)
-
-    def _blank_configs_with_prefix(self, prefix: str) -> None:
-        for component, object_id in sorted(self._published_configs):
-            if object_id.startswith(prefix):
-                self._blank_config(component, object_id)
 
     def _publish_json(self, topic: str, payload: dict[str, Any], *, retain: bool = True) -> None:
         if not self._transport.connected:

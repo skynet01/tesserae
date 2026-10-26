@@ -276,6 +276,38 @@ def test_toggle_on_via_settings_starts_discovery(app: Flask, tmp_path: Path) -> 
     assert store.get_section("app")["ha_discovery_enabled"] is True
 
 
+def test_publish_toggles_save_and_reach_a_fresh_publisher(app: Flask, tmp_path: Path) -> None:
+    client = app.test_client()
+    _sign_in(client)
+    page = client.get("/settings/server").get_data(as_text=True)
+    # Rendered as ticked switches on a fresh install (default on).
+    for name in ("ha_discovery_lineup_controls", "ha_discovery_dashboard_buttons"):
+        assert f'id="server-{name}"' in page
+        tag = page[page.index(f'id="server-{name}"') :].split(">", 1)[0]
+        assert "checked" in tag
+    base = {"base_url": "http://lan.test:8000", "ha_discovery_enabled": "on"}
+    # Browsers don't submit an unticked switch: both groups off.
+    client.post("/settings/app", data=base)
+    first = app.config["HA_DISCOVERY"]
+    assert first is not None
+    section = app.config["SETTINGS_STORE"].get_section("app")
+    assert section["ha_discovery_lineup_controls"] is False
+    assert section["ha_discovery_dashboard_buttons"] is False
+    assert first._lineup_controls_on() is False
+    assert first._dashboard_buttons_on() is False
+    client.post(
+        "/settings/app",
+        data={**base, "ha_discovery_lineup_controls": "on", "ha_discovery_dashboard_buttons": "on"},
+    )
+    # The save rebuilt the publisher (the old one stopped, blanking what it
+    # had published), and the new one reads the saved values.
+    second = app.config["HA_DISCOVERY"]
+    assert second is not None and second is not first
+    assert first._started is False
+    assert second._lineup_controls_on() is True
+    assert second._dashboard_buttons_on() is True
+
+
 # -- Multi-head: per-display HA devices --------------------------------
 
 

@@ -15,6 +15,7 @@ from PIL import Image
 
 from app import ha_hooks
 from app.button_service import ButtonHandleResult, ButtonService, TouchHandleResult
+from app.push import PushResult
 from app.scheduler import Scheduler
 from app.settings.field_defs import APP_FIELD_GROUPS, APP_FIELDS
 from app.state.deck_model import Deck, DeckPage
@@ -357,3 +358,54 @@ def test_deck_store_notifies_listeners_on_upsert_and_delete(tmp_path: Path) -> N
     assert store.delete("d1") is False
     assert calls == ["hit", "hit"]
     store.remove_listener(calls.append)  # unknown callback is a no-op
+
+
+# ---------- per-display next / previous ----------
+
+
+def test_step_device_resolves_the_button_service_per_call(tmp_path: Path) -> None:
+    app = _app(tmp_path, _Device("lounge"))
+    hooks = ha_hooks.build_ha_hooks(app)
+    assert hooks.step_device_fn is not None
+    # At boot the first transport wiring (which starts HA discovery) runs
+    # before the service exists: the hook must not have captured None.
+    assert hooks.step_device_fn("lounge", 1) == "Button service not ready."
+    svc = MagicMock()
+    svc.step.return_value = _result(push_result=PushResult(status="sent", page_id="weather"))
+    app.config["BUTTON_SERVICE"] = svc
+    assert hooks.step_device_fn("lounge", 1) is None
+    assert hooks.step_device_fn("lounge", -1) is None
+    assert [c.kwargs for c in svc.step.call_args_list] == [
+        {"device_id": "lounge", "forward": True, "source": "home_assistant"},
+        {"device_id": "lounge", "forward": False, "source": "home_assistant"},
+    ]
+
+
+def test_step_device_reports_unknown_displays_and_failed_pushes(tmp_path: Path) -> None:
+    app = _app(tmp_path, _Device("lounge"))
+    svc = MagicMock()
+    app.config["BUTTON_SERVICE"] = svc
+    assert ha_hooks._step_device(app, "ghost", 1) == "Unknown device 'ghost'."
+    svc.step.assert_not_called()
+    svc.step.return_value = _result(
+        push_result=PushResult(status="failed", page_id="weather", error="render timed out")
+    )
+    assert ha_hooks._step_device(app, "lounge", 1) == "Lounge: render timed out"
+    # A no-op (nothing to step) or a promoted warm frame has no push result.
+    svc.step.return_value = _result(push_result=None, pushed_page_id=None)
+    assert ha_hooks._step_device(app, "lounge", 1) is None
+
+
+def test_publish_toggles_are_default_on_settings_fields() -> None:
+    for name in ("ha_discovery_lineup_controls", "ha_discovery_dashboard_buttons"):
+        field = next(f for f in APP_FIELDS if f["name"] == name)
+        assert field["type"] == "switch"
+        assert field["default"] is True
+        # Rendered in the same card as the discovery switch itself.
+        assert field["group"] == "network"
+    names = [f["name"] for f in APP_FIELDS]
+    first = names.index("ha_discovery_enabled")
+    assert names[first + 1 : first + 3] == [
+        "ha_discovery_lineup_controls",
+        "ha_discovery_dashboard_buttons",
+    ]
