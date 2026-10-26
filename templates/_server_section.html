@@ -10,18 +10,31 @@
    Broker has an extra wrinkle: the external (host/port/username/
    password) and embedded_* fields render in two grouped blocks the
    existing JS shows/hides off the ``embedded_enabled`` switch.
-   Preserved here as-is. #}
+   Preserved here as-is.
 
-{% from "_components.html" import auto_field, options_more_open, options_more_close with context %}
+   A widget's admin page draws its settings with this card too
+   (_plugin_admin_settings.html, app/plugin_admin.py). Two keys only it
+   sets: ``fold`` ("open" or "closed") makes the head a disclosure that
+   shows and hides the fields, the save bar staying outside it so unsaved
+   changes are never folded away; ``repeater_layout`` ("list") draws a
+   repeater as one row per item. #}
+
+{% from "_components.html" import auto_field, repeater_field, options_more_open, options_more_close with context %}
 
 {% set icon_name = section.icon or KIND_ICONS.get(section.kind, 'gear-six') %}
+{% set fold = section.get('fold') %}
 
 <section class="dx-section-card{% if section.kind == 'panel' %} panel-section{% endif %}"
          id="{{ section.id }}">
   <form method="post" action="{{ section.endpoint }}"
         class="form dx-legacy-server-form" data-dirty-form>
 
+    {% if fold %}
+    <details class="dx-section-fold" data-fold{% if fold == 'open' %} open{% endif %}>
+    <summary class="dx-section-head">
+    {% else %}
     <header class="dx-section-head">
+    {% endif %}
       <span class="dx-section-icon" aria-hidden="true">
         <i class="ph ph-{{ icon_name }}"></i>
       </span>
@@ -45,7 +58,12 @@
         {% endif %}
       {% endfor %}
       {% endif %}
+    {% if fold %}
+      <span class="dx-section-chev" aria-hidden="true"><i class="ph ph-caret-right"></i></span>
+    </summary>
+    {% else %}
     </header>
+    {% endif %}
 
     <div class="dx-section-body">
 
@@ -109,6 +127,8 @@
               </span>
             </label>
           </div>
+        {% elif field.type == 'repeater' and section.get('repeater_layout') and repeater_view(field, value).usable %}
+          {{ repeater_field(field_id, field.name, field.label, field, value, field.get('help'), layout=section.repeater_layout) }}
         {% elif section.kind == 'panel' and field.name in ('panel_w', 'panel_h') %}
           <div class="panel-custom-fields">{{ auto_field(field_id, field.name, field, value) }}</div>
         {% else %}
@@ -119,6 +139,7 @@
       {% if opt_sections and opt_sections.advanced %}{{ options_more_close() }}{% endif %}
 
     </div>{# /dx-section-body #}
+    {% if fold %}</details>{% endif %}
 
     <div class="dx-save-bar dx-save-bar--server" data-save-bar hidden>
       <span class="dx-save-bar-msg">You have unsaved changes</span>

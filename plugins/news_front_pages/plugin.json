@@ -1,7 +1,7 @@
 {
   "tesserae_compat": "1.x",
   "name": "News, Front Pages",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "kind": "widget",
   "locales": ["en"],
   "description": "Today's newspaper front pages from the Freedom Forum archive, one paper per render, filling the cell's width from the top. Rotates through the papers listed under Widgets → Admin pages → News, Front Pages, each with its own optional CSS, or shows one pinned paper. The rotation moves on at most once every four minutes, so a send prepared ahead of time and its follow-ups show one paper; that approximates one paper per shown frame, and two sends within four minutes repeat a paper. Pages download in the background as PDFs, drawn 1440 px wide so body text stays readable (Freedom Forum's 700 px JPEG stands in when a PDF can't be had), and the last good page stays up while a paper isn't out yet. No API key needed.",

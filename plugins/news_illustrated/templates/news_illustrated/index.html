@@ -1,17 +1,16 @@
 {% extends "_base.html" %}
-{% from "_components.html" import card_head, button, empty_state %}
+{% from "_components.html" import button, empty_state, section_card %}
 {% block title %}News, AI Illustrated, Tesserae{% endblock %}
+{% block head_extra %}<script src="{{ url_for('static', filename='pages/settings.js') }}" defer></script>{% endblock %}
 
 {% block main %}
 <div class="page-head">
-  <h1><i class="ph-bold ph-newspaper-clipping" aria-hidden="true"></i> News, AI Illustrated</h1>
+  <h1><i class="ph ph-newspaper-clipping" aria-hidden="true"></i> News, AI Illustrated</h1>
   <p class="page-blurb">One story a day from each of your feeds, summarised and drawn as an ink cartoon. Panels show one story at a time and move to the next on each refresh.</p>
 </div>
 
-{% include "_plugin_admin_settings.html" %}
-
-<section class="card">
-  {{ card_head('Making stories', icon_name='clock', level=2) }}
+<div class="settings-section-list">
+{% call section_card(icon='clock', title='Making stories') %}
   <p class="lede">
     {% if running %}
       A run is going now; the job tray shows which story it is on.
@@ -37,10 +36,9 @@
       </form>
     {% endif %}
   </div>
-</section>
+{% endcall %}
 
-<section class="card">
-  {{ card_head('Stories', icon_name='newspaper', level=2) }}
+{% call section_card(icon='newspaper', title='Stories') %}
   {% if stories %}
   <div class="ain-grid">
     {% for s in stories %}
@@ -59,23 +57,27 @@
   {% else %}
     {{ empty_state('newspaper-clipping', 'No stories yet', 'They are made at the first panel render after ' ~ cfg.run_at ~ ', or now with Generate now.') }}
   {% endif %}
-</section>
+{% endcall %}
+
+{% include "_plugin_admin_settings.html" %}
 
 {% if last %}
-<section class="card">
-  {{ card_head('Last run', icon_name='list-checks', level=2) }}
+{% call section_card(icon='list-checks', title='Last run', id='last-run') %}
   <p class="lede">
     {{ 'By hand' if last.reason == 'manual' else 'Scheduled' }}, {{ when(last.started) }} to {{ when(last.finished) }}:
     {{ last.outcome or 'nothing made' }}{% if last.stopped %} (stopped){% endif %}.
   </p>
   {% if last.log %}
-  <details>
-    <summary>Log</summary>
-    <pre class="ain-log">{{ last.log | join('\n') }}</pre>
+  <details class="dx-disclosure">
+    <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Log</span></summary>
+    <div class="dx-disclosure-body">
+      <pre class="dx-code dx-log-view dx-log-view--wrap" data-log-tail>{{ last.log | join('\n') }}</pre>
+    </div>
   </details>
   {% endif %}
-</section>
+{% endcall %}
 {% endif %}
+</div>
 
 <style>
   .ain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1.25rem; }
@@ -83,6 +85,5 @@
   .ain-noart { display: grid; place-items: center; color: #bbb; }
   .ain-story h3 { margin: 0.25rem 0; font-size: 1rem; }
   .ain-story p { margin: 0.25rem 0; }
-  .ain-log { white-space: pre-wrap; font-size: 0.8rem; max-height: 28rem; overflow: auto; }
 </style>
 {% endblock %}

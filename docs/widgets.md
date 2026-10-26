@@ -155,9 +155,16 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   this widget). Surfaces in `/settings/plugins`. A widget with its own admin
   page can export `ADMIN_SETTINGS = True` from `server.py` and render the
   shared `_plugin_admin_settings.html` partial with
-  `section=app.plugin_admin.settings_section(plugin)`. Its settings then live
-  under Widgets > Admin pages, and the existing settings save endpoint returns
-  there. The same masking, validation and storage rules apply. `secret: true`
+  `section=app.plugin_admin.settings_section(plugin)`, loading
+  `static/pages/settings.js` (the unsaved-changes bar) in its `head_extra`
+  block. Its settings then live under Widgets > Admin pages, drawn as the
+  same card Settings > Widgets draws, and the existing settings save endpoint
+  returns there. `settings_section` takes keys that fit the card to the page:
+  `title`, `blurb`, `icon`, `fold="closed"` (or `"open"`) to make the card a
+  disclosure, and `repeater_layout="list"` to draw a repeater as one row per
+  item (title, one-line summary and switch, opened for the rest). Wrap the
+  page's cards in `<div class="settings-section-list">` for the Settings
+  spacing. The same masking, validation and storage rules apply. `secret: true`
   stores under `<name>_secret` in `settings.json` so an on-disk grep
   for `secret` reveals every sensitive value. `advanced: true` folds a
   setting into the card's "More options" section, as on cell options.
@@ -493,7 +500,8 @@ def blueprint() -> Blueprint:
 Templates live under `templates/<plugin_id>/` (the folder namespacing
 keeps Flask from colliding with the host's `templates/index.html`).
 Extend `_base.html` for visual consistency with the rest of the
-admin UI; the `card_head` macro + `card` class wrap content.
+admin UI; the `section_card` macro (the Settings pages' card) or the
+`card_head` macro + `card` class wrap content.
 
 ### Serving your own media, `RENDER_SAFE_ENDPOINTS`
 

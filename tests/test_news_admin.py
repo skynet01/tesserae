@@ -66,3 +66,19 @@ def test_news_settings_save_and_form_action_preserve_a_mount_prefix(client):
         "/settings/plugin-news_front_pages", data={"papers": "[]"}, environ_overrides=env
     )
     assert result.location == "/tesserae/plugins/news_front_pages/#plugin-news_front_pages"
+
+
+def test_ai_settings_are_folded_right_above_the_last_run(app, client):
+    plugin = app.config["PLUGIN_REGISTRY"].get("news_illustrated")
+    (plugin.data_dir / "state.json").write_text(
+        '{"last_run": {"reason": "manual", "started": 1, "finished": 2, "log": ["Run started"]}}',
+        encoding="utf-8",
+    )
+    body = client.get("/plugins/news_illustrated/").get_data(as_text=True)
+    card = body.index('id="plugin-news_illustrated"')
+    assert '<details class="dx-section-fold" data-fold>' in body[card:]
+    assert body.index('id="last-run"') > card
+    between = body[card : body.index('id="last-run"')]
+    assert between.count("<section") == 1  # nothing sits between the two cards
+    assert "data-log-tail" in body[body.index('id="last-run"') :]
+

@@ -148,7 +148,13 @@ def blueprint() -> Blueprint:
             edition_done=state.get("edition") == current,
             last=last,
             when=lambda ts: datetime.fromtimestamp(int(ts or 0), tz).strftime("%Y-%m-%d %H:%M"),
-            section=settings_section(current_app.config["PLUGIN_REGISTRY"].get(PLUGIN_ID)),
+            section=settings_section(
+                current_app.config["PLUGIN_REGISTRY"].get(PLUGIN_ID),
+                title="Settings",
+                blurb="Feeds, the daily run time and provider keys. Saving doesn't start a run.",
+                icon="sliders-horizontal",
+                fold="closed",
+            ),
         )
 
     @bp.get("/image/<name>")

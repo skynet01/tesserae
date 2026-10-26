@@ -1972,6 +1972,26 @@ form[data-dirty] .dx-inline-save { display: none; }
   font-size: 19px;
 }
 .dx-section-body { display: flex; flex-direction: column; gap: 0; }
+/* A section that folds (``fold`` in _server_section.html): the head is
+   the summary, with a caret on the right like the Dashboards rows. Closed,
+   the head drops the rule and gap it keeps above the body. */
+/* nowrap: the caret stays beside the title on a phone, where heads wrap. */
+.dx-section-fold > summary { list-style: none; cursor: pointer; flex-wrap: nowrap; }
+.dx-section-fold > summary::-webkit-details-marker { display: none; }
+.dx-section-fold:not([open]) > summary.dx-section-head { border-bottom: 0; padding-bottom: 0; margin-bottom: 0; }
+.dx-section-fold > summary:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 4px; }
+.dx-section-chev {
+  flex: none;
+  display: inline-flex;
+  font-size: 16px;
+  color: var(--t-muted);
+  transition: transform 180ms ease-out;
+}
+.dx-section-fold > summary:hover .dx-section-chev { color: var(--t-fg); }
+.dx-section-fold[open] > summary .dx-section-chev { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .dx-section-chev { transition: none; }
+}
 .dx-section-body .field {
   padding: 12px 0;
   margin: 0;
@@ -4200,6 +4220,8 @@ select.dx-input:hover {
 /* width 0 + min-width 100%: long lines scroll inside the box instead of
    widening the page column on a phone. */
 .dx-log-view { box-sizing: border-box; width: 0; min-width: 100%; max-height: 420px; overflow: auto; white-space: pre; }
+/* A log of long one-line entries (a widget's worker) wraps instead. */
+.dx-log-view--wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* Overview: thumbnail + tiles. */
 .dx-overview {

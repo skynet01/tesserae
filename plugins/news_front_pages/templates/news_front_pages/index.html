@@ -1,10 +1,26 @@
 {% extends "_base.html" %}
+{% from "_components.html" import section_card %}
 {% block title %}Newspaper, Tesserae{% endblock %}
+{% block head_extra %}<script src="{{ url_for('static', filename='pages/settings.js') }}" defer></script>{% endblock %}
 {% block main %}
-<header class="page-head">
+<div class="page-head">
   <h1><i class="ph ph-newspaper" aria-hidden="true"></i> Newspaper</h1>
-  <p class="page-blurb">Choose the papers in your rotation. Expand a row to change its paper code or adjust the front-page crop.</p>
-</header>
-{% set collapsible_papers = true %}
+  <p class="page-blurb">Today's front pages from the Freedom Forum archive, one paper per render. Open a paper to change its code or its crop.</p>
+</div>
+
+<div class="settings-section-list">
 {% include "_plugin_admin_settings.html" %}
+
+{% call section_card(icon='download-simple', title='Downloads', id='downloads') %}
+  <p class="lede">{{ downloads.status | join(' ') }}</p>
+  {% if downloads.log %}
+  <details class="dx-disclosure">
+    <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Log</span></summary>
+    <div class="dx-disclosure-body">
+      <pre class="dx-code dx-log-view dx-log-view--wrap" data-log-tail>{{ downloads.log | join('\n') }}</pre>
+    </div>
+  </details>
+  {% endif %}
+{% endcall %}
+</div>
 {% endblock %}

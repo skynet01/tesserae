@@ -279,29 +279,46 @@ def test_newspaper_rows_expand_toggle_validate_and_save(live):
         card = page.locator("#plugin-news_front_pages")
         rows = card.locator("[data-repeater-row]")
         first = rows.first
+        opener = first.locator("[data-repeater-open]")
         code = first.locator('[data-repeater-key="code"]')
         assert code.is_hidden()
+        assert opener.get_attribute("aria-expanded") == "false"
+        # The switch sits on the row: it never opens it, and dims it when off.
         toggle = first.locator('[data-repeater-key="enabled"]')
+        assert toggle.get_attribute("aria-label") == "NY_NYT: In rotation"
         first.locator(".repeater-row-toggle").click()
         assert not toggle.is_checked()
+        assert "is-off" in (first.get_attribute("class") or "")
         toggle.focus()
         page.keyboard.press("Space")
         assert toggle.is_checked()
         page.keyboard.press("Space")
         assert not toggle.is_checked()
-        assert code.is_hidden()  # toggling never expands the editor
-        first.locator("summary").focus()
+        assert code.is_hidden()
+        # The caret button opens the row from the keyboard; its fields, then
+        # its move and remove buttons, are below it.
+        opener.focus()
         page.keyboard.press("Enter")
         assert code.is_visible()
+        assert opener.get_attribute("aria-expanded") == "true"
+        assert first.locator("[data-repeater-up]").get_attribute("aria-disabled") == "true"
         code.fill("WSJ2")
-        assert "WSJ2" in first.locator("summary").inner_text()
-        first.locator("summary").click()
+        assert opener.locator("[data-repeater-title]").inner_text() == "WSJ2"
+        assert toggle.get_attribute("aria-label") == "WSJ2: In rotation"
+        first.locator('[data-repeater-key="css"]').fill("filter:   contrast(1.1)")
+        assert opener.locator("[data-repeater-meta]").inner_text() == "filter: contrast(1.1)"
+        # A click anywhere else on the row's head (here its caret) closes it.
+        first.locator(".repeater-row-chev").click()
+        assert code.is_hidden()
         card.locator("[data-repeater-add]").click()
         last = rows.last
         assert last.locator('[data-repeater-key="code"]').is_visible()
-        last.locator("summary").click()
+        assert last.locator('[data-repeater-key="code"]').evaluate(
+            "el => el === document.activeElement"
+        )
+        last.locator("[data-repeater-open]").click()
         card.locator(".dx-save-bar-save").click()
-        # Native required-field validation reveals the collapsed invalid row.
+        # Native required-field validation reveals the closed invalid row.
         assert last.locator('[data-repeater-key="code"]').is_visible()
         assert last.locator('[data-repeater-key="code"]').evaluate(
             "el => el === document.activeElement"
@@ -319,7 +336,59 @@ def test_newspaper_rows_expand_toggle_validate_and_save(live):
         "papers"
     ]
     assert papers[0]["enabled"] is False
+    assert papers[0]["css"] == "filter:   contrast(1.1)"
     assert papers[-1]["code"] == "NEW_TEST"
+
+
+@pytest.mark.parametrize("live", ["news"], indirect=True)
+def test_ai_news_settings_fold_above_the_log(live):
+    """AI news: the settings card sits right above Last run, folded; it
+    opens from its head, keeps the save bar when folded again with unsaved
+    changes, and a save comes back to it open."""
+    from playwright.sync_api import sync_playwright
+
+    base, app = live
+    plugin = app.config["PLUGIN_REGISTRY"].get("news_illustrated")
+    (Path(plugin.data_dir) / "state.json").write_text(
+        json.dumps({"last_run": {"reason": "manual", "started": 1, "finished": 2, "log": ["a"]}}),
+        encoding="utf-8",
+    )
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        errors = []
+        page.on("pageerror", lambda err: errors.append(str(err)))
+        page.goto(f"{base}/plugins/news_illustrated/", wait_until="networkidle")
+        ids = page.locator(".settings-section-list > section").evaluate_all(
+            "els => els.map((el) => el.id)"
+        )
+        assert ids[-2:] == ["plugin-news_illustrated", "last-run"]
+        card = page.locator("#plugin-news_illustrated")
+        sources = card.locator('[name="sources"]')
+        head = card.locator("summary.dx-section-head")
+        assert sources.is_hidden()
+        head.focus()
+        page.keyboard.press("Enter")
+        assert sources.is_visible()
+        sources.fill("Local | https://example.test/rss")
+        bar = card.locator("[data-save-bar]")
+        assert bar.is_visible()
+        head.click()
+        assert sources.is_hidden()
+        assert bar.is_visible()  # unsaved changes are never folded away
+        with page.expect_navigation():
+            bar.locator(".dx-save-bar-save").click()
+        page.wait_for_load_state("networkidle")
+        assert page.url.endswith("#plugin-news_illustrated")
+        assert page.locator('#plugin-news_illustrated [name="sources"]').is_visible()
+        # The log opens on its newest lines.
+        page.locator("#last-run .dx-disclosure summary").click()
+        assert page.locator("#last-run pre[data-log-tail]").is_visible()
+        browser.close()
+    assert errors == []
+    fields = plugin.manifest["settings"]
+    saved = app.config["SETTINGS_STORE"].get_for_runtime("plugins", plugin.id, fields)
+    assert saved["sources"] == "Local | https://example.test/rss"
 
 
 @pytest.mark.parametrize("live", ["news"], indirect=True)
@@ -340,9 +409,9 @@ def test_news_admin_rows_fit_desktop_and_mobile(live):
                 assert page.locator(f"#plugin-{pid}").is_visible()
                 if pid == "news_front_pages":
                     rows = page.locator("[data-repeater-row]")
-                    rows.first.locator("summary").click()
+                    rows.first.locator("[data-repeater-open]").click()
                     box = rows.first.bounding_box()
-                    form = page.locator(".widget-admin-settings form").bounding_box()
+                    form = page.locator(f"#plugin-{pid} form").bounding_box()
                     assert box["width"] >= form["width"] - 2
                     assert box["width"] > width * (0.6 if width > 640 else 0.7)
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")

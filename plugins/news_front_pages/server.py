@@ -1863,7 +1863,21 @@ def blueprint() -> Blueprint:
         plugin = _plugin()
         if plugin is None:
             abort(404)
-        return render_template("news_front_pages/index.html", section=settings_section(plugin))
+        papers = next(
+            (f for f in plugin.manifest.get("settings", []) if f.get("name") == "papers"), {}
+        )
+        section = settings_section(
+            plugin,
+            title="Papers",
+            blurb=papers.get("help", ""),
+            icon="newspaper",
+            repeater_layout="list",
+        )
+        return render_template(
+            "news_front_pages/index.html",
+            section=section,
+            downloads=downloads_view(Path(plugin.data_dir), _timezone()),
+        )
 
     @bp.get("/page/<name>")
     def serve_page(name: str) -> Response:
