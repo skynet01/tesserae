@@ -105,6 +105,22 @@ def test_is_onboarded_recognises_rest_user(app: Flask) -> None:
     assert is_onboarded(store) is True
 
 
+def test_is_onboarded_ignores_ha_app_broker_host(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The HA app writes its default broker host into settings on every
+    start, so on HA a broker host alone must not skip the wizard."""
+    store = app.config["SETTINGS_STORE"]
+    store.patch_section("broker", {"host": "core-mosquitto"})
+    with app.app_context():
+        assert is_onboarded(store) is True  # outside HA, a host means configured
+        monkeypatch.setenv("TESSERAE_HA_INGRESS", "1")
+        monkeypatch.setenv("SUPERVISOR_TOKEN", "x")
+        assert is_onboarded(store) is False
+        store.patch_section("app", {"onboarded": True})
+        assert is_onboarded(store) is True
+
+
 def test_broker_step_renders_with_default_rest_for_fresh_install(app: Flask) -> None:
     """A fresh install (no settings yet) renders the broker step with
     REST pre-selected on the transport radio."""

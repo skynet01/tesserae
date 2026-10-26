@@ -56,6 +56,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from flask import has_request_context, request
+
 from app import fal
 
 logger = logging.getLogger(__name__)
@@ -355,7 +357,9 @@ class Collection:
         self.make = make
         self.label = label
         self.title = title
-        self.href = href or f"/plugins/{plugin_id}/artwork/{name}/"
+        # Root-relative; ``href`` adds the request's URL prefix for links and
+        # redirects, the tray card keeps this and the browser adds it there.
+        self.page_path = href or f"/plugins/{plugin_id}/artwork/{name}/"
         self.facet = facet
         self.facet_label = facet_label or (lambda v: v)
         self.budget_setting = budget_setting
@@ -380,13 +384,25 @@ class Collection:
         self.actions: list[tuple[str, str, Callable[[str, Path], str]]] = []
         self._parallel = parallel
         self._per_preview = per_preview
-        self._tray = _Batch(plugin_id, f"artwork:{name}", title, label, self.href)
+        self._tray = _Batch(plugin_id, f"artwork:{name}", title, label, self.page_path)
         if parent is not None:
             parent.children.append(self)
         with _REGISTRY_LOCK:
             old = _COLLECTIONS.get((plugin_id, name))
             self._q: _Queue = old._q if old is not None else _Queue()
             _COLLECTIONS[(plugin_id, name)] = self
+
+    @property
+    def href(self) -> str:
+        """The collection's page as a link or redirect target, under the URL
+        prefix the request came through (Home Assistant's ingress)."""
+        if has_request_context():
+            return request.script_root.rstrip("/") + self.page_path
+        return self.page_path
+
+    @href.setter
+    def href(self, value: str) -> None:
+        self.page_path = value
 
     # -- declarations ----------------------------------------------------
 
@@ -1065,7 +1081,7 @@ class Collection:
         _tray_waiting(
             self.plugin_id,
             self.label,
-            self.href,
+            self.page_path,
             len(self.held(data_dir)),
             lambda: self.start_held(data_dir, fal_key, settings),
         )
@@ -1487,7 +1503,7 @@ class Art:
                 _tray_waiting(
                     c.plugin_id,
                     c.label,
-                    c.href,
+                    c.page_path,
                     n,
                     lambda: c.start_held(self.data_dir, self.key, self.settings, self.subject),
                 )

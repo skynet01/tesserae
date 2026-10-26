@@ -32,7 +32,7 @@ from flask import (
 )
 from werkzeug.wrappers import Response
 
-from app import device_service
+from app import device_service, ha_options
 from app.device_loader import DeviceRegistry
 from app.discovery import DiscoveryCache
 from app.layouts import LAYOUTS_BY_SLUG, to_panel_pixels
@@ -133,7 +133,10 @@ def is_onboarded(settings: SettingsStore) -> bool:
         # transport step at least once, treat the install as onboarded.
         return True
     broker = settings.get_section("broker")
-    if broker.get("host") or broker.get("embedded_enabled"):
+    # Under the HA app the broker host is copied in from the app's
+    # Configuration tab (default core-mosquitto) on every start, so it says
+    # nothing about whether setup was ever done.
+    if broker.get("embedded_enabled") or (broker.get("host") and not ha_options.is_ha_addon()):
         return True
     try:
         if any(d.kind_of is not None for d in current_app.config["DEVICE_REGISTRY"].all()):

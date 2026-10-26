@@ -696,8 +696,9 @@
 }
 :root[data-ui="paper"] .dx-section-card + .dx-section-card,
 :root[data-ui="paper"] .card + .card { margin-top: 16px; }
-/* Side-by-side sections (Stats) align their tops instead. */
-:root[data-ui="paper"] .dx-stats-columns > .dx-section-card { margin-top: 0; }
+/* Side-by-side sections (Stats, Send) align their tops instead. */
+:root[data-ui="paper"] .dx-stats-columns > .dx-section-card,
+:root[data-ui="paper"] .send-pair > .dx-section-card { margin-top: 0; }
 :root[data-ui="paper"] .dx-devtable { padding: 0; }
 /* Section heads lose their decorative icon tile; a small red square,
    the one splash of colour, marks every section title instead. */

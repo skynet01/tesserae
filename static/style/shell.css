@@ -1024,7 +1024,7 @@ body.modal-open { overflow: hidden; }
   padding: 0 8px;
   border: 0;
   background: transparent;
-  color: var(--t-fg-muted, #666);
+  color: var(--t-muted, #666);
   font: inherit;
   font-size: 12px;
   cursor: pointer;

@@ -57,7 +57,7 @@
   font-size: 12px;
   font-weight: 650;
   border-radius: 8px;
-  border: 1px solid var(--t-input-border, #dedcd6);
+  border: 1px solid var(--t-border, #dedcd6);
   color: var(--t-fg-soft, #56564f);
   background: transparent;
   text-decoration: none;
