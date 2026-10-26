@@ -516,3 +516,27 @@ def test_visionect_device_band_says_whether_auto_bind_is_open_and_shows_refusals
         band = index_routes._visionect_setup(device)
     assert "from 10.0.0.66 claimed this sign's UUID and was refused" in band["body"]
     assert band["ok"] is False
+
+
+def test_every_config_save_checks_the_sign_binding_and_adding_arms_auto_bind(
+    app: Flask,
+) -> None:
+    from app import visionect
+
+    sign = "aabbccdd-0000-1111-2222-333344445555"
+    client = app.test_client()
+    _sign_in(client)
+    client.post(
+        "/settings/devices/add",
+        data={"kind": "visionect", "id": "hall_sign", "name": "Hall", "uuid": sign},
+    )
+    client.post("/settings/devices/add", data={"kind": "visionect", "id": "spare", "name": "Spare"})
+    section = app.config["SETTINGS_STORE"].get_section("devices")
+    # A blank device just added opens its auto-bind window; a bound one doesn't.
+    assert isinstance(section["spare"].get(visionect.AUTO_BIND_KEY), float)
+    assert not section["hall_sign"].get(visionect.AUTO_BIND_KEY)
+    # The generic device settings route refuses a sign already bound elsewhere.
+    resp = client.post("/settings/device-spare", data={"uuid": sign}, follow_redirects=True)
+    assert "already bound to device &#39;hall_sign&#39;" in resp.get_data(as_text=True)
+    section = app.config["SETTINGS_STORE"].get_section("devices")
+    assert not section["spare"].get("uuid")

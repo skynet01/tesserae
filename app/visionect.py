@@ -106,10 +106,12 @@ PROBE_TIMEOUT_S = 20.0
 RENDER_HOLD_POLL_S = 5.0
 RENDER_HOLD_MAX_S = 600.0
 # A blank device binds the first unknown sign that connects only within this
-# long of being added (its instance file written) or having its UUID cleared;
-# after that an unknown sign is listed as discovered instead. Anything on the
-# LAN can claim to be a sign, so a blank device doesn't stay up for grabs.
+# long of being added or having its UUID cleared (the time is stored with the
+# device's settings under AUTO_BIND_KEY); after that an unknown sign is listed
+# as discovered instead. Anything on the LAN can claim to be a sign, so a
+# blank device doesn't stay up for grabs.
 AUTO_BIND_WINDOW_S = 60 * 60.0
+AUTO_BIND_KEY = "uuid_armed_at"
 # Unbound UUIDs tracked at once (more connections are dropped), discovered
 # entries kept, and UUIDs remembered as already warned about.
 MAX_UNKNOWN_SIGNS = 16
@@ -321,10 +323,6 @@ class VisionectService:
         self._tasks: set[asyncio.Task[None]] = set()
         self._warned_unbound: dict[str, None] = {}  # insertion-ordered, capped
         self._discovered: dict[str, None] = {}  # discovery ids we listed, oldest first
-        # Auto-bind arming: when each blank device was seen to become blank
-        # (wall clock), and the blank set at the last attach.
-        self._blank_since: dict[str, float] = {}
-        self._blank_ids: set[str] | None = None
         self._retry_timer: threading.Timer | None = None
         # Read by Flask request threads; written on the loop thread.
         self._snapshot_lock = threading.Lock()
@@ -343,39 +341,15 @@ class VisionectService:
         sign waits gets its frame without waiting for the next check-in."""
         self._ctx = ctx
         self._ctx_gen += 1
-        try:
-            self._note_blank_devices(ctx)
-        except Exception:
-            logger.exception("visionect: checking for blank devices failed")
         self._call_soon(self._rescan)
-
-    def _note_blank_devices(self, ctx: _Context) -> None:
-        """Arm auto-bind for a device whose UUID was just cleared (or that
-        just appeared blank). Not on the first attach: a restart doesn't
-        re-open the window; a new device's file time arms it instead."""
-        section = ctx.settings.get_section("devices") or {}
-        blank = set()
-        for device in visionect_devices(ctx.devices):
-            cfg = section.get(device.id) if isinstance(section, dict) else None
-            if not normalise_uuid(cfg.get("uuid") if isinstance(cfg, dict) else None):
-                blank.add(device.id)
-        if self._blank_ids is not None:
-            now = time.time()
-            for device_id in blank - self._blank_ids:
-                self._blank_since[device_id] = now
-        for device_id in list(self._blank_since):
-            if device_id not in blank:
-                del self._blank_since[device_id]
-        self._blank_ids = blank
 
     def auto_bind_open(self, device: Device) -> bool:
         """Whether this blank device still binds the next unknown sign:
-        within AUTO_BIND_WINDOW_S of its instance file being written (it was
-        added, or saved) or of its UUID being cleared."""
-        since = self._blank_since.get(device.id, 0.0)
-        with contextlib.suppress(OSError):
-            since = max(since, device.path.stat().st_mtime)
-        return time.time() - since < AUTO_BIND_WINDOW_S
+        within AUTO_BIND_WINDOW_S of being added or having its UUID cleared."""
+        armed = self._device_cfg(device.id).get(AUTO_BIND_KEY)
+        if isinstance(armed, bool) or not isinstance(armed, (int, float)) or armed <= 0:
+            return False
+        return time.time() - float(armed) < AUTO_BIND_WINDOW_S
 
     def start(self, timeout: float = 5.0) -> bool:
         """Bind the listener on a daemon thread. Returns whether it is up."""
@@ -621,11 +595,9 @@ class VisionectService:
         ]
         if not blank:
             return None
-        chosen = blank[0]
-        # Only the uuid key, merged under the settings store's lock: the rest
-        # of the device's settings may be saved from a request meanwhile.
-        ctx.settings.update_for_namespace("devices", chosen.id, {"uuid": uuid}, [{"name": "uuid"}])
-        self._blank_since.pop(chosen.id, None)
+        chosen = next((d for d in blank if bind_sign(ctx.settings, ctx.devices, d, uuid)), None)
+        if chosen is None:
+            return None
         self._forget_discovery(uuid)
         logger.info("visionect: bound sign %s to device %s", uuid, chosen.id)
         return chosen
@@ -1413,6 +1385,92 @@ def device_bound_to(
         if isinstance(cfg, dict) and normalise_uuid(cfg.get("uuid")) == want:
             return device.id
     return None
+
+
+# Every write of a Visionect device's UUID goes through the helpers below,
+# which check that no other device has the sign and store it under this lock,
+# so two saves (or a save and the listener's auto-bind) can't bind one sign
+# to two devices.
+_BINDING_LOCK = threading.RLock()
+
+
+def binding_conflict(
+    devices: DeviceRegistry,
+    settings: Any,
+    device: Any,
+    values: dict[str, Any],
+    *,
+    exclude: str = "",
+) -> str | None:
+    """Why ``values`` can't be stored for ``device`` (a device or a kind):
+    another device is already bound to the sign UUID in them. None when they
+    can, or when ``device`` isn't a Visionect sign or no UUID is given."""
+    if not is_visionect_device(device):
+        return None
+    uuid = normalise_uuid(values.get("uuid"))
+    if not uuid:
+        return None
+    other = device_bound_to(devices, settings, uuid, exclude=exclude)
+    if other is None:
+        return None
+    return f"Sign {uuid} is already bound to device {other!r}."
+
+
+def _stored_config(settings: Any, device_id: str) -> dict[str, Any]:
+    section = settings.get_section("devices") or {}
+    cfg = section.get(device_id) if isinstance(section, dict) else None
+    return dict(cfg) if isinstance(cfg, dict) else {}
+
+
+def save_device_config(
+    settings: Any,
+    devices: DeviceRegistry,
+    device: Any,
+    values: dict[str, Any],
+    fields: list[dict[str, Any]],
+) -> str | None:
+    """Store a device's validated config values, as ``update_for_namespace``
+    does. For a Visionect device the sign UUID is checked against every other
+    device and stored atomically, and clearing it opens the auto-bind window.
+    Returns why nothing was stored, or None."""
+    with _BINDING_LOCK:
+        problem = binding_conflict(devices, settings, device, values, exclude=device.id)
+        if problem:
+            return problem
+        visionect = is_visionect_device(device) and "uuid" in values
+        before = (
+            normalise_uuid(_stored_config(settings, device.id).get("uuid")) if visionect else ""
+        )
+        settings.update_for_namespace("devices", device.id, values, fields)
+        if before and not normalise_uuid(values.get("uuid")):
+            arm_auto_bind(settings, device.id)
+    return None
+
+
+def arm_auto_bind(settings: Any, device_id: str) -> None:
+    """Open a blank device's auto-bind window now (it was just added, or its
+    UUID cleared)."""
+    settings.update_for_namespace(
+        "devices", device_id, {AUTO_BIND_KEY: time.time()}, [{"name": AUTO_BIND_KEY}]
+    )
+
+
+def bind_sign(settings: Any, devices: DeviceRegistry, device: Device, uuid: str) -> bool:
+    """Store ``uuid`` on ``device`` if it is still blank and no other device
+    has that sign (the listener's auto-bind). Only these keys change, merged
+    under the settings store's lock; the window closes."""
+    with _BINDING_LOCK:
+        if normalise_uuid(_stored_config(settings, device.id).get("uuid")):
+            return False
+        if device_bound_to(devices, settings, uuid, exclude=device.id) is not None:
+            return False
+        settings.update_for_namespace(
+            "devices",
+            device.id,
+            {"uuid": uuid, AUTO_BIND_KEY: None},
+            [{"name": "uuid"}, {"name": AUTO_BIND_KEY}],
+        )
+    return True
 
 
 def canvas_size(panel: Any) -> tuple[int, int] | None:

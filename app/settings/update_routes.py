@@ -26,6 +26,7 @@ from typing import Any
 from flask import current_app, flash, request
 from werkzeug.wrappers import Response
 
+from app import visionect
 from app.state.settings_store import SECRET_MASK
 
 from ._shared import (
@@ -111,7 +112,12 @@ def settings_update(section_kind: str) -> Response:
         if not ok:
             flash(f"Invalid {device.name} config: {err}", "error")
             return redirect_to_section(section_kind)
-        store.update_for_namespace("devices", did, values, fields)
+        # A Visionect sign's UUID is checked against every other device and
+        # stored atomically.
+        problem = visionect.save_device_config(store, devices(), device, values, fields)
+        if problem:
+            flash(f"{device.name} config not saved. {problem}", "error")
+            return redirect_to_section(section_kind)
         if device.transport == "relay":
             # No broker, no direct poll: queue a sealed config-doc upload to
             # the panel's relay mailbox (applied on its next wake). Must

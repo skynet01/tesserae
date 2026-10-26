@@ -214,9 +214,10 @@ class Harness:
     ) -> None:
         self.renders = tmp_path / "renders"
         self.renders.mkdir()
-        self.settings = FakeSettings(
-            {"devices": {"lobby": {"uuid": uuid}}, "app": dict(app_settings or {})}
-        )
+        lobby: dict[str, Any] = {"uuid": uuid}
+        if not uuid:  # a blank device just added: it binds the next unknown sign
+            lobby[visionect.AUTO_BIND_KEY] = time.time()
+        self.settings = FakeSettings({"devices": {"lobby": lobby}, "app": dict(app_settings or {})})
         kind = FakeDevice("visionect", None, SIGN_PANEL, tmp_path / "kind.json")
         self.device = FakeDevice("lobby", "visionect", SIGN_PANEL, tmp_path / "lobby.json")
         self.registry = SimpleNamespace(devices={"visionect": kind, "lobby": self.device})
@@ -1407,29 +1408,77 @@ def _other_uuid(n: int) -> str:
     return f"{n:08x}-0000-4000-8000-000000000000"
 
 
+UUID_FIELDS = [{"name": "uuid"}]
+
+
 def test_a_blank_device_binds_only_within_its_arming_window(tmp_path: Path) -> None:
+    """The window is a stored time, set when the device is added or its UUID
+    cleared. Renaming or saving an old blank device (which rewrites its
+    instance file) doesn't reopen it."""
     h = Harness(tmp_path)
-    old = time.time() - visionect.AUTO_BIND_WINDOW_S - 60
-    os.utime(h.device.path, (old, old))  # added over an hour ago
+    lobby = h.settings.sections["devices"]["lobby"]
+    lobby[visionect.AUTO_BIND_KEY] = time.time() - visionect.AUTO_BIND_WINDOW_S - 60
+    os.utime(h.device.path, None)  # renamed just now
+    save = visionect.save_device_config
     try:
         assert h.svc.start()
         sign = FakeSign(h.svc.port)
         try:
             sign.status()
             assert _wait(lambda: h.app.config["DISCOVERY_CACHE"].get(visionect.discovery_id(UUID)))
-            assert h.settings.sections["devices"]["lobby"]["uuid"] == ""  # not bound
+            assert lobby["uuid"] == ""  # not bound: listed as discovered
+            # Saving it blank again doesn't reopen the window either.
+            assert save(h.settings, h.registry, h.device, {"uuid": ""}, UUID_FIELDS) is None
             assert not h.svc.auto_bind_open(h.device)  # type: ignore[arg-type]
-            # Clearing a device's UUID re-opens its window (seen on attach).
-            h.settings.sections["devices"]["lobby"]["uuid"] = _other_uuid(1)
-            h.svc.attach(h.svc._ctx)  # type: ignore[arg-type]
-            h.settings.sections["devices"]["lobby"]["uuid"] = ""
-            h.svc.attach(h.svc._ctx)  # type: ignore[arg-type]  # and the waiting sign binds
-            assert _wait(lambda: h.settings.sections["devices"]["lobby"]["uuid"] == UUID)
+            # Clearing a UUID does.
+            assert (
+                save(h.settings, h.registry, h.device, {"uuid": _other_uuid(1)}, UUID_FIELDS)
+                is None
+            )
+            assert save(h.settings, h.registry, h.device, {"uuid": ""}, UUID_FIELDS) is None
+            h.svc._call_soon(h.svc._rescan)
+            assert _wait(lambda: lobby["uuid"] == UUID)
+            assert lobby.get(visionect.AUTO_BIND_KEY) is None  # bound: the window closed
             assert h.app.config["DISCOVERY_CACHE"].get(visionect.discovery_id(UUID)) is None
         finally:
             sign.close()
     finally:
         h.svc.stop()
+
+
+def test_one_lock_checks_and_stores_a_sign_binding(tmp_path: Path) -> None:
+    """Two saves binding one sign to two devices at once: exactly one wins,
+    and the listener's auto-bind doesn't take a sign another device has."""
+
+    class _SlowSettings(FakeSettings):
+        def update_for_namespace(self, *args: Any) -> None:
+            time.sleep(0.2)  # widen the gap between the check and the write
+            super().update_for_namespace(*args)
+
+    h = Harness(tmp_path, uuid=_other_uuid(1))
+    hall = FakeDevice("hall", "visionect", SIGN_PANEL, tmp_path / "hall.json")
+    h.registry.devices["hall"] = hall
+    settings = _SlowSettings(h.settings.sections)
+    results: list[str | None] = []
+    savers = [
+        threading.Thread(
+            target=lambda d=d: results.append(
+                visionect.save_device_config(settings, h.registry, d, {"uuid": UUID}, UUID_FIELDS)
+            )
+        )
+        for d in (h.device, hall)
+    ]
+    for t in savers:
+        t.start()
+    for t in savers:
+        t.join(5)
+    assert sorted(r is None for r in results) == [False, True]
+    section = h.settings.sections["devices"]
+    bound = [d for d in ("lobby", "hall") if section.get(d, {}).get("uuid") == UUID]
+    assert len(bound) == 1
+    other = "hall" if bound == ["lobby"] else "lobby"
+    h.settings.sections["devices"].setdefault(other, {})["uuid"] = ""
+    assert not visionect.bind_sign(settings, h.registry, h.registry.devices[other], UUID)
 
 
 def test_discovery_ids_are_long_and_never_merge_two_signs(tmp_path: Path) -> None:
@@ -1540,7 +1589,7 @@ def test_binding_keeps_device_settings_saved_meanwhile(tmp_path: Path) -> None:
     h.settings.__class__ = _RacingSettings
     assert h.svc._bind(UUID) is h.device
     stored = FakeSettings.get_section(h.settings, "devices")["lobby"]
-    assert stored == {"uuid": UUID, "dither": "floyd"}
+    assert stored["uuid"] == UUID and stored["dither"] == "floyd"
 
 
 def test_a_connection_already_replaced_in_the_library_is_ignored_not_refused() -> None:
