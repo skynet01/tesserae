@@ -19,8 +19,9 @@ that this module bounds before the library sees a byte:
   so a peer dribbling a byte every few seconds never trips it. Here a
   connection has ``IDENTIFY_TIMEOUT_S`` in all to identify, after which it
   is dropped (and a sign re-dials).
-* **Connection count.** At most ``MAX_CONNECTIONS`` sockets at once, and
-  ``MAX_CONNECTIONS_PER_PEER`` from one address.
+* **Connection count.** At most ``MAX_CONNECTIONS`` sockets at once (a bound
+  sign's own address is exempt), and ``MAX_CONNECTIONS_PER_PEER`` from one
+  address.
 
 It also works around a library bug: ``_handle_client`` awaits its timer task
 in a ``finally`` that suppresses only ``CancelledError``, so a write error in
@@ -198,6 +199,9 @@ class GuardedServer(VisionectServer):
         # library allocates store and stats entries for every UUID a frame
         # names, admitted or not; the rest are pruned as connections close.
         self.keep_identity: Callable[[bytes], bool] = lambda _device_id: False
+        # A bound sign's own address, exempt from MAX_CONNECTIONS (never from
+        # the per-address cap), so a few busy addresses can't lock it out.
+        self.trusted_peer: Callable[[str], bool] = lambda _ip: False
 
     def mark_identified(self, writer: Any) -> None:
         """The socket behind ``writer`` identified as a sign Tesserae keeps."""
@@ -217,7 +221,8 @@ class GuardedServer(VisionectServer):
 
     async def _handle_client(self, reader: Any, writer: Any) -> None:
         ip = peer_ip(writer)
-        if self._open >= MAX_CONNECTIONS or self._per_peer[ip] >= MAX_CONNECTIONS_PER_PEER:
+        full = self._open >= MAX_CONNECTIONS and not self.trusted_peer(ip)
+        if full or self._per_peer[ip] >= MAX_CONNECTIONS_PER_PEER:
             self.refused_connections += 1
             self.note_peer(writer, "refused: too many open connections")
             abort(writer)

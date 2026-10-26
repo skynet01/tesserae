@@ -97,11 +97,20 @@ def free_port() -> int:
 class FakeSign:
     """A sign over a real socket: send status / ACK / NACK, collect frames."""
 
-    def __init__(self, port: int, uuid: str = UUID, *, rcvbuf: int | None = None) -> None:
+    def __init__(
+        self,
+        port: int,
+        uuid: str = UUID,
+        *,
+        rcvbuf: int | None = None,
+        local_port: int | None = None,
+    ) -> None:
         self.uuid = uuid
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if rcvbuf is not None:  # a sign that stops reading fills this up
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        if local_port is not None:  # known before connecting (see _fake_addresses)
+            self.sock.bind(("127.0.0.1", local_port))
         self.sock.settimeout(5)
         self.sock.connect(("127.0.0.1", port))
         self.decoder = FrameDecoder(Direction.SERVER_TO_DEVICE)
@@ -838,8 +847,9 @@ def _closed_soon(sock: socket.socket, timeout: float = 3.0) -> bool:
         return False
 
 
-def _raw(port: int) -> socket.socket:
-    return socket.create_connection(("127.0.0.1", port), timeout=5)
+def _raw(port: int, local_port: int | None = None) -> socket.socket:
+    source = ("127.0.0.1", local_port) if local_port is not None else None
+    return socket.create_connection(("127.0.0.1", port), timeout=5, source_address=source)
 
 
 def test_the_listener_hooks_pyvisionect_where_it_expects() -> None:
@@ -1756,3 +1766,86 @@ def test_a_frame_left_by_a_history_resend_is_adopted_after_a_restart(harness: Ha
         assert sign.images() == []
     finally:
         sign.close()
+
+
+def test_the_signs_own_address_takes_its_uuid_back(tmp_path: Path, monkeypatch) -> None:
+    """A LAN host claims a sleeping sign's UUID from another address and keeps
+    the connection busy (so it is never probed). When the sign wakes, from the
+    address that last acknowledged its frames, it takes the UUID back; the
+    host's own ACKs meanwhile don't make its address the trusted one."""
+    h = Harness(tmp_path, uuid=UUID)
+    ports = {name: free_port() for name in ("sign", "host", "wake", "again")}
+    _fake_addresses(
+        monkeypatch,
+        {
+            ports["sign"]: "10.0.0.5",
+            ports["host"]: "10.0.0.66",
+            ports["wake"]: "10.0.0.5",
+            ports["again"]: "10.0.0.66",
+        },
+    )
+    try:
+        h.render("frame-a")
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port, local_port=ports["sign"])
+        sign.status()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        sign.ack(sign.images()[0].id)
+        assert _wait(lambda: h.svc._signs[UUID].trusted_ip == "10.0.0.5")
+        sign.close()  # asleep
+        assert _wait(lambda: h.svc._server._open == 0)
+        host = FakeSign(h.svc.port, local_port=ports["host"])
+        host.status()  # nothing holds the UUID: accepted
+        h.render("frame-b", shade=128)
+        h.push()
+        assert host.wait_for(lambda s: len(s.images()) == 1)
+        host.ack(host.images()[0].id)
+        host.status()
+        assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("remote") == "10.0.0.66")
+        assert h.svc._signs[UUID].trusted_ip == "10.0.0.5"
+        woke = FakeSign(h.svc.port, local_port=ports["wake"])
+        woke.status()
+        assert host.dropped(timeout=5)
+        assert not woke.dropped(timeout=0.5)
+        view = h.svc.sign_view(UUID) or {}
+        assert view.get("remote") == "10.0.0.5"
+        assert (view.get("refused") or {}).get("remote") == "10.0.0.66"
+        again = FakeSign(h.svc.port, local_port=ports["again"])
+        again.status()
+        assert again.dropped(timeout=5)  # and while it lives, the host is refused
+        for s in (host, woke, again):
+            s.close()
+    finally:
+        h.svc.stop()
+
+
+def test_busy_addresses_cant_lock_the_sign_out(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(visionect_listener, "MAX_CONNECTIONS", 2)
+    h = Harness(tmp_path, uuid=UUID)
+    ports = [free_port() for _ in range(4)]
+    _fake_addresses(
+        monkeypatch,
+        {ports[0]: "10.0.0.5", ports[1]: "10.0.0.66", ports[2]: "10.0.0.67", ports[3]: "10.0.0.5"},
+    )
+    try:
+        h.render("frame-a")
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port, local_port=ports[0])
+        sign.status()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        sign.ack(sign.images()[0].id)
+        assert _wait(lambda: h.svc._signs[UUID].trusted_ip == "10.0.0.5")
+        sign.close()
+        assert _wait(lambda: h.svc._server._open == 0)
+        squatters = [_raw(h.svc.port, ports[1]), _raw(h.svc.port, ports[2])]
+        assert _wait(lambda: h.svc._server._open == 2)  # the cap is full
+        back = FakeSign(h.svc.port, local_port=ports[3])
+        back.status()
+        assert back.wait_for(lambda s: len(s.images()) >= 0) and not back.dropped(timeout=0.5)
+        assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("connected") is True)
+        stranger = _raw(h.svc.port)
+        assert _closed_soon(stranger)  # anyone else is still refused
+        for s in [*squatters, stranger, back.sock]:
+            s.close()
+    finally:
+        h.svc.stop()

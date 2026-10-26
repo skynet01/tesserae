@@ -99,6 +99,13 @@ WRITE_TIMEOUT_S = 90.0
 # (DHCP) gets back in at its next re-dial.
 PROBE_QUIET_S = 30.0
 PROBE_TIMEOUT_S = 20.0
+# The address that last acknowledged a frame or sleep for a UUID is the sign's
+# own: a connection from it takes the UUID back from a connection elsewhere
+# (one that claimed it while the sign slept, say), and it is exempt from the
+# listener's total connection cap. Another address's ACKs move that trust only
+# once the trusted address has acknowledged nothing for TRUST_STALE_S (longer
+# than the longest sleep), so whoever holds the UUID meanwhile can't take it.
+TRUST_STALE_S = 25 * 3600.0
 # Quiet-hours sleep waits while the push pipeline renders for the device (a
 # push that started just before the window would otherwise land after the
 # sign fell asleep on the old frame), checking every RENDER_HOLD_POLL_S, for
@@ -266,6 +273,8 @@ class _Sign:
     heard_at: float = 0.0  # monotonic; its last status or ACK
     probe_at: float = 0.0  # monotonic; a status request sent to check it lives
     refused: dict[str, Any] | None = None  # the last same-UUID connection refused
+    trusted_ip: str = ""  # the address that last acknowledged a frame or sleep
+    trusted_at: float = 0.0  # wall clock of that acknowledgement
     frame: Any = None  # EncodedFrame for frame_digest
     frame_digest: str = ""
     failed_digest: str = ""  # a latest render that couldn't be read or encoded
@@ -510,6 +519,7 @@ class VisionectService:
             on_events=self._on_events, store=store, host=self.host, port=self.port
         )
         server.keep_identity = self._keeps_identity
+        server.trusted_peer = self._trusted_peer
         self._stop_event, self._store, self._server = stop_event, store, server
         await server.start()
         logger.info("visionect: listening for signs on %s:%d", self.host, self.port)
@@ -738,6 +748,22 @@ class VisionectService:
         last_seen = getattr(stats, "last_seen", None)
         if isinstance(last_seen, dict):
             last_seen.pop(key, None)
+
+    def _trusted_peer(self, ip: str) -> bool:
+        """A bound sign's own address: exempt from the total connection cap."""
+        return bool(ip) and any(
+            (sign.trusted_ip or sign.remote) == ip
+            for uuid, sign in list(self._signs.items())
+            if self._device_for_uuid(uuid) is not None
+        )
+
+    def _note_trusted(self, sign: _Sign) -> None:
+        """An acknowledgement from the sign's connection: see TRUST_STALE_S."""
+        ip, now = sign.remote, time.time()
+        if ip and (
+            not sign.trusted_ip or ip == sign.trusted_ip or now - sign.trusted_at > TRUST_STALE_S
+        ):
+            sign.trusted_ip, sign.trusted_at = ip, now
 
     def _keeps_identity(self, device_id: bytes) -> bool:
         """The listener keeps library state only for UUIDs tracked here."""
@@ -1155,6 +1181,7 @@ class VisionectService:
             sign.heard_at = now
             if answered and inflight is not None:
                 sign.inflight = None
+                self._note_trusted(sign)
                 if inflight.kind == "image":
                     sign.shown_digest = inflight.digest
                     sign.shown_checksum = inflight.checksum
@@ -1219,8 +1246,19 @@ class VisionectService:
             and sign.remote
             and remote != sign.remote
         ):
-            self._refuse(sign, writer, remote)
-            return ""
+            if not sign.trusted_ip or remote != sign.trusted_ip:
+                self._refuse(sign, writer, remote)
+                return ""
+            # The sign's own address takes the UUID back from whoever
+            # claimed it from elsewhere (while it slept, say).
+            logger.warning(
+                "visionect: sign %s re-dialed from %s, the address that last acknowledged its "
+                "frames; dropping the connection from %s that held its UUID",
+                uuid,
+                remote,
+                sign.remote,
+            )
+            sign.refused = {"remote": sign.remote, "at": time.time()}
         if sign is None:
             device = device or self._bind(uuid)
             if device is None and self._unknown_signs() >= MAX_UNKNOWN_SIGNS:
