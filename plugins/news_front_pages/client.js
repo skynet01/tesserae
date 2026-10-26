@@ -39,10 +39,15 @@ export default function render(shadow, ctx) {
   }
 
   if (!data.url) {
+    // ``pending``: nothing saved yet and the download is on its way; the
+    // host renders again (``live_refresh_s``) once it lands.
+    const message = data.pending
+      ? t("fetching", "Fetching today's front page…")
+      : t("no_front_page", "No front page today.");
     shadow.innerHTML = `
       ${css}
       <div class="w is-bleed" data-widget="news_front_pages">
-        <div class="bleed-empty">${t("no_front_page", "No front page today.")}</div>
+        <div class="bleed-empty">${escapeHtml(message)}</div>
       </div>`;
     return;
   }

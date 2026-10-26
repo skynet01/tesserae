@@ -2,9 +2,9 @@
 
 Ported from the Visionect display manager's ``newspaper`` module, which ran a
 daily cron to fetch each paper's PDF, rasterised page one with ImageMagick and
-round-robined the enabled papers on every frame request. Here the download
-happens inside ``fetch()``, on demand, and the rotation cursor lives in the
-widget's data dir, so there is no cron and no PDF tooling to install.
+round-robined the enabled papers on every frame request. Here there is no cron
+and no PDF tooling: ``fetch()`` answers from the pages saved in the widget's
+data dir and queues what is missing for one background download worker.
 
 Freedom Forum publishes each paper at
 ``https://cdn.freedomforum.org/dfp/jpg<day-of-month>/lg/<CODE>.jpg``. Three
@@ -22,21 +22,44 @@ quirks shape the code below:
   PDF is bigger, and rasterising it would need a dependency a widget can't
   declare, so a full-width page on a large panel is an upscale.
 
+How a render works:
+
+* ``fetch()`` never touches the network. Under the state lock it picks the
+  paper, validates its newest saved page, marks that page as used (its mtime)
+  and returns its URL. Papers whose edition for today is missing and due are
+  queued for the worker, and the data carries ``live_refresh_s`` /
+  ``live_pending`` while the shown paper's download is on the way, so editors
+  repaint and a push is followed up when it lands. With nothing saved yet the
+  cell says it is fetching.
+* One daemon thread per data dir drains a de-duplicated queue (one job per
+  paper and edition day), so concurrent renders trigger one download. It runs
+  in a copy of the queuing render's context, so the widget's ``requires:``
+  egress allowlist still applies. Downloads happen outside the lock; writes,
+  validation, deletion and pruning only under it, and a delete only removes
+  the exact file version that was judged (inode, size, mtime).
+* The rotation moves at most once per ``ROTATION_HOLD_S``. The host composes a
+  page ahead of a scheduled send (warm-ahead) and follows sends up, all as
+  ordinary non-preview renders, and gives a widget no way to tell a render
+  that will be shown from one that prepares it. The hold approximates "one
+  paper per shown frame": a warm-ahead, its send and the follow-ups show one
+  paper. The accepted cost: two separate sends inside the hold repeat a paper,
+  and a warm-ahead that leads its send by more than the hold moves on early.
+
 Layout under ``data_dir``::
 
     pages/<CODE>_<YYYYMMDD>.jpg   one validated download per paper and edition
-    state.json                    paper shown + since when, and when each paper was last looked for
+    state.json                    paper shown + since when, download attempts and failures
     directory.json                Freedom Forum's paper list, for the editor's picker
 
-A downloaded edition is kept until it is more than ``KEEP_DAYS`` old, a
-newer one exists and it has gone unused for ``PRUNE_GRACE_S``, so a paper
-whose download fails keeps showing its last good page, up to
-``LAST_GOOD_MAX_DAYS``.
+A downloaded edition is kept until it is more than ``KEEP_DAYS`` old, a newer
+one exists and it has gone unused for ``PRUNE_GRACE_S``, so a paper whose
+download fails keeps showing its last good page, up to ``LAST_GOOD_MAX_DAYS``.
 """
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import html
 import http.client
 import io
@@ -45,16 +68,19 @@ import logging
 import math
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -63,6 +89,11 @@ from PIL import Image
 from werkzeug.wrappers import Response
 
 from app.plugin_http import fetch_text
+
+try:
+    from app import jobs
+except ImportError:  # an older Tesserae without the job tray
+    jobs = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -74,15 +105,18 @@ PAGE_URL = "https://cdn.freedomforum.org/dfp/jpg{day}/lg/{code}.jpg"
 SITEMAP_URL = "https://frontpages.freedomforum.org/sitemap.xml"
 USER_AGENT = f"tesserae/0.1 (+{PLUGIN_ID})"
 
-# The composer waits about six seconds for one widget's fetch(), then shows its
-# previous result and leaves the call running. Everything here, lock waits
-# included, fits in this budget, and a call that overruns it never moves the
-# rotation (see _settle).
-FETCH_BUDGET_S = 4.5
-HTTP_TIMEOUT_S = 4.0  # per socket operation, and never past the budget
+# The worker's limits for one request: per socket operation, and in all, so a
+# response trickling in a byte at a time can't hold the queue for long.
+HTTP_TIMEOUT_S = 10.0
+DOWNLOAD_BUDGET_S = 60.0
 READ_CHUNK_BYTES = 64 * 1024
 # choices() runs while the page editor loads, for every widget installed.
 DIRECTORY_TIMEOUT_S = 4.0
+# fetch() waits this long at most for the state lock, which is only ever held
+# for file work (never a download).
+LOCK_WAIT_S = 2.0
+# Editors poll, and a push is followed up, this often while a download is due.
+LIVE_REFRESH_S = 8
 
 LOOKBACK_DAYS = 3  # today, yesterday, the day before
 RECHECK_S = 30 * 60  # how often to look again for an edition not out yet
@@ -93,7 +127,7 @@ STALE_SLOT_DAYS = 3
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MIN_IMAGE_EDGE_PX = 300
 MAX_TRIM_PCT = 25.0
-# Warm-ahead, the send and its follow-ups all show the paper picked first.
+# One paper per shown frame, approximately; see the module docstring.
 ROTATION_HOLD_S = 4 * 60
 # A page stays this long after its last use before pruning may delete it.
 PRUNE_GRACE_S = 60 * 60
@@ -140,19 +174,36 @@ FALLBACK_DIRECTORY: dict[str, str] = {
     "WA_ST": "The Seattle Times",
 }
 
-# Guards the state file and pruning (see _settle); never held across a download.
-_LOCK = threading.Lock()
+
+def _shared(name: str, factory: Callable[[], Any]) -> Any:
+    """Process-wide state that outlives a reload of this module. A reload
+    imports server.py again; module globals would give the new code its own
+    lock and worker registry while the old worker still writes to the same
+    folder. One holder module, created once, gives every version the same."""
+    holder_name = f"_tesserae_runtime.{PLUGIN_ID}"
+    holder = sys.modules.setdefault(holder_name, ModuleType(holder_name))
+    return holder.__dict__.setdefault(name, factory())
+
+
+# Guards the pages folder and state.json: validation, deletion, pruning,
+# writes, the rotation. Never held across a download.
+_LOCK: threading.Lock = _shared("state_lock", threading.Lock)
+# Guards the worker registry below.
+_RUNS_LOCK: threading.Lock = _shared("runs_lock", threading.Lock)
+# The last page each placement got under the lock, for a render that can't
+# have the lock in time: (data dir, pinned code or "") -> (wall time, payload).
+_LAST_CLAIMED: dict[tuple[str, str], tuple[float, dict[str, Any]]] = _shared("last_claimed", dict)
 
 # Clocks, as module names so tests can drive them: wall time is persisted
-# (rotation, recheck), the monotonic one times the fetch budget.
+# (rotation, rechecks, file ages), the monotonic one times a download.
 _wall = time.time
 _clock = time.monotonic
 
 
 class CdnUnreachable(Exception):
-    """Freedom Forum didn't answer (network error, 403, 5xx). Unlike a 404,
-    which only means one edition isn't out, this stops further downloads for
-    the rest of the render so one outage costs one timeout, not nine."""
+    """Freedom Forum didn't answer (network error, 403, 5xx, a cut-off or too
+    slow body). Unlike a 404, which only means one edition isn't out, this
+    ends the job: the older editions would fail the same way."""
 
 
 @dataclass(frozen=True)
@@ -162,6 +213,16 @@ class Paper:
     code: str
     enabled: bool = True
     trim: float = 0.0  # percent of the page height cut off the top
+
+
+@dataclass(frozen=True)
+class Page:
+    """A saved edition that decoded as a front page."""
+
+    path: Path
+    day: date
+    width: int
+    height: int
 
 
 # ----- settings --------------------------------------------------------------
@@ -216,7 +277,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _write_atomic(path: Path, payload: bytes) -> None:
-    """Write via a temp file and a rename, so a render never reads half a file."""
+    """Write via a temp file and a rename, so a reader never sees half a file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
@@ -234,7 +295,27 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
         _write_atomic(path, json.dumps(data, indent=1, sort_keys=True).encode("utf-8"))
 
 
-# ----- downloading -----------------------------------------------------------
+def _identity(path: Path) -> tuple[int, int, int] | None:
+    """Which version of a file this is: inode, size and mtime."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_ino, st.st_size, st.st_mtime_ns
+
+
+def _unlink_if_same(path: Path, identity: tuple[int, int, int] | None) -> bool:
+    """Delete ``path`` only if it is still the version that was judged. A file
+    replaced since (a new download renamed over it) is left alone. Callers
+    hold ``_LOCK``, so within this process nothing can slip in between."""
+    if identity is None or _identity(path) != identity:
+        return False
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    return True
+
+
+# ----- downloading (worker thread only) --------------------------------------
 
 
 def _edition_today() -> date:
@@ -268,14 +349,17 @@ def page_size(body: bytes) -> tuple[int, int] | None:
 
 
 def _read_capped(resp: Any, deadline: float) -> bytes:
-    """The response body, read in chunks so a trickling download can't outlive
-    the render's budget, stopping one byte past ``MAX_IMAGE_BYTES``."""
+    """The body, stopping one byte past ``MAX_IMAGE_BYTES`` and at ``deadline``.
+    ``read1`` returns whatever one socket read brings, where ``read(n)`` would
+    wait for all n bytes, so the deadline is checked at least once per
+    ``HTTP_TIMEOUT_S`` however slowly the bytes arrive."""
+    read = getattr(resp, "read1", None) or resp.read
     chunks: list[bytes] = []
     total = 0
     while total <= MAX_IMAGE_BYTES:
         if _clock() >= deadline:
-            raise CdnUnreachable("out of time")
-        chunk = resp.read(min(READ_CHUNK_BYTES, MAX_IMAGE_BYTES + 1 - total))
+            raise CdnUnreachable("download too slow")
+        chunk = read(min(READ_CHUNK_BYTES, MAX_IMAGE_BYTES + 1 - total))
         if not chunk:
             break
         chunks.append(chunk)
@@ -283,19 +367,16 @@ def _read_capped(resp: Any, deadline: float) -> bytes:
     return b"".join(chunks)
 
 
-def download_edition(code: str, day: date, deadline: float) -> bytes | None:
+def download_edition(code: str, day: date) -> bytes | None:
     """The ``code`` front page for ``day``, validated, or None when that
-    edition isn't there. Raises :class:`CdnUnreachable` when the CDN fails or
-    the render's budget (``deadline``, on ``_clock``) runs out."""
-    remaining = deadline - _clock()
-    if remaining <= 0:
-        raise CdnUnreachable("out of time")
+    edition isn't there. Raises :class:`CdnUnreachable` when the CDN fails."""
+    deadline = _clock() + DOWNLOAD_BUDGET_S
     url = PAGE_URL.format(day=day.day, code=code)
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT, "Accept": "image/jpeg,image/*;q=0.8"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=min(HTTP_TIMEOUT_S, remaining)) as resp:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as resp:
             body = _read_capped(resp, deadline)
             headers = getattr(resp, "headers", None)
             last_modified = headers.get("Last-Modified") if headers is not None else None
@@ -316,17 +397,7 @@ def download_edition(code: str, day: date, deadline: float) -> bytes | None:
     return body
 
 
-# ----- the shelf: pages on disk ----------------------------------------------
-
-
-@dataclass(frozen=True)
-class Page:
-    """A saved edition that decoded as a front page."""
-
-    path: Path
-    day: date
-    width: int
-    height: int
+# ----- the pages on disk (callers hold _LOCK) --------------------------------
 
 
 def _page_day(name: str) -> tuple[str, date] | None:
@@ -339,147 +410,69 @@ def _page_day(name: str) -> tuple[str, date] | None:
         return None
 
 
-class Shelf:
-    """The saved pages, as one fetch() call sees them, and the downloads it may
-    still make within its budget. Holds no lock: only :func:`_settle` does."""
+def edition_path(pages: Path, code: str, day: date) -> Path:
+    return pages / f"{code}_{day:%Y%m%d}.jpg"
 
-    def __init__(
-        self,
-        data_dir: Path,
-        *,
-        today: date,
-        now: float,
-        deadline: float,
-        checked: dict[str, Any],
-        fresh: bool = False,
-    ) -> None:
-        self.pages = data_dir / PAGES_DIR
-        self.today = today
-        self.now = now
-        self.deadline = deadline
-        self.fresh = fresh
-        self.checked = checked  # code -> wall time of the last download attempt
-        self.attempts: dict[str, float] = {}  # the attempts this call made
-        self.offline = False
-        self.downloaded = False
 
-    def edition_path(self, code: str, day: date) -> Path:
-        return self.pages / f"{code}_{day:%Y%m%d}.jpg"
+def newest_page(pages: Path, code: str, today: date) -> Page | None:
+    """The paper's newest saved edition that decodes and isn't too old to show.
+    A file that doesn't decode (zero bytes, damaged) is deleted on the way, so
+    it can neither hide an older good page nor stand in for today's and block
+    its download; only that exact version is deleted, never a replacement."""
+    oldest = today - timedelta(days=LAST_GOOD_MAX_DAYS)
+    dated: list[tuple[date, Path]] = []
+    for path in pages.glob(f"{code}_*.jpg"):
+        parsed = _page_day(path.name)
+        if parsed is not None and parsed[0] == code and oldest <= parsed[1] <= today:
+            dated.append((parsed[1], path))
+    for day, path in sorted(dated, reverse=True):
+        identity = _identity(path)
+        try:
+            size = page_size(path.read_bytes())
+        except OSError:
+            continue
+        if size is not None:
+            return Page(path, day, *size)
+        if _unlink_if_same(path, identity):
+            logger.warning("%s: removed unreadable %s", PLUGIN_ID, path.name)
+    return None
 
-    def newest(self, code: str) -> Page | None:
-        """The paper's newest edition on disk that decodes and isn't too old to
-        show. A file that doesn't decode (zero bytes, damaged) is deleted on
-        the way, so it can neither hide an older good page nor stand in for
-        today's and block the download that would replace it."""
-        oldest = self.today - timedelta(days=LAST_GOOD_MAX_DAYS)
-        dated: list[tuple[date, Path]] = []
-        for path in self.pages.glob(f"{code}_*.jpg"):
-            parsed = _page_day(path.name)
-            if parsed is not None and parsed[0] == code and oldest <= parsed[1] <= self.today:
-                dated.append((parsed[1], path))
-        for day, path in sorted(dated, reverse=True):
-            try:
-                size = page_size(path.read_bytes())
-            except OSError:
-                continue
-            if size is not None:
-                return Page(path, day, *size)
-            logger.warning("%s: removing unreadable %s", PLUGIN_ID, path.name)
-            with contextlib.suppress(OSError):
-                path.unlink()
-        return None
 
-    def page_for(self, code: str) -> Page | None:
-        """Today's edition when it is saved or can be fetched now, else the newest one kept."""
-        page = self.newest(code)
-        stale = page is None or page.day < self.today
-        if stale and self._due(code) and self._fetch_newer(code, page.day if page else None):
-            page = self.newest(code)
-        return page
-
-    def _due(self, code: str) -> bool:
-        if self.offline or _clock() >= self.deadline:
-            return False
-        if self.fresh:
-            return True
-        last = self.checked.get(code)
-        return not isinstance(last, (int, float)) or self.now - last >= RECHECK_S
-
-    def _fetch_newer(self, code: str, have: date | None) -> bool:
-        """Download the newest edition in the lookback newer than ``have``;
-        True when one was saved."""
-        self.attempts[code] = self.now
-        for back in range(LOOKBACK_DAYS):
-            day = self.today - timedelta(days=back)
-            if have is not None and day <= have:
-                return False  # nothing older can beat an edition already kept
-            try:
-                body = download_edition(code, day, self.deadline)
-            except CdnUnreachable as err:
-                logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
-                self.offline = True
-                return False
-            if body is not None:
-                try:
-                    _write_atomic(self.edition_path(code, day), body)
-                except OSError as err:
-                    logger.warning("%s: could not save %s: %s", PLUGIN_ID, day, err)
-                    return False
-                self.downloaded = True
-                return True
+def _claim(page: Page) -> bool:
+    """Mark ``page`` as just used, so pruning leaves it for ``PRUNE_GRACE_S``.
+    Only a claimed page's URL is ever handed out."""
+    try:
+        os.utime(page.path)
+    except OSError:
         return False
-
-    def claim(self, code: str, page: Page) -> Page | None:
-        """Mark ``page`` as just used (its mtime), so :meth:`prune` leaves it
-        alone for ``PRUNE_GRACE_S``. Called under the lock, like pruning, so a
-        page is either claimed first and kept, or pruned first and replaced
-        here by the newest page left."""
-        try:
-            os.utime(page.path)
-            return page
-        except FileNotFoundError:
-            pass
-        except OSError:
-            return page
-        replacement = self.newest(code)
-        if replacement is not None:
-            with contextlib.suppress(OSError):
-                os.utime(replacement.path)
-        return replacement
-
-    def _idle(self, path: Path) -> bool:
-        try:
-            return self.now - path.stat().st_mtime > PRUNE_GRACE_S
-        except OSError:
-            return False
-
-    def prune(self) -> None:
-        """Drop editions past ``KEEP_DAYS`` unless they are a paper's newest
-        (its last good page), everything past ``LAST_GOOD_MAX_DAYS``, and temp
-        files an interrupted write left behind; each only once it has gone
-        unused for ``PRUNE_GRACE_S``, since a renderer may still be loading a
-        page another render handed out a moment ago."""
-        found: list[tuple[Path, str, date]] = []
-        newest: dict[str, date] = {}
-        for path in self.pages.glob("*.jpg"):
-            parsed = _page_day(path.name)
-            if parsed is None:
-                continue
-            code, day = parsed
-            found.append((path, code, day))
-            newest[code] = max(day, newest.get(code, day))
-        doomed = list(self.pages.glob(".*.tmp"))
-        for path, code, day in found:
-            age = (self.today - day).days
-            if age > LAST_GOOD_MAX_DAYS or (age > KEEP_DAYS and day != newest[code]):
-                doomed.append(path)
-        for path in doomed:
-            if self._idle(path):
-                with contextlib.suppress(OSError):
-                    path.unlink()
+    return True
 
 
-# ----- rotation and the state file ------------------------------------------
+def prune(pages: Path, today: date, now: float) -> None:
+    """Drop editions past ``KEEP_DAYS`` unless they are a paper's newest (its
+    last good page), everything past ``LAST_GOOD_MAX_DAYS``, and temp files an
+    interrupted write left behind; each only once it has gone unused for
+    ``PRUNE_GRACE_S``, since a renderer may still be loading a page a render
+    handed out a moment ago."""
+    found: list[tuple[Path, str, date]] = []
+    newest: dict[str, date] = {}
+    for path in pages.glob("*.jpg"):
+        parsed = _page_day(path.name)
+        if parsed is not None:
+            found.append((path, *parsed))
+            newest[parsed[0]] = max(parsed[1], newest.get(parsed[0], parsed[1]))
+    doomed = list(pages.glob(".*.tmp"))
+    for path, code, day in found:
+        age = (today - day).days
+        if age > LAST_GOOD_MAX_DAYS or (age > KEEP_DAYS and day != newest[code]):
+            doomed.append(path)
+    for path in doomed:
+        identity = _identity(path)
+        if identity is not None and now - identity[2] / 1e9 > PRUNE_GRACE_S:
+            _unlink_if_same(path, identity)
+
+
+# ----- rotation --------------------------------------------------------------
 
 
 def rotation(enabled: list[str], last: str | None) -> list[str]:
@@ -490,13 +483,9 @@ def rotation(enabled: list[str], last: str | None) -> list[str]:
 
 def plan(enabled: list[str], state: dict[str, Any], now: float) -> tuple[list[str], str | None]:
     """The codes this render tries, in order, and the paper being held, if any.
-
-    The rotation moves at most once per ``ROTATION_HOLD_S``. Tesserae composes
-    a page ahead of a scheduled send (warm-ahead, sometimes twice) and can
-    follow a send up, all as non-preview renders; moving on for each would
-    spend papers the panel never shows. Inside the hold the current paper
-    comes first; after it, the next one does. The caller skips a paper with no
-    page, so one dead code doesn't stall the rotation."""
+    Inside ``ROTATION_HOLD_S`` of the last move the current paper comes first;
+    after it, the next one does. The caller skips a paper with no page, so one
+    dead code doesn't stall the rotation."""
     current = state.get("current")
     current = current if isinstance(current, str) else None
     since = state.get("since")
@@ -507,60 +496,212 @@ def plan(enabled: list[str], state: dict[str, Any], now: float) -> tuple[list[st
     return order, None
 
 
-def _merge_attempts(state: dict[str, Any], shelf: Shelf) -> bool:
-    """Fold this call's download attempts into ``state``; entries past the
-    recheck window are dropped, since they no longer hold anything back."""
-    if not shelf.attempts:
-        return False
-    old = state.get("checked")
-    merged = {**(old if isinstance(old, dict) else {}), **shelf.attempts}
-    state["checked"] = {
-        code: when
-        for code, when in merged.items()
-        if isinstance(when, (int, float)) and shelf.now - when < RECHECK_S
-    }
-    return True
+def _section(state: dict[str, Any], name: str) -> dict[str, Any]:
+    value = state.get(name)
+    return dict(value) if isinstance(value, dict) else {}
 
 
-def _settle(
-    shelf: Shelf, state_path: Path, chosen: tuple[str, Page] | None, *, advance: bool
-) -> tuple[str, Page] | None:
-    """Claim the chosen page, prune, and record the download attempts and (when
-    ``advance``) the paper shown. The lock covers only this file work, never a
-    download, and is waited for only while the budget lasts; without it the
-    page goes out as it is and nothing is recorded."""
-    if not _LOCK.acquire(timeout=max(0.0, shelf.deadline - _clock())):
-        logger.info("%s: busy, serving the page without bookkeeping", PLUGIN_ID)
-        return chosen
+def _recently_checked(state: dict[str, Any], code: str, now: float) -> bool:
+    last = _section(state, "checked").get(code)
+    return isinstance(last, (int, float)) and 0 <= now - last < RECHECK_S
+
+
+# ----- the download worker ---------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Job:
+    """Fetch the newest edition of ``code`` as of ``today``."""
+
+    code: str
+    today: date
+    force: bool = False  # ?fresh=1: skip the recheck wait
+
+    @property
+    def key(self) -> tuple[str, date]:
+        return self.code, self.today
+
+
+@dataclass
+class _Run:
+    """One worker thread and its queue, for one data dir. Renders add to the
+    queue while it runs; it ends when the queue is empty."""
+
+    data_dir: Path
+    queue: list[_Job] = field(default_factory=list)
+    active: _Job | None = None
+    done: bool = False
+    thread: threading.Thread | None = None
+
+    def busy(self) -> set[tuple[str, date]]:
+        keys = {job.key for job in self.queue}
+        if self.active is not None:
+            keys.add(self.active.key)
+        return keys
+
+    def alive(self) -> bool:
+        return not self.done and self.thread is not None and self.thread.is_alive()
+
+
+_RUNS: dict[str, _Run] = _shared("runs", dict)
+
+
+def _enqueue(data_dir: Path, codes: list[str], today: date, *, force: bool) -> None:
+    """Queue a job per code unless one for that paper and day is queued or
+    running, starting the worker if none runs. The worker runs in a copy of
+    this render's context, so the capability scope (the ``requires:`` hosts)
+    applies to its downloads too."""
+    with _RUNS_LOCK:
+        run = _RUNS.get(str(data_dir))
+        start = run is None or not run.alive()
+        if start:
+            run = _RUNS[str(data_dir)] = _Run(data_dir)
+        assert run is not None
+        known = run.busy()
+        for code in codes:
+            job = _Job(code, today, force)
+            if job.key not in known:
+                run.queue.append(job)
+                known.add(job.key)
+        if start and run.queue:
+            context = contextvars.copy_context()
+            run.thread = threading.Thread(
+                target=context.run, args=(_work, run), name=f"{PLUGIN_ID}-downloads", daemon=True
+            )
+            run.thread.start()
+
+
+def _pending(data_dir: Path) -> set[str]:
+    """Codes with a download queued or running."""
+    with _RUNS_LOCK:
+        run = _RUNS.get(str(data_dir))
+        return {code for code, _ in run.busy()} if run is not None and run.alive() else set()
+
+
+def _join_worker(data_dir: Path, timeout: float) -> bool:
+    """Wait for the data dir's worker to finish; True when it has (tests)."""
+    with _RUNS_LOCK:
+        run = _RUNS.get(str(data_dir))
+        thread = run.thread if run is not None else None
+    if thread is not None:
+        thread.join(timeout)
+    return thread is None or not thread.is_alive()
+
+
+def _report(job: _Job, waiting: int) -> None:
+    if jobs is None:
+        return
+    with contextlib.suppress(Exception):
+        jobs.report(
+            PLUGIN_ID,
+            "download",
+            "Fetching front pages",
+            progress=None,
+            detail=f"{job.code}, {waiting} more" if waiting else job.code,
+            label="Front pages",
+        )
+
+
+def _work(run: _Run) -> None:
+    """Drain the run's queue, one job at a time. Whatever happens, the run
+    ends marked done with nothing active, so the next render starts a fresh
+    worker rather than waiting on a dead one."""
     try:
-        if chosen is not None:
-            code, page = chosen
-            claimed = shelf.claim(code, page)
-            chosen = (code, claimed) if claimed is not None else None
-        if shelf.downloaded:
-            shelf.prune()
-        state = _read_json(state_path)
-        changed = _merge_attempts(state, shelf)
-        # A call past its budget may already have been abandoned by the
-        # composer, which then showed the previous result; it must not move
-        # the rotation on for a paper the panel never got.
-        if advance and chosen is not None and _clock() < shelf.deadline:
-            state["current"], state["since"] = chosen[0], shelf.now
-            changed = True
-        if changed:
-            _write_json(state_path, state)
+        while True:
+            with _RUNS_LOCK:
+                if not run.queue:
+                    break
+                job = run.queue.pop(0)
+                run.active = job
+                waiting = len(run.queue)
+            _report(job, waiting)
+            _refresh(run.data_dir, job)
+    except Exception:
+        logger.exception("%s: the download worker stopped", PLUGIN_ID)
     finally:
-        _LOCK.release()
-    return chosen
+        with _RUNS_LOCK:
+            run.active = None
+            run.done = True
+        if jobs is not None:
+            with contextlib.suppress(Exception):
+                jobs.finish(PLUGIN_ID, "download")
+
+
+def _refresh(data_dir: Path, job: _Job) -> None:
+    """One job: look at the state again (the render that queued it read it
+    before earlier jobs landed), download outside the lock, save under it."""
+    pages = data_dir / PAGES_DIR
+    state_path = data_dir / STATE_FILE
+    with _LOCK:
+        state = _read_json(state_path)
+        if not job.force and _recently_checked(state, job.code, _wall()):
+            return
+        have = newest_page(pages, job.code, job.today)
+    if have is not None and have.day >= job.today:
+        return
+    saved: tuple[date, bytes] | None = None
+    failure = "missing"
+    for back in range(LOOKBACK_DAYS):
+        day = job.today - timedelta(days=back)
+        if have is not None and day <= have.day:
+            break  # nothing older can beat an edition already kept
+        try:
+            body = download_edition(job.code, day)
+        except Exception as err:  # CdnUnreachable, or the host refusing the egress
+            logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
+            failure = "unreachable"
+            break
+        if body is not None:
+            saved = (day, body)
+            break
+    now = _wall()
+    with _LOCK:
+        if saved is not None:
+            try:
+                _write_atomic(edition_path(pages, job.code, saved[0]), saved[1])
+            except OSError as err:
+                logger.warning("%s: could not save %s: %s", PLUGIN_ID, job.code, err)
+                saved = None
+            else:
+                prune(pages, job.today, now)
+        state = _read_json(state_path)
+        state["checked"] = {
+            code: when
+            for code, when in {**_section(state, "checked"), job.code: now}.items()
+            if isinstance(when, (int, float)) and now - when < RECHECK_S
+        }
+        failed = _section(state, "failed")
+        failed.pop(job.code, None)
+        if saved is None and have is None:
+            failed[job.code] = failure
+        state["failed"] = failed
+        _write_json(state_path, state)
 
 
 # ----- widget contract: fetch ------------------------------------------------
 
 
+def _fallback(key: tuple[str, str], now: float) -> dict[str, Any]:
+    """For a render that couldn't have the lock in time: the last page this
+    placement got under the lock, if it's recent enough that pruning can't
+    have taken it, else the fetching state, retried shortly."""
+    last = _LAST_CLAIMED.get(key)
+    if last is not None and 0 <= now - last[0] < PRUNE_GRACE_S / 2:
+        return dict(last[1])
+    return {"pending": True, "live_refresh_s": LIVE_REFRESH_S}
+
+
+def _missing_error(codes: list[str], state: dict[str, Any], pinned: str | None) -> dict[str, Any]:
+    failed = _section(state, "failed")
+    if codes and all(failed.get(code) == "unreachable" for code in codes):
+        return {"error": "Couldn't reach Freedom Forum, and no front page is saved yet."}
+    which = f"{pinned} front page" if pinned else "front page from the paper list"
+    return {"error": f"No {which} in the last {LOOKBACK_DAYS} days."}
+
+
 def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
-    deadline = _clock() + FETCH_BUDGET_S
     papers = parse_papers(settings.get("papers", DEFAULT_PAPERS))
     pinned_raw = str(options.get("paper") or "").strip()
     pinned = clean_code(pinned_raw) if pinned_raw else None
@@ -573,38 +714,49 @@ def fetch(
         }
 
     data_dir = Path(ctx["data_dir"])
+    pages = data_dir / PAGES_DIR
     state_path = data_dir / STATE_FILE
-    state = _read_json(state_path)  # always replaced whole, so read without the lock
+    today = _edition_today()
     now = _wall()
-    checked = state.get("checked")
-    shelf = Shelf(
-        data_dir,
-        today=_edition_today(),
-        now=now,
-        deadline=deadline,
-        checked=checked if isinstance(checked, dict) else {},
-        fresh=bool(ctx.get("fresh")),
-    )
-    order, held = (candidates, None) if pinned else plan(candidates, state, now)
-    chosen: tuple[str, Page] | None = None
-    for code in order:
-        page = shelf.page_for(code)
-        if page is not None:
-            chosen = (code, page)
-            break
-    # A preview (the editor, the dashboards list) shows what the panel gets
-    # next but never moves the rotation; repeating the held paper doesn't either.
-    advance = chosen is not None and not pinned and not ctx.get("preview") and chosen[0] != held
-    chosen = _settle(shelf, state_path, chosen, advance=advance)
+    force = bool(ctx.get("fresh"))
+    key = (str(data_dir), pinned or "")
+    if not _LOCK.acquire(timeout=LOCK_WAIT_S):
+        logger.info("%s: state busy, answering from the last page handed out", PLUGIN_ID)
+        return _fallback(key, now)
+    try:
+        state = _read_json(state_path)
+        order, held = (candidates, None) if pinned else plan(candidates, state, now)
+        chosen: tuple[str, Page] | None = None
+        for code in order:
+            page = newest_page(pages, code, today)
+            if page is not None and _claim(page):
+                chosen = (code, page)
+                break
+        # A preview (the editor, the dashboards list) shows what the panel gets
+        # next but never moves the rotation; repeating the held paper doesn't either.
+        if chosen and not pinned and not ctx.get("preview") and chosen[0] != held:
+            state["current"], state["since"] = chosen[0], now
+            _write_json(state_path, state)
+        due = [
+            code
+            for code in candidates
+            if not edition_path(pages, code, today).is_file()
+            and (force or not _recently_checked(state, code, now))
+        ]
+    finally:
+        _LOCK.release()
 
+    if due:
+        _enqueue(data_dir, due, today, force=force)
+    pending = _pending(data_dir) & set(candidates)
     if chosen is None:
-        if shelf.offline:
-            return {"error": "Couldn't reach Freedom Forum, and no front page is saved yet."}
-        which = f"{pinned} front page" if pinned else "front page from the paper list"
-        return {"error": f"No {which} in the last {LOOKBACK_DAYS} days."}
+        if pending:
+            return {"pending": True, "live_refresh_s": LIVE_REFRESH_S, "live_pending": len(pending)}
+        return _missing_error(candidates, state, pinned)
+
     code, page = chosen
     trims = {p.code: p.trim for p in papers}
-    return {
+    payload: dict[str, Any] = {
         "url": f"/plugins/{PLUGIN_ID}/page/{page.path.name}",
         "code": code,
         "date": page.day.isoformat(),
@@ -612,6 +764,11 @@ def fetch(
         "height": page.height,
         "trim": trims.get(code, 0.0),
     }
+    _LAST_CLAIMED[key] = (now, payload)
+    if code in pending:
+        # Only the shown paper's download changes this frame.
+        return {**payload, "live_refresh_s": LIVE_REFRESH_S, "live_pending": 1}
+    return payload
 
 
 # ----- widget contract: choices ---------------------------------------------

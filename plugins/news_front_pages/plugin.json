@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "kind": "widget",
   "locales": ["en"],
-  "description": "Today's newspaper front pages from the Freedom Forum archive, one paper per render, filling the cell's width from the top. Rotates through the papers listed under Settings → Widgets → News, Front Pages, or shows one pinned paper. Keeps the last good page when a paper isn't out yet. No API key needed.",
+  "description": "Today's newspaper front pages from the Freedom Forum archive, one paper per render, filling the cell's width from the top. Rotates through the papers listed under Settings → Widgets → News, Front Pages, or shows one pinned paper. The rotation moves on at most once every four minutes, so a send prepared ahead of time and its follow-ups show one paper; that approximates one paper per shown frame, and two sends within four minutes repeat a paper. Pages download in the background, and the last good page stays up while a paper isn't out yet. No API key needed.",
   "icon": "ph-newspaper",
   "category": "reading",
   "supports": {
@@ -37,7 +37,8 @@
   "render": {
     "dither": "floyd-steinberg",
     "needs_network": true,
-    "full_bleed": true
+    "full_bleed": true,
+    "warm_ahead_s": 60
   },
   "requires": [
     "network:cdn.freedomforum.org",
