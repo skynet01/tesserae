@@ -25,18 +25,20 @@ quirks shape the code below:
 Layout under ``data_dir``::
 
     pages/<CODE>_<YYYYMMDD>.jpg   one validated download per paper and edition
-    state.json                    rotation cursor + when each paper was last looked for
+    state.json                    paper shown + since when, and when each paper was last looked for
     directory.json                Freedom Forum's paper list, for the editor's picker
 
-A downloaded edition is kept until it is more than ``KEEP_DAYS`` old and a
-newer one exists, so a paper whose download fails keeps showing its last good
-page, up to ``LAST_GOOD_MAX_DAYS``.
+A downloaded edition is kept until it is more than ``KEEP_DAYS`` old, a
+newer one exists and it has gone unused for ``PRUNE_GRACE_S``, so a paper
+whose download fails keeps showing its last good page, up to
+``LAST_GOOD_MAX_DAYS``.
 """
 
 from __future__ import annotations
 
 import contextlib
 import html
+import http.client
 import io
 import json
 import logging
@@ -72,9 +74,13 @@ PAGE_URL = "https://cdn.freedomforum.org/dfp/jpg{day}/lg/{code}.jpg"
 SITEMAP_URL = "https://frontpages.freedomforum.org/sitemap.xml"
 USER_AGENT = f"tesserae/0.1 (+{PLUGIN_ID})"
 
-# The composer gives a widget's fetch() about six seconds; one slow request
-# must not spend all of it.
-HTTP_TIMEOUT_S = 5.0
+# The composer waits about six seconds for one widget's fetch(), then shows its
+# previous result and leaves the call running. Everything here, lock waits
+# included, fits in this budget, and a call that overruns it never moves the
+# rotation (see _settle).
+FETCH_BUDGET_S = 4.5
+HTTP_TIMEOUT_S = 4.0  # per socket operation, and never past the budget
+READ_CHUNK_BYTES = 64 * 1024
 # choices() runs while the page editor loads, for every widget installed.
 DIRECTORY_TIMEOUT_S = 4.0
 
@@ -87,7 +93,10 @@ STALE_SLOT_DAYS = 3
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 MIN_IMAGE_EDGE_PX = 300
 MAX_TRIM_PCT = 25.0
-TEMP_MAX_AGE_S = 60 * 60
+# Warm-ahead, the send and its follow-ups all show the paper picked first.
+ROTATION_HOLD_S = 4 * 60
+# A page stays this long after its last use before pruning may delete it.
+PRUNE_GRACE_S = 60 * 60
 
 DIRECTORY_TTL_S = 7 * 24 * 60 * 60
 DIRECTORY_RETRY_S = 60 * 60
@@ -131,9 +140,13 @@ FALLBACK_DIRECTORY: dict[str, str] = {
     "WA_ST": "The Seattle Times",
 }
 
-# Serialises rotation and downloads: two renders at once would otherwise both
-# read the same cursor and show the same paper.
+# Guards the state file and pruning (see _settle); never held across a download.
 _LOCK = threading.Lock()
+
+# Clocks, as module names so tests can drive them: wall time is persisted
+# (rotation, recheck), the monotonic one times the fetch budget.
+_wall = time.time
+_clock = time.monotonic
 
 
 class CdnUnreachable(Exception):
@@ -238,31 +251,52 @@ def _slot_is_stale(last_modified: str | None, day: date) -> bool:
     return modified.date() < day - timedelta(days=STALE_SLOT_DAYS)
 
 
-def is_page_image(body: bytes) -> bool:
-    """True for a complete JPEG or PNG big enough to be a front page. The CDN
-    answers a missing paper with a 404 page, but a proxy or a captive portal
-    can hand back HTML with a 200, and a cut-off download decodes as a page
-    with a grey bottom; neither may replace a good page. ``load()`` rather
-    than ``verify()``: for a JPEG, only a full decode notices truncation."""
+def page_size(body: bytes) -> tuple[int, int] | None:
+    """The pixel size of a complete JPEG or PNG big enough to be a front page,
+    or None. The CDN answers a missing paper with a 404 page, but a proxy or a
+    captive portal can hand back HTML with a 200, and a cut-off download
+    decodes as a page with a grey bottom; neither may stand in for a good page.
+    ``load()`` rather than ``verify()``: for a JPEG, only a full decode notices
+    truncation."""
     try:
         with Image.open(io.BytesIO(body)) as img:
-            fmt, (width, height) = img.format, img.size
+            fmt, size = img.format, img.size
             img.load()
     except Exception:  # Pillow raises a zoo of types for a broken file
-        return False
-    return fmt in ("JPEG", "PNG") and min(width, height) >= MIN_IMAGE_EDGE_PX
+        return None
+    return size if fmt in ("JPEG", "PNG") and min(size) >= MIN_IMAGE_EDGE_PX else None
 
 
-def download_edition(code: str, day: date) -> bytes | None:
+def _read_capped(resp: Any, deadline: float) -> bytes:
+    """The response body, read in chunks so a trickling download can't outlive
+    the render's budget, stopping one byte past ``MAX_IMAGE_BYTES``."""
+    chunks: list[bytes] = []
+    total = 0
+    while total <= MAX_IMAGE_BYTES:
+        if _clock() >= deadline:
+            raise CdnUnreachable("out of time")
+        chunk = resp.read(min(READ_CHUNK_BYTES, MAX_IMAGE_BYTES + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
+def download_edition(code: str, day: date, deadline: float) -> bytes | None:
     """The ``code`` front page for ``day``, validated, or None when that
-    edition isn't there. Raises :class:`CdnUnreachable` when the CDN fails."""
+    edition isn't there. Raises :class:`CdnUnreachable` when the CDN fails or
+    the render's budget (``deadline``, on ``_clock``) runs out."""
+    remaining = deadline - _clock()
+    if remaining <= 0:
+        raise CdnUnreachable("out of time")
     url = PAGE_URL.format(day=day.day, code=code)
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT, "Accept": "image/jpeg,image/*;q=0.8"}
     )
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as resp:
-            body: bytes = resp.read(MAX_IMAGE_BYTES + 1)
+        with urllib.request.urlopen(request, timeout=min(HTTP_TIMEOUT_S, remaining)) as resp:
+            body = _read_capped(resp, deadline)
             headers = getattr(resp, "headers", None)
             last_modified = headers.get("Last-Modified") if headers is not None else None
     except urllib.error.HTTPError as err:
@@ -270,18 +304,29 @@ def download_edition(code: str, day: date) -> bytes | None:
         if err.code == 404:
             return None
         raise CdnUnreachable(f"HTTP {err.code}") from err
-    except (urllib.error.URLError, TimeoutError, OSError) as err:
-        raise CdnUnreachable(str(getattr(err, "reason", err))) from err
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as err:
+        # HTTPException covers a response cut off mid-body (IncompleteRead).
+        raise CdnUnreachable(str(getattr(err, "reason", None) or err)) from err
     if len(body) > MAX_IMAGE_BYTES or _slot_is_stale(last_modified, day):
         logger.info("%s: %s for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
         return None
-    if not is_page_image(body):
+    if page_size(body) is None:
         logger.info("%s: %s for %s is not an image", PLUGIN_ID, code, day)
         return None
     return body
 
 
-# ----- the shelf: pages on disk + state --------------------------------------
+# ----- the shelf: pages on disk ----------------------------------------------
+
+
+@dataclass(frozen=True)
+class Page:
+    """A saved edition that decoded as a front page."""
+
+    path: Path
+    day: date
+    width: int
+    height: int
 
 
 def _page_day(name: str) -> tuple[str, date] | None:
@@ -295,89 +340,125 @@ def _page_day(name: str) -> tuple[str, date] | None:
 
 
 class Shelf:
-    """The downloaded pages and the rotation state, for one fetch() call."""
+    """The saved pages, as one fetch() call sees them, and the downloads it may
+    still make within its budget. Holds no lock: only :func:`_settle` does."""
 
-    def __init__(self, data_dir: Path, *, today: date, now: float, fresh: bool = False) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        today: date,
+        now: float,
+        deadline: float,
+        checked: dict[str, Any],
+        fresh: bool = False,
+    ) -> None:
         self.pages = data_dir / PAGES_DIR
-        self.state_path = data_dir / STATE_FILE
         self.today = today
         self.now = now
+        self.deadline = deadline
         self.fresh = fresh
-        self.state = _read_json(self.state_path)
+        self.checked = checked  # code -> wall time of the last download attempt
+        self.attempts: dict[str, float] = {}  # the attempts this call made
         self.offline = False
         self.downloaded = False
-        self._dirty = False
-
-    @property
-    def last_shown(self) -> str | None:
-        last = self.state.get("last")
-        return last if isinstance(last, str) else None
-
-    def mark_shown(self, code: str) -> None:
-        if self.state.get("last") != code:
-            self.state["last"] = code
-            self._dirty = True
 
     def edition_path(self, code: str, day: date) -> Path:
         return self.pages / f"{code}_{day:%Y%m%d}.jpg"
 
-    def newest(self, code: str) -> tuple[Path, date] | None:
-        """The paper's newest edition on disk, if it isn't too old to show."""
+    def newest(self, code: str) -> Page | None:
+        """The paper's newest edition on disk that decodes and isn't too old to
+        show. A file that doesn't decode (zero bytes, damaged) is deleted on
+        the way, so it can neither hide an older good page nor stand in for
+        today's and block the download that would replace it."""
         oldest = self.today - timedelta(days=LAST_GOOD_MAX_DAYS)
-        best: tuple[Path, date] | None = None
+        dated: list[tuple[date, Path]] = []
         for path in self.pages.glob(f"{code}_*.jpg"):
             parsed = _page_day(path.name)
-            if parsed is None or parsed[0] != code or not oldest <= parsed[1] <= self.today:
+            if parsed is not None and parsed[0] == code and oldest <= parsed[1] <= self.today:
+                dated.append((parsed[1], path))
+        for day, path in sorted(dated, reverse=True):
+            try:
+                size = page_size(path.read_bytes())
+            except OSError:
                 continue
-            if best is None or parsed[1] > best[1]:
-                best = (path, parsed[1])
-        return best
+            if size is not None:
+                return Page(path, day, *size)
+            logger.warning("%s: removing unreadable %s", PLUGIN_ID, path.name)
+            with contextlib.suppress(OSError):
+                path.unlink()
+        return None
 
-    def page_for(self, code: str) -> tuple[Path, date] | None:
-        """Today's edition if it is (or can now be) on disk, else the newest one kept."""
-        if not self.edition_path(code, self.today).is_file() and self._due(code):
-            self._fetch_newest(code)
-        return self.newest(code)
+    def page_for(self, code: str) -> Page | None:
+        """Today's edition when it is saved or can be fetched now, else the newest one kept."""
+        page = self.newest(code)
+        stale = page is None or page.day < self.today
+        if stale and self._due(code) and self._fetch_newer(code, page.day if page else None):
+            page = self.newest(code)
+        return page
 
     def _due(self, code: str) -> bool:
-        if self.offline:
+        if self.offline or _clock() >= self.deadline:
             return False
         if self.fresh:
             return True
-        checked = self.state.get("checked")
-        last = checked.get(code) if isinstance(checked, dict) else None
+        last = self.checked.get(code)
         return not isinstance(last, (int, float)) or self.now - last >= RECHECK_S
 
-    def _fetch_newest(self, code: str) -> None:
-        checked = self.state.get("checked")
-        if not isinstance(checked, dict):
-            checked = self.state["checked"] = {}
-        checked[code] = self.now
-        self._dirty = True
+    def _fetch_newer(self, code: str, have: date | None) -> bool:
+        """Download the newest edition in the lookback newer than ``have``;
+        True when one was saved."""
+        self.attempts[code] = self.now
         for back in range(LOOKBACK_DAYS):
             day = self.today - timedelta(days=back)
-            path = self.edition_path(code, day)
-            if path.is_file():
-                return  # nothing older can beat an edition already kept
+            if have is not None and day <= have:
+                return False  # nothing older can beat an edition already kept
             try:
-                body = download_edition(code, day)
+                body = download_edition(code, day, self.deadline)
             except CdnUnreachable as err:
                 logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
                 self.offline = True
-                return
+                return False
             if body is not None:
                 try:
-                    _write_atomic(path, body)
+                    _write_atomic(self.edition_path(code, day), body)
                 except OSError as err:
-                    logger.warning("%s: could not save %s: %s", PLUGIN_ID, path.name, err)
-                    return
+                    logger.warning("%s: could not save %s: %s", PLUGIN_ID, day, err)
+                    return False
                 self.downloaded = True
-                return
+                return True
+        return False
+
+    def claim(self, code: str, page: Page) -> Page | None:
+        """Mark ``page`` as just used (its mtime), so :meth:`prune` leaves it
+        alone for ``PRUNE_GRACE_S``. Called under the lock, like pruning, so a
+        page is either claimed first and kept, or pruned first and replaced
+        here by the newest page left."""
+        try:
+            os.utime(page.path)
+            return page
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return page
+        replacement = self.newest(code)
+        if replacement is not None:
+            with contextlib.suppress(OSError):
+                os.utime(replacement.path)
+        return replacement
+
+    def _idle(self, path: Path) -> bool:
+        try:
+            return self.now - path.stat().st_mtime > PRUNE_GRACE_S
+        except OSError:
+            return False
 
     def prune(self) -> None:
         """Drop editions past ``KEEP_DAYS`` unless they are a paper's newest
         (its last good page), everything past ``LAST_GOOD_MAX_DAYS``, and temp
-        files an interrupted write left behind."""
+        files an interrupted write left behind; each only once it has gone
+        unused for ``PRUNE_GRACE_S``, since a renderer may still be loading a
+        page another render handed out a moment ago."""
         found: list[tuple[Path, str, date]] = []
         newest: dict[str, date] = {}
         for path in self.pages.glob("*.jpg"):
@@ -387,45 +468,99 @@ class Shelf:
             code, day = parsed
             found.append((path, code, day))
             newest[code] = max(day, newest.get(code, day))
+        doomed = list(self.pages.glob(".*.tmp"))
         for path, code, day in found:
             age = (self.today - day).days
             if age > LAST_GOOD_MAX_DAYS or (age > KEEP_DAYS and day != newest[code]):
+                doomed.append(path)
+        for path in doomed:
+            if self._idle(path):
                 with contextlib.suppress(OSError):
                     path.unlink()
-        for tmp in self.pages.glob(".*.tmp"):
-            with contextlib.suppress(OSError):
-                if self.now - tmp.stat().st_mtime > TEMP_MAX_AGE_S:
-                    tmp.unlink()
 
-    def close(self) -> None:
-        if self.downloaded:
-            self.prune()
-        if self._dirty:
-            _write_json(self.state_path, self.state)
+
+# ----- rotation and the state file ------------------------------------------
 
 
 def rotation(enabled: list[str], last: str | None) -> list[str]:
-    """Enabled codes in the order this render tries them: the paper after the
-    one shown last, then on round the list. A paper missing its page is
-    skipped by the caller, so one dead code doesn't stall the rotation."""
+    """Enabled codes from the one after ``last`` on round the list, ``last`` at the end."""
     start = enabled.index(last) + 1 if last in enabled else 0
     return enabled[start:] + enabled[:start]
+
+
+def plan(enabled: list[str], state: dict[str, Any], now: float) -> tuple[list[str], str | None]:
+    """The codes this render tries, in order, and the paper being held, if any.
+
+    The rotation moves at most once per ``ROTATION_HOLD_S``. Tesserae composes
+    a page ahead of a scheduled send (warm-ahead, sometimes twice) and can
+    follow a send up, all as non-preview renders; moving on for each would
+    spend papers the panel never shows. Inside the hold the current paper
+    comes first; after it, the next one does. The caller skips a paper with no
+    page, so one dead code doesn't stall the rotation."""
+    current = state.get("current")
+    current = current if isinstance(current, str) else None
+    since = state.get("since")
+    order = rotation(enabled, current)
+    held = isinstance(since, (int, float)) and 0 <= now - since < ROTATION_HOLD_S
+    if current in enabled and held:
+        return [current, *order[:-1]], current
+    return order, None
+
+
+def _merge_attempts(state: dict[str, Any], shelf: Shelf) -> bool:
+    """Fold this call's download attempts into ``state``; entries past the
+    recheck window are dropped, since they no longer hold anything back."""
+    if not shelf.attempts:
+        return False
+    old = state.get("checked")
+    merged = {**(old if isinstance(old, dict) else {}), **shelf.attempts}
+    state["checked"] = {
+        code: when
+        for code, when in merged.items()
+        if isinstance(when, (int, float)) and shelf.now - when < RECHECK_S
+    }
+    return True
+
+
+def _settle(
+    shelf: Shelf, state_path: Path, chosen: tuple[str, Page] | None, *, advance: bool
+) -> tuple[str, Page] | None:
+    """Claim the chosen page, prune, and record the download attempts and (when
+    ``advance``) the paper shown. The lock covers only this file work, never a
+    download, and is waited for only while the budget lasts; without it the
+    page goes out as it is and nothing is recorded."""
+    if not _LOCK.acquire(timeout=max(0.0, shelf.deadline - _clock())):
+        logger.info("%s: busy, serving the page without bookkeeping", PLUGIN_ID)
+        return chosen
+    try:
+        if chosen is not None:
+            code, page = chosen
+            claimed = shelf.claim(code, page)
+            chosen = (code, claimed) if claimed is not None else None
+        if shelf.downloaded:
+            shelf.prune()
+        state = _read_json(state_path)
+        changed = _merge_attempts(state, shelf)
+        # A call past its budget may already have been abandoned by the
+        # composer, which then showed the previous result; it must not move
+        # the rotation on for a paper the panel never got.
+        if advance and chosen is not None and _clock() < shelf.deadline:
+            state["current"], state["since"] = chosen[0], shelf.now
+            changed = True
+        if changed:
+            _write_json(state_path, state)
+    finally:
+        _LOCK.release()
+    return chosen
 
 
 # ----- widget contract: fetch ------------------------------------------------
 
 
-def _page_size(path: Path) -> tuple[int, int]:
-    try:
-        with Image.open(path) as img:
-            return img.size
-    except Exception:  # a page that won't open still renders, just without a trim
-        return 0, 0
-
-
 def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
+    deadline = _clock() + FETCH_BUDGET_S
     papers = parse_papers(settings.get("papers", DEFAULT_PAPERS))
     pinned_raw = str(options.get("paper") or "").strip()
     pinned = clean_code(pinned_raw) if pinned_raw else None
@@ -437,40 +572,44 @@ def fetch(
             "error": "No papers to show. Add paper codes under Settings → Widgets → News, Front Pages."
         }
 
-    with _LOCK:
-        shelf = Shelf(
-            Path(ctx["data_dir"]),
-            today=_edition_today(),
-            now=time.time(),
-            fresh=bool(ctx.get("fresh")),
-        )
-        order = candidates if pinned else rotation(candidates, shelf.last_shown)
-        found: tuple[str, Path, date] | None = None
-        for code in order:
-            page = shelf.page_for(code)
-            if page is not None:
-                found = (code, *page)
-                break
-        # Only a render headed for a panel moves the rotation on. A preview
-        # (the editor, the dashboards list) shows the paper the panel gets next.
-        if found and not pinned and not ctx.get("preview"):
-            shelf.mark_shown(found[0])
-        shelf.close()
+    data_dir = Path(ctx["data_dir"])
+    state_path = data_dir / STATE_FILE
+    state = _read_json(state_path)  # always replaced whole, so read without the lock
+    now = _wall()
+    checked = state.get("checked")
+    shelf = Shelf(
+        data_dir,
+        today=_edition_today(),
+        now=now,
+        deadline=deadline,
+        checked=checked if isinstance(checked, dict) else {},
+        fresh=bool(ctx.get("fresh")),
+    )
+    order, held = (candidates, None) if pinned else plan(candidates, state, now)
+    chosen: tuple[str, Page] | None = None
+    for code in order:
+        page = shelf.page_for(code)
+        if page is not None:
+            chosen = (code, page)
+            break
+    # A preview (the editor, the dashboards list) shows what the panel gets
+    # next but never moves the rotation; repeating the held paper doesn't either.
+    advance = chosen is not None and not pinned and not ctx.get("preview") and chosen[0] != held
+    chosen = _settle(shelf, state_path, chosen, advance=advance)
 
-    if found is None:
+    if chosen is None:
         if shelf.offline:
             return {"error": "Couldn't reach Freedom Forum, and no front page is saved yet."}
         which = f"{pinned} front page" if pinned else "front page from the paper list"
         return {"error": f"No {which} in the last {LOOKBACK_DAYS} days."}
-    code, path, day = found
-    width, height = _page_size(path)
+    code, page = chosen
     trims = {p.code: p.trim for p in papers}
     return {
-        "url": f"/plugins/{PLUGIN_ID}/page/{path.name}",
+        "url": f"/plugins/{PLUGIN_ID}/page/{page.path.name}",
         "code": code,
-        "date": day.isoformat(),
-        "width": width,
-        "height": height,
+        "date": page.day.isoformat(),
+        "width": page.width,
+        "height": page.height,
         "trim": trims.get(code, 0.0),
     }
 

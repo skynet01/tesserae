@@ -5,6 +5,7 @@ paper-list rules in server.py. Freedom Forum is faked throughout: the fake
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import os
@@ -42,12 +43,20 @@ def _url(code: str, day: int) -> str:
 
 
 class _Resp:
-    def __init__(self, body: bytes, headers: dict[str, str] | None = None) -> None:
-        self._body = body
+    def __init__(
+        self,
+        body: bytes,
+        headers: dict[str, str] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self._body = io.BytesIO(body)
+        self._error = error
         self.headers = headers or {}
 
     def read(self, limit: int = -1) -> bytes:
-        return self._body if limit < 0 else self._body[:limit]
+        if self._error is not None:
+            raise self._error
+        return self._body.read(limit)
 
     def __enter__(self) -> _Resp:
         return self
@@ -56,19 +65,41 @@ class _Resp:
         return None
 
 
+class Clocks:
+    """The wall clock (persisted times; starts at the real time so file mtimes
+    line up) and the monotonic one (the fetch budget), both moved by hand."""
+
+    def __init__(self) -> None:
+        self.wall = time.time()
+        self.mono = 1000.0
+
+
 class FakeCdn:
     """Stand-in for ``urllib.request.urlopen``. ``pages`` maps a URL to a body
-    (or a ``_Resp`` for custom headers); anything else is a 404, or a refused
-    connection when ``down`` is set. Every URL asked for lands in ``calls``."""
+    (or a ``_Resp`` for custom headers or a read error); anything else is a
+    404, or a refused connection when ``down`` is set. Each request takes
+    ``delay`` seconds of the fake monotonic clock, or times out at the
+    timeout it was given. Every URL asked for lands in ``calls``."""
 
-    def __init__(self, pages: dict[str, bytes | _Resp] | None = None) -> None:
+    def __init__(
+        self, pages: dict[str, bytes | _Resp] | None = None, clocks: Clocks | None = None
+    ) -> None:
         self.pages = pages or {}
         self.calls: list[str] = []
         self.down = False
+        self.delay = 0.0
+        self.clocks = clocks
+        self.lock_free_during_requests = True
 
     def __call__(self, req: Any, timeout: float | None = None) -> _Resp:
         url = req if isinstance(req, str) else req.full_url
         self.calls.append(url)
+        self.lock_free_during_requests &= not server._LOCK.locked()
+        if self.clocks is not None and self.delay:
+            if timeout is not None and self.delay > timeout:
+                self.clocks.mono += timeout
+                raise TimeoutError("timed out")
+            self.clocks.mono += self.delay
         if self.down:
             raise urllib.error.URLError("connection refused")
         hit = self.pages.get(url)
@@ -78,8 +109,16 @@ class FakeCdn:
 
 
 @pytest.fixture
-def cdn(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeCdn]:
-    fake = FakeCdn()
+def clocks(monkeypatch: pytest.MonkeyPatch) -> Clocks:
+    c = Clocks()
+    monkeypatch.setattr(server, "_wall", lambda: c.wall)
+    monkeypatch.setattr(server, "_clock", lambda: c.mono)
+    return c
+
+
+@pytest.fixture
+def cdn(monkeypatch: pytest.MonkeyPatch, clocks: Clocks) -> Iterator[FakeCdn]:
+    fake = FakeCdn(clocks=clocks)
     monkeypatch.setattr(server, "_edition_today", lambda: TODAY)
     with patch("urllib.request.urlopen", fake):
         yield fake
@@ -98,11 +137,19 @@ def _fetch(
     return server.fetch({"paper": paper}, settings, ctx=ctx)
 
 
-def _seed(tmp_path: Path, name: str, body: bytes = PAGE) -> Path:
+def _seed(tmp_path: Path, name: str, body: bytes = PAGE, *, idle_s: float = 0.0) -> Path:
+    """Save a page, last used ``idle_s`` seconds ago."""
     path = tmp_path / "pages" / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(body)
+    if idle_s:
+        then = time.time() - idle_s
+        os.utime(path, (then, then))
     return path
+
+
+def _state(tmp_path: Path) -> dict[str, Any]:
+    return server._read_json(tmp_path / "state.json")
 
 
 # ----- rendering through the app ---------------------------------------------
@@ -173,36 +220,80 @@ def test_parse_papers_skips_what_it_cannot_read() -> None:
 # ----- rotation --------------------------------------------------------------
 
 
-def test_rotation_advances_one_paper_per_render(tmp_path: Path, cdn: FakeCdn) -> None:
-    cdn.pages = {_url(c, 25): PAGE for c in ("NY_NYT", "WSJ", "USAT")}
-    shown = [_fetch(tmp_path)["code"] for _ in range(4)]
-    assert shown == ["NY_NYT", "WSJ", "USAT", "NY_NYT"]
-    assert json.loads((tmp_path / "state.json").read_text())["last"] == "NY_NYT"
+def _sends(tmp_path: Path, clocks: Clocks, count: int, **kw: Any) -> list[str]:
+    """``count`` panel renders, each a hold window after the last."""
+    shown = []
+    for _ in range(count):
+        shown.append(_fetch(tmp_path, **kw)["code"])
+        clocks.wall += server.ROTATION_HOLD_S
+    return shown
 
 
-def test_preview_shows_the_next_paper_without_advancing(tmp_path: Path, cdn: FakeCdn) -> None:
+def test_rotation_moves_one_paper_per_send(tmp_path: Path, cdn: FakeCdn, clocks: Clocks) -> None:
     cdn.pages = {_url(c, 25): PAGE for c in ("NY_NYT", "WSJ", "USAT")}
-    assert _fetch(tmp_path)["code"] == "NY_NYT"
-    assert _fetch(tmp_path, preview=True)["code"] == "WSJ"
-    assert _fetch(tmp_path, preview=True)["code"] == "WSJ"
+    assert _sends(tmp_path, clocks, 4) == ["NY_NYT", "WSJ", "USAT", "NY_NYT"]
+    assert _state(tmp_path)["current"] == "NY_NYT"
+
+
+def test_warm_ahead_send_and_follow_up_show_one_paper(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
+    """Warm-ahead composes for a send without sending, maybe twice; the send
+    and its follow-up come after. All are non-preview renders."""
+    cdn.pages = {_url(c, 25): PAGE for c in ("NY_NYT", "WSJ", "USAT")}
+    shown = []
+    for step in (0, 30, 120, 30):  # warm, warm, send, follow-up
+        clocks.wall += step
+        shown.append(_fetch(tmp_path)["code"])
+    assert shown == ["NY_NYT"] * 4
+    clocks.wall += server.ROTATION_HOLD_S
     assert _fetch(tmp_path)["code"] == "WSJ"
 
 
-def test_rotation_skips_a_paper_without_a_page(tmp_path: Path, cdn: FakeCdn) -> None:
+def test_preview_never_moves_the_rotation(tmp_path: Path, cdn: FakeCdn, clocks: Clocks) -> None:
+    cdn.pages = {_url(c, 25): PAGE for c in ("NY_NYT", "WSJ", "USAT")}
+    assert _fetch(tmp_path)["code"] == "NY_NYT"
+    assert _fetch(tmp_path, preview=True)["code"] == "NY_NYT"  # still held
+    clocks.wall += server.ROTATION_HOLD_S
+    assert _fetch(tmp_path, preview=True)["code"] == "WSJ"  # what the next send gets
+    assert _fetch(tmp_path, preview=True)["code"] == "WSJ"
+    assert _state(tmp_path)["current"] == "NY_NYT"
+    assert _fetch(tmp_path)["code"] == "WSJ"
+
+
+def test_rotation_skips_a_paper_without_a_page(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
     cdn.pages = {_url("NY_NYT", 25): PAGE, _url("USAT", 25): PAGE}  # no WSJ at all
-    assert [_fetch(tmp_path)["code"] for _ in range(3)] == ["NY_NYT", "USAT", "NY_NYT"]
+    assert _sends(tmp_path, clocks, 3) == ["NY_NYT", "USAT", "NY_NYT"]
 
 
-def test_disabled_papers_are_left_out(tmp_path: Path, cdn: FakeCdn) -> None:
+def test_a_held_paper_that_lost_its_page_moves_on(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
     cdn.pages = {_url(c, 25): PAGE for c in ("NY_NYT", "WSJ")}
-    papers = "# NY_NYT\nWSJ"
-    assert [_fetch(tmp_path, papers=papers)["code"] for _ in range(2)] == ["WSJ", "WSJ"]
+    assert _fetch(tmp_path)["code"] == "NY_NYT"
+    (tmp_path / "pages" / "NY_NYT_20261025.jpg").unlink()
+    cdn.pages.pop(_url("NY_NYT", 25))
+    clocks.wall += 10
+    assert _fetch(tmp_path, fresh=True)["code"] == "WSJ"
+    assert _state(tmp_path)["current"] == "WSJ"
 
 
-def test_rotation_order_helper() -> None:
+def test_disabled_papers_are_left_out(tmp_path: Path, cdn: FakeCdn, clocks: Clocks) -> None:
+    cdn.pages = {_url(c, 25): PAGE for c in ("NY_NYT", "WSJ")}
+    assert _sends(tmp_path, clocks, 2, papers="# NY_NYT\nWSJ") == ["WSJ", "WSJ"]
+
+
+def test_rotation_and_plan_helpers() -> None:
     assert server.rotation(["A", "B", "C"], "B") == ["C", "A", "B"]
     assert server.rotation(["A", "B", "C"], "C") == ["A", "B", "C"]
     assert server.rotation(["A", "B", "C"], "GONE") == ["A", "B", "C"]
+    held = {"current": "B", "since": 1000.0}
+    assert server.plan(["A", "B", "C"], held, 1010.0) == (["B", "C", "A"], "B")
+    later = 1000.0 + server.ROTATION_HOLD_S
+    assert server.plan(["A", "B", "C"], held, later) == (["C", "A", "B"], None)
+    assert server.plan(["A", "C"], held, 1010.0) == (["A", "C"], None)
 
 
 def test_pinned_paper_ignores_the_rotation(tmp_path: Path, cdn: FakeCdn) -> None:
@@ -210,7 +301,7 @@ def test_pinned_paper_ignores_the_rotation(tmp_path: Path, cdn: FakeCdn) -> None
     data = _fetch(tmp_path, paper="tx_hc")
     assert data["code"] == "TX_HC"
     assert data["trim"] == 0.0
-    assert "last" not in server._read_json(tmp_path / "state.json")
+    assert "current" not in _state(tmp_path)
     assert _fetch(tmp_path)["code"] == "NY_NYT"
 
 
@@ -319,30 +410,145 @@ def test_refuses_last_months_file_in_a_reused_slot(tmp_path: Path, cdn: FakeCdn)
 # ----- pruning ---------------------------------------------------------------
 
 
+IDLE = 2 * server.PRUNE_GRACE_S
+
+
 def test_prunes_old_editions_but_keeps_each_papers_last_good(tmp_path: Path, cdn: FakeCdn) -> None:
     keep = [
-        _seed(tmp_path, "NY_NYT_20261021.jpg"),  # within KEEP_DAYS
-        _seed(tmp_path, "WSJ_20261010.jpg"),  # old, but WSJ's newest
+        _seed(tmp_path, "NY_NYT_20261021.jpg", idle_s=IDLE),  # within KEEP_DAYS
+        _seed(tmp_path, "WSJ_20261010.jpg", idle_s=IDLE),  # old, but WSJ's newest
+        _seed(tmp_path, "NY_NYT_20261013.jpg"),  # old and superseded, but just used
     ]
     gone = [
-        _seed(tmp_path, "NY_NYT_20261012.jpg"),  # old and superseded
-        _seed(tmp_path, "AZ_ADS_20260901.jpg"),  # past LAST_GOOD_MAX_DAYS
+        _seed(tmp_path, "NY_NYT_20261012.jpg", idle_s=IDLE),  # old and superseded
+        _seed(tmp_path, "AZ_ADS_20260901.jpg", idle_s=IDLE),  # past LAST_GOOD_MAX_DAYS
+        _seed(tmp_path, ".NY_NYT_20261025.jpg.abc.tmp", idle_s=IDLE),  # interrupted write
     ]
-    tmp = _seed(tmp_path, ".NY_NYT_20261025.jpg.abc.tmp")
-    old = time.time() - 2 * server.TEMP_MAX_AGE_S
-    os.utime(tmp, (old, old))
     cdn.pages = {_url("NY_NYT", 25): PAGE}
     _fetch(tmp_path, paper="NY_NYT")
     assert all(p.exists() for p in keep)
     assert not any(p.exists() for p in gone)
-    assert not tmp.exists()
     assert (tmp_path / "pages" / "NY_NYT_20261025.jpg").exists()
+
+
+def test_a_page_just_handed_out_survives_a_newer_download(tmp_path: Path, cdn: FakeCdn) -> None:
+    """One render serves a 10-day-old last good page; a moment later another
+    downloads today's edition and prunes. The renderer still loading the old
+    page's URL must not get a 404."""
+    old = _seed(tmp_path, "WSJ_20261015.jpg", idle_s=IDLE)
+    cdn.down = True
+    served = _fetch(tmp_path, paper="WSJ")
+    assert served["url"].endswith("/WSJ_20261015.jpg")
+    cdn.down = False
+    cdn.pages = {_url("WSJ", 25): PAGE, _url("USAT", 25): PAGE}
+    assert _fetch(tmp_path, paper="WSJ", fresh=True)["date"] == "2026-10-25"
+    assert old.exists()
+    then = time.time() - IDLE
+    os.utime(old, (then, then))
+    _fetch(tmp_path, paper="USAT")  # the next download prunes it
+    assert not old.exists()
+
+
+def test_claim_falls_back_when_the_page_went_meanwhile(tmp_path: Path, clocks: Clocks) -> None:
+    gone = _seed(tmp_path, "WSJ_20261024.jpg")
+    _seed(tmp_path, "WSJ_20261023.jpg")
+    shelf = server.Shelf(
+        tmp_path, today=TODAY, now=clocks.wall, deadline=clocks.mono + 1, checked={}
+    )
+    page = shelf.newest("WSJ")
+    assert page is not None
+    gone.unlink()
+    claimed = shelf.claim("WSJ", page)
+    assert claimed is not None
+    assert claimed.day == date(2026, 10, 23)
 
 
 def test_too_old_a_page_is_not_shown(tmp_path: Path, cdn: FakeCdn) -> None:
     _seed(tmp_path, "WSJ_20260901.jpg")
     cdn.down = True
     assert "error" in _fetch(tmp_path, paper="WSJ")
+
+
+# ----- damaged saved pages ---------------------------------------------------
+
+
+@pytest.mark.parametrize("body", [b"", PAGE[:2000]], ids=["empty", "damaged"])
+def test_a_damaged_saved_page_falls_back_to_a_good_one(
+    tmp_path: Path, cdn: FakeCdn, body: bytes
+) -> None:
+    broken = _seed(tmp_path, "NY_NYT_20261025.jpg", body)
+    _seed(tmp_path, "NY_NYT_20261024.jpg")
+    cdn.down = True
+    data = _fetch(tmp_path, paper="NY_NYT")
+    assert (data["date"], data["width"], data["height"]) == ("2026-10-24", 700, 1342)
+    assert not broken.exists()
+
+
+def test_a_damaged_saved_page_is_downloaded_again(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
+    broken = _seed(tmp_path, "NY_NYT_20261025.jpg", b"")
+    server._write_json(tmp_path / "state.json", {"checked": {"NY_NYT": clocks.wall}})
+    cdn.pages = {_url("NY_NYT", 25): PAGE}
+    data = _fetch(tmp_path, paper="NY_NYT", fresh=True)
+    assert (data["date"], data["width"]) == ("2026-10-25", 700)
+    assert broken.read_bytes() == PAGE
+
+
+# ----- the fetch budget and the lock -----------------------------------------
+
+
+def test_budget_bounds_downloads_and_serves_a_saved_page(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
+    """Three papers with nothing new could need nine slow requests. The budget
+    stops them, a saved page still goes out, and since the composer has given
+    up on a call this late, the rotation doesn't move."""
+    _seed(tmp_path, "USAT_20261024.jpg")
+    cdn.delay = 2.0
+    start = clocks.mono
+    data = _fetch(tmp_path)
+    assert (data["code"], data["date"]) == ("USAT", "2026-10-24")
+    assert len(cdn.calls) == 3
+    assert clocks.mono - start <= server.FETCH_BUDGET_S
+    state = _state(tmp_path)
+    assert "current" not in state
+    assert "NY_NYT" in state["checked"]
+
+
+def test_downloads_run_outside_the_lock(tmp_path: Path, cdn: FakeCdn) -> None:
+    cdn.pages = {_url("NY_NYT", 25): PAGE}
+    assert _fetch(tmp_path)["code"] == "NY_NYT"
+    assert cdn.calls
+    assert cdn.lock_free_during_requests
+
+
+def test_a_busy_lock_costs_at_most_the_budget(
+    tmp_path: Path, cdn: FakeCdn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "_clock", time.monotonic)
+    monkeypatch.setattr(server, "FETCH_BUDGET_S", 0.2)
+    _seed(tmp_path, "NY_NYT_20261025.jpg")
+    assert server._LOCK.acquire(timeout=1)
+    try:
+        start = time.monotonic()
+        data = _fetch(tmp_path)
+        elapsed = time.monotonic() - start
+    finally:
+        server._LOCK.release()
+    assert data["code"] == "NY_NYT"
+    assert elapsed < 1.0
+    assert "current" not in _state(tmp_path)
+
+
+def test_a_response_cut_off_mid_body_keeps_the_last_good_page(tmp_path: Path, cdn: FakeCdn) -> None:
+    _seed(tmp_path, "NY_NYT_20261024.jpg")
+    cut = _Resp(b"", error=http.client.IncompleteRead(b"partial", 600_000))
+    cdn.pages = {_url("NY_NYT", 25): cut}
+    data = _fetch(tmp_path, paper="NY_NYT")
+    assert data["date"] == "2026-10-24"
+    assert len(cdn.calls) == 1
+    assert "NY_NYT" in _state(tmp_path)["checked"]
 
 
 # ----- the editor's paper picker ---------------------------------------------
