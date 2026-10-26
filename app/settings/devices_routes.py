@@ -157,6 +157,7 @@ def devices_dev_seed() -> Response:
 # -- add / discover / dismiss ------------------------------------------
 
 
+@device_service.holds_instance_file_lock
 def _make_rest_instance(device: Any) -> str | None:
     """Put a freshly created instance on the REST transport and give it a
     token, the same end state as pairing or the card's transport switch.
@@ -273,6 +274,7 @@ def devices_add() -> Response:
     )
 
 
+@device_service.holds_instance_file_lock
 def _apply_rename(device: Any, new_name: str) -> None:
     """Rewrite the instance JSON's ``name`` field + the in-memory manifest,
     then nudge HA discovery to re-publish so its device tile title updates
@@ -327,6 +329,7 @@ def devices_pair_revoke(code: str) -> Response:
 
 
 @bp.post("/settings/devices/<instance_id>/set-transport")
+@device_service.holds_instance_file_lock
 def devices_set_transport(instance_id: str) -> Response:
     """Flip a device instance between MQTT and REST transports.
 
@@ -417,6 +420,7 @@ def devices_set_transport(instance_id: str) -> Response:
 
 
 @bp.post("/settings/devices/<instance_id>/regenerate-token")
+@device_service.holds_instance_file_lock
 def devices_regenerate_token(instance_id: str) -> Response:
     """Mint a fresh access token for a TRMNL device.
 

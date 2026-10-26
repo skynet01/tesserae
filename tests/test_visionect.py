@@ -302,6 +302,74 @@ def test_conform_panel_adopts_the_signs_buffer(tmp_path: Path) -> None:
     assert not visionect.conform_panel(device, (1024, 758), (1440, 2560))
 
 
+def test_conform_panel_never_writes_a_deleted_device_back(tmp_path: Path) -> None:
+    device: Any = FakeDevice("joan", "visionect", SIGN_PANEL, tmp_path / "joan.json")
+    (tmp_path / "joan.json").unlink()  # deleted while the sign's status was in flight
+    assert not visionect.conform_panel(device, (1024, 758), (1440, 2560), lambda: device)
+    assert not (tmp_path / "joan.json").exists()
+    # Still on disk, but no longer in the registry: also left alone.
+    device = FakeDevice("joan", "visionect", SIGN_PANEL, tmp_path / "joan.json")
+    before = (tmp_path / "joan.json").read_text()
+    assert not visionect.conform_panel(device, (1024, 758), (1440, 2560), lambda: None)
+    assert (tmp_path / "joan.json").read_text() == before
+
+
+def test_conform_panel_waits_for_other_instance_file_writers(tmp_path: Path) -> None:
+    """A rename (or any other instance-file save) that runs while the sign
+    conforms the panel isn't lost: both hold the instance-file lock."""
+    import threading
+
+    from app.device_service import INSTANCE_FILE_LOCK
+
+    device: Any = FakeDevice("joan", "visionect", SIGN_PANEL, tmp_path / "joan.json")
+    done = threading.Event()
+    with INSTANCE_FILE_LOCK:
+        worker = threading.Thread(
+            target=lambda: (
+                visionect.conform_panel(device, (1024, 758), (1440, 2560), lambda: device),
+                done.set(),
+            )
+        )
+        worker.start()
+        assert not done.wait(0.3), "conformed while another writer held the file"
+        raw = json.loads(device.path.read_text())
+        raw["name"] = "Desk Joan"  # the rename that was in progress
+        device.path.write_text(json.dumps(raw), encoding="utf-8")
+    assert done.wait(5)
+    worker.join()
+    stored = json.loads(device.path.read_text())
+    assert stored["name"] == "Desk Joan"
+    assert (stored["panel"]["native_w"], stored["panel"]["native_h"]) == (1024, 758)
+
+
+def test_instance_file_writers_hold_the_instance_file_lock() -> None:
+    """Every read-modify-write of an instance file (and delete) is
+    serialised with the Visionect panel conformance."""
+    from app import device_service, trmnl_api
+    from app.settings import devices_routes
+
+    for fn in (
+        device_service.update_instance_panel,
+        device_service.update_instance_gamut,
+        device_service.update_instance_renderer,
+        device_service.set_instance_renderer_id,
+        device_service.update_advertised_gamuts,
+        device_service.set_grey_prompt_dismissed,
+        device_service.sync_renderer_for_firmware,
+        device_service.update_instance_kind,
+        device_service.update_instance_quiet_hours,
+        device_service.update_instance_locale,
+        device_service.update_instance_battery_offset,
+        device_service.delete_instance,
+        devices_routes._apply_rename,
+        devices_routes._make_rest_instance,
+        devices_routes.devices_set_transport,
+        devices_routes.devices_regenerate_token,
+    ):
+        assert "INSTANCE_FILE_LOCK" in fn.__code__.co_names, fn.__name__
+    assert "INSTANCE_FILE_LOCK" in trmnl_api._adopt_reported_panel.__code__.co_names
+
+
 # -- quiet hours --------------------------------------------------------------
 
 

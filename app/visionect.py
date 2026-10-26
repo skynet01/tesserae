@@ -877,10 +877,26 @@ def conform_panel(
     the bound sign's DisplayType is authoritative. Returns True when it
     wrote.
 
-    The file is re-read right before the write and replaced atomically, so
-    readers never see half-written JSON and only the size keys change.
-    ``current`` returns the registry's device object now, which a reload may
-    have replaced; it is patched too."""
+    The read and the write happen under the instance-file lock every
+    instance-file writer holds (a rename, a panel save, a delete), so
+    neither side drops the other's change, and the file is replaced
+    atomically, so readers never see half-written JSON and only the size
+    keys change. ``current`` returns the registry's device object now, which
+    a reload may have replaced; it is patched too. A device deleted, or
+    reloaded from another file, since the caller looked it up is left alone
+    rather than written back to life."""
+    from app.device_service import INSTANCE_FILE_LOCK
+
+    with INSTANCE_FILE_LOCK:
+        live = current() if current is not None else device
+        if live is None or live.path != device.path or not device.path.exists():
+            return False
+        return _write_conformed_panel(device, live, canvas, defaults)
+
+
+def _write_conformed_panel(
+    device: Device, live: Device, canvas: tuple[int, int], defaults: tuple[int, int] | None
+) -> bool:
     width, height = canvas
     try:
         raw = json.loads(device.path.read_text(encoding="utf-8"))
@@ -912,8 +928,7 @@ def conform_panel(
             tmp.unlink()
         return False
     device.manifest["panel"] = dict(block)
-    live = current() if current is not None else None
-    if live is not None and live is not device:
+    if live is not device:
         live.manifest["panel"] = dict(block)
     logger.info(
         "visionect: device %s now uses the sign's %dx%d buffer (canvas %sx%s)",
