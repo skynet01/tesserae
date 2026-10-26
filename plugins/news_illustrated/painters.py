@@ -240,7 +240,45 @@ def kie(a: Attempt) -> bytes:
             "not sending another yet"
         )
     else:
+        if earlier.get("task_id"):
+            a.log("kie: the task an earlier run paid for is over 6 hours old; giving up on it")
         task_id = _kie_create(a, auth)
+    return _kie_collect(a, task_id, auth)
+
+
+def collect(
+    settings: Settings,
+    memo: TaskMemo,
+    *,
+    budget: Budget,
+    log: Callable[[str], None],
+    stopped: Callable[[], bool] = lambda: False,
+) -> Painting | None:
+    """Collect the kie.ai task in ``memo`` and nothing else: no new task is
+    ever ordered here. None while it is still painting (the memo keeps it) or
+    when it failed (the memo is cleared)."""
+    task_id = str((memo.record or {}).get("task_id") or "")
+    key = settings.keys.get("kie", "")
+    if not task_id or not key:
+        return None
+    attempt = Attempt(settings, key, "", "", budget, stopped, memo, log)
+    try:
+        # A definite failure clears the memo inside; running out of time does not.
+        raw = _kie_collect(attempt, task_id, {"Authorization": f"Bearer {key}"})
+    except PaintError as err:
+        log(f"kie: {err}")
+        return None
+    try:
+        jpeg, size = to_jpeg(raw)
+    except PaintError as err:
+        log(f"kie: {err}")
+        memo.remember(None)  # collecting it again would give the same bytes
+        return None
+    return Painting(jpeg, "kie", size)
+
+
+def _kie_collect(a: Attempt, task_id: str, auth: dict[str, str]) -> bytes:
+    """Poll a kie.ai task until it has a picture, then download that."""
     url = f"{KIE_RECORD_URL}?{urllib.parse.urlencode({'taskId': task_id})}"
     poll_until = min(a.budget.clock() + KIE_POLL_MAX_S, a.budget.deadline - KIE_DOWNLOAD_RESERVE_S)
     while a.budget.clock() + KIE_POLL_EVERY_S <= poll_until:

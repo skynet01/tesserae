@@ -220,6 +220,12 @@ def test_a_failed_day_is_retried_a_little_later_then_left(tmp_path: Path) -> Non
     assert not pipeline.due(tmp_path, "06:05", _at("2026-10-25 23:00"))
 
 
+def _only_job(data_dir: Path) -> dict[str, Any]:
+    jobs = store.load_jobs(data_dir)
+    assert len(jobs) <= 1
+    return next(iter(jobs.values()), {})
+
+
 def _wait(runner: pipeline.Runner, data_dir: Path) -> None:
     deadline = time.monotonic() + 10
     while runner.running(data_dir):
@@ -346,8 +352,8 @@ def test_a_paid_kie_task_survives_into_the_next_run(fake_net: FakeNet, tmp_path:
     # Nothing earlier to keep, so the story goes up as text only meanwhile.
     assert _run(tmp_path, cfg, budget=budget) == pipeline.Outcome(made=1)
     assert store.load_stories(tmp_path)[0]["image"] == ""
-    job = store.load_job(tmp_path, cfg.sources[0].key)
-    assert job["kie"]["task_id"] == "t1" and job["summary"] == "Summary here."
+    job = _only_job(tmp_path)
+    assert job["kie"]["task_id"] == "t1" and job["story"]["summary"] == "Summary here."
     # The next run (after a restart, say) collects the task with the same summary.
     fake_net.calls.clear()
     fake_net.routes = [r for r in fake_net.routes if not r[0].startswith(painters.KIE_RECORD_URL)]
@@ -367,7 +373,7 @@ def test_a_paid_kie_task_survives_into_the_next_run(fake_net: FakeNet, tmp_path:
     assert fake_net.to(painters.KIE_CREATE_URL) == []
     assert fake_net.to(summarise.GROQ_URL) == []
     assert store.load_stories(tmp_path)[0]["provider"] == "kie"
-    assert store.load_job(tmp_path, cfg.sources[0].key) == {}
+    assert _only_job(tmp_path) == {}
 
 
 def test_secrets_never_reach_the_log(fake_net: FakeNet, tmp_path: Path) -> None:
@@ -433,7 +439,7 @@ def test_a_pending_task_is_collected_without_waiting_for_tomorrow(
     now = datetime.now()
     # The text-only story completes the edition, but the paid task is still owed...
     assert store.load_state(tmp_path)["edition"] == pipeline.edition(now, "06:05")
-    assert pipeline.owed(tmp_path, time.time()) == [cfg.sources[0].key]
+    assert len(pipeline.owed(tmp_path, time.time())) == 1
     assert pipeline.due(tmp_path, "06:05", now) == "collect"
     # ...so a run comes round for it, and collects it rather than ordering another.
     _kie_finishes(fake_net)
@@ -475,13 +481,13 @@ def test_an_image_write_failure_after_payment_is_recovered(
 
     monkeypatch.setattr(store, "save_image", disk_full)
     assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(missing=1)
-    assert store.load_job(tmp_path, cfg.sources[0].key)["kie"]["task_id"] == "t1"
+    assert _only_job(tmp_path)["kie"]["task_id"] == "t1"
     monkeypatch.setattr(store, "save_image", real)
     fake_net.calls.clear()
     assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(made=1)
     assert fake_net.to(painters.KIE_CREATE_URL) == [] and fake_net.to(summarise.GROQ_URL) == []
     assert store.load_stories(tmp_path)[0]["image"]
-    assert store.load_job(tmp_path, cfg.sources[0].key) == {}
+    assert _only_job(tmp_path) == {}
 
 
 def test_a_story_commit_failure_after_payment_is_recovered(
@@ -499,12 +505,12 @@ def test_a_story_commit_failure_after_payment_is_recovered(
     monkeypatch.setattr(store, "save_stories", disk_full)
     with pytest.raises(OSError):
         _run(tmp_path, cfg, budget=_fake_budget)
-    assert store.load_job(tmp_path, cfg.sources[0].key)["kie"]["task_id"] == "t1"
+    assert _only_job(tmp_path)["kie"]["task_id"] == "t1"
     monkeypatch.setattr(store, "save_stories", real)
     fake_net.calls.clear()
     assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(made=1)
     assert fake_net.to(painters.KIE_CREATE_URL) == []
-    assert store.load_job(tmp_path, cfg.sources[0].key) == {}
+    assert _only_job(tmp_path) == {}
 
 
 def test_a_kept_story_does_not_settle_a_pending_task(fake_net: FakeNet, tmp_path: Path) -> None:
@@ -520,4 +526,92 @@ def test_a_kept_story_does_not_settle_a_pending_task(fake_net: FakeNet, tmp_path
     fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
     fake_net.on(painters.KIE_RECORD_URL, ok_json({"data": {"state": "generating"}}))
     assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(kept=1)
-    assert store.load_job(tmp_path, cfg.sources[0].key)["kie"]["task_id"] == "t1"
+    assert _only_job(tmp_path)["kie"]["task_id"] == "t1"
+
+
+def _owe(data_dir: Path, cfg: pipeline.Config, link: str, title: str, ordered_at: float) -> str:
+    """Leave a paid, uncollected kie.ai task for the story at ``link``."""
+    source = cfg.sources[0]
+    sid = pipeline.story_id(source, feeds.Item(title, link, ""))
+    story = {
+        "story_id": sid,
+        "source_key": source.key,
+        "source": source.label,
+        "title": title,
+        "summary": "Summary of the paid story.",
+        "url": link,
+        "date": "2026-10-25",
+        "image": "",
+        "provider": "",
+    }
+    store.save_job(data_dir, sid, {"story": story, "kie": {"task_id": "paid", "at": ordered_at}})
+    return sid
+
+
+def test_a_collection_run_only_collects(fake_net: FakeNet, tmp_path: Path) -> None:
+    """The feed has moved on to a new headline: collecting must not fetch it,
+    summarise it or order a picture for it."""
+    cfg = _kie_only()
+    sid = _owe(tmp_path, cfg, "https://news.example.com/old", "Old headline", time.time() - 60)
+    _news(fake_net, "-new")
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "second"}}))
+    _kie_finishes(fake_net)
+    outcome = pipeline.collect_owed(cfg, tmp_path, budget=_fake_budget, log=[].append)
+    assert outcome == pipeline.Outcome(made=1)
+    assert fake_net.to(FEEDS["Tech"]) == [] and fake_net.to(summarise.GROQ_URL) == []
+    assert fake_net.to(painters.KIE_CREATE_URL) == []
+    (story,) = store.load_stories(tmp_path)
+    assert story["story_id"] == sid and story["title"] == "Old headline" and story["image"]
+    assert store.load_jobs(tmp_path) == {}
+
+
+def test_a_collected_picture_never_replaces_a_newer_story(
+    fake_net: FakeNet, tmp_path: Path
+) -> None:
+    cfg = _kie_only()
+    _owe(tmp_path, cfg, "https://news.example.com/old", "Old headline", time.time() - 600)
+    newer = {
+        "story_id": "x",
+        "source_key": cfg.sources[0].key,
+        "title": "Newer",
+        "image": "",
+        "made": int(time.time()),
+    }
+    store.save_stories(tmp_path, [newer])
+    _kie_finishes(fake_net)
+    log: list[str] = []
+    assert pipeline.collect_owed(cfg, tmp_path, budget=_fake_budget, log=log.append) == (
+        pipeline.Outcome(kept=1)
+    )
+    assert store.load_stories(tmp_path) == [newer]
+    assert "That story has been replaced since, so its picture is not shown" in log
+
+
+def test_a_same_titled_old_story_does_not_settle_a_new_paid_task(tmp_path: Path) -> None:
+    cfg = _kie_only()
+    sid = _owe(tmp_path, cfg, "https://news.example.com/new", "Same title", time.time() - 60)
+    fallback = {"story_id": "tech--other", "title": "Same title", "image": "old.jpg"}
+    pipeline._settle(tmp_path, sid, fallback)
+    assert store.load_job(tmp_path, sid)["kie"]["task_id"] == "paid"
+    pipeline._settle(tmp_path, sid, {"story_id": sid, "title": "Same title", "image": ""})
+    assert store.load_job(tmp_path, sid), "text only is not the picture it paid for"
+    pipeline._settle(tmp_path, sid, {"story_id": sid, "title": "Same title", "image": "new.jpg"})
+    assert store.load_job(tmp_path, sid) == {}
+
+
+def test_one_timestamp_decides_owed_and_expiry(fake_net: FakeNet, tmp_path: Path) -> None:
+    """A task ordered 4 hours ago (for a summary written earlier still) is
+    owed, and the scheduled run collects it rather than ordering another."""
+    cfg = _kie_only()
+    link = "https://news.example.com/tech"
+    _owe(tmp_path, cfg, link, "Tech headline-now", time.time() - 4 * 3600)
+    assert len(pipeline.owed(tmp_path, time.time())) == 1
+    _news(fake_net)
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "second"}}))
+    _kie_finishes(fake_net)
+    assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(made=1)
+    assert fake_net.to(painters.KIE_CREATE_URL) == [] and fake_net.to(summarise.GROQ_URL) == []
+    assert store.load_stories(tmp_path)[0]["summary"] == "Summary of the paid story."
+    # Past the window it is no longer owed, and only then may a new task be ordered.
+    _owe(tmp_path, cfg, link, "Tech headline-now", time.time() - painters.KIE_RESUME_S - 1)
+    assert pipeline.owed(tmp_path, time.time()) == []

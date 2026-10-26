@@ -28,6 +28,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -261,32 +262,32 @@ def load_jobs(data_dir: Path) -> dict[str, dict[str, Any]]:
     return {k: v for k, v in got.items() if isinstance(v, dict)}
 
 
-def keep_jobs(data_dir: Path, source_keys: set[str]) -> None:
-    """Forget unfinished attempts for sources no longer configured."""
+def keep_jobs(data_dir: Path, keep: Callable[[dict[str, Any]], bool]) -> None:
+    """Forget the unfinished attempts ``keep`` says no to."""
     jobs = load_jobs(data_dir)
-    kept = {k: v for k, v in jobs.items() if k in source_keys}
+    kept = {k: v for k, v in jobs.items() if keep(v)}
     if kept != jobs:
         write_json(Path(data_dir) / JOBS, kept)
 
 
-def load_job(data_dir: Path, source_key: str) -> dict[str, Any]:
-    """What an earlier, unfinished attempt at this source's story left: the
-    story it was for, its summary, and a paid picture task still to collect."""
+def load_job(data_dir: Path, story_id: str) -> dict[str, Any]:
+    """What an earlier, unfinished attempt at one story left: the story (with
+    its summary) and a paid picture task still to collect."""
     got = read_json(Path(data_dir) / JOBS, {})
-    job = got.get(source_key) if isinstance(got, dict) else None
+    job = got.get(story_id) if isinstance(got, dict) else None
     return job if isinstance(job, dict) else {}
 
 
-def save_job(data_dir: Path, source_key: str, job: dict[str, Any] | None) -> None:
+def save_job(data_dir: Path, story_id: str, job: dict[str, Any] | None) -> None:
     """Keep (or with None, forget) an unfinished attempt. Only a run writes
     this, and only one run goes at a time."""
     path = Path(data_dir) / JOBS
     got = read_json(path, {})
     jobs = got if isinstance(got, dict) else {}
     if job is None:
-        if source_key not in jobs:
+        if story_id not in jobs:
             return
-        jobs.pop(source_key)
+        jobs.pop(story_id)
     else:
-        jobs[source_key] = job
+        jobs[story_id] = job
     write_json(path, jobs)

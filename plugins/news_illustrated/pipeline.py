@@ -206,17 +206,6 @@ def _scheduled(state: dict[str, Any], data_dir: Path, current: str, now: datetim
     return not tries or now.timestamp() - max(tries) >= RETRY_AFTER_S
 
 
-def owed(data_dir: Path, now: float) -> list[str]:
-    """Sources with a kie.ai task that was paid for and not yet collected."""
-    return [
-        key
-        for key, job in store.load_jobs(data_dir).items()
-        if isinstance(job.get("kie"), dict)
-        and job["kie"].get("task_id")
-        and now - float(job["kie"].get("at") or 0) < painters.KIE_RESUME_S
-    ]
-
-
 # ----------------------------------------------------------------------
 # One story
 # ----------------------------------------------------------------------
@@ -247,6 +236,14 @@ class Outcome:
         return ", ".join(bits)
 
 
+def story_id(source: Source, item: feeds.Item) -> str:
+    """One article from one source: the source's key and a hash of the
+    article's link (its title when it has none). What a paid picture task
+    belongs to, and the only thing that settles it."""
+    digest = hashlib.sha1((item.link or item.title).encode("utf-8"), usedforsecurity=False)
+    return f"{source.key}--{digest.hexdigest()[:12]}"
+
+
 def make_story(
     source: Source,
     previous: dict[str, Any] | None,
@@ -258,29 +255,26 @@ def make_story(
     log: Callable[[str], None],
     stopped: Callable[[], bool],
     budget: Callable[[], painters.Budget] = painters.Budget,
-) -> tuple[dict[str, Any] | None, str]:
+) -> tuple[dict[str, Any] | None, str, str]:
     """(the story to show for ``source``, what happened: one of the
-    :class:`Outcome` counters, made / unchanged / kept / missing)."""
+    :class:`Outcome` counters, the id of the story attempted or "")."""
     item = feeds.newest_item(source.feed, log)
     if item is None:
         log("Feed failed, keeping the previous story")
-        return previous, "kept" if previous else "missing"
+        return previous, "kept" if previous else "missing", ""
     log(f"Title: {item.title}")
-    if (
-        not force
-        and previous
-        and previous.get("image")
-        and previous.get("url") == item.link
-        and previous.get("title") == item.title
-    ):
+    sid = story_id(source, item)
+    if not force and previous and previous.get("image") and previous.get("story_id") == sid:
         log("Same story as before, keeping its picture")
-        return previous, "unchanged"
+        return previous, "unchanged", sid
     if stopped():
-        return previous, "kept" if previous else "missing"
-    job = _unfinished(data_dir, source, item, log)
-    if job.get("summary"):
-        summary = str(job["summary"])
-        log("Taking up the unfinished attempt at this story and its summary")
+        return previous, "kept" if previous else "missing", ""
+    # An earlier attempt at this very story (a crash, or a picture still being
+    # painted) is taken up where it stopped: same summary, same paid task.
+    job = store.load_job(data_dir, sid)
+    story = job.get("story") if isinstance(job.get("story"), dict) else None
+    if story:
+        log("Taking up the unfinished attempt at this story")
     else:
         found = feeds.article(item, log)
         log(f"Summarising {len(found.text)} characters from the {found.origin}")
@@ -293,71 +287,160 @@ def make_story(
             template=cfg.summary_prompt,
             log=log,
         )
-        job = {"link": item.link, "title": item.title, "summary": summary, "at": time.time()}
-        store.save_job(data_dir, source.key, job)
+        story = {
+            "story_id": sid,
+            "source_key": source.key,
+            "source": source.label,
+            "title": item.title,
+            "summary": summary,
+            "url": item.link if item.link.startswith(("http://", "https://")) else "",
+            "date": today.isoformat(),
+            "image": "",
+            "provider": "",
+        }
+        job = {"story": story}
+        store.save_job(data_dir, sid, job)
     if stopped():
-        return previous, "kept" if previous else "missing"
+        return previous, "kept" if previous else "missing", sid
 
     def remember(task: dict[str, Any] | None) -> None:
         job["kie"] = task
-        store.save_job(data_dir, source.key, job)
+        store.save_job(data_dir, sid, job)
 
     memo = painters.TaskMemo(job.get("kie"), save=remember)
     painting = painters.paint(
-        item.title, summary, cfg.paint, budget=budget(), log=log, stopped=stopped, memo=memo
+        str(story["title"]),
+        str(story["summary"]),
+        cfg.paint,
+        budget=budget(),
+        log=log,
+        stopped=stopped,
+        memo=memo,
     )
-    story = {
-        "source_key": source.key,
-        "source": source.label,
-        "title": item.title,
-        "summary": summary,
-        "url": item.link if item.link.startswith(("http://", "https://")) else "",
-        "date": today.isoformat(),
-        "made": int(time.time()),
-        "image": "",
-        "provider": "",
-    }
     if painting is None:
         if previous and previous.get("image"):
             # Never pair the new headline with an unrelated old picture.
             log("No picture, keeping the whole previous story")
-            return previous, "kept"
+            return previous, "kept", sid
         log("No picture and nothing earlier with one, saving the story as text only")
-        return story, "made"
-    story["image"] = store.save_image(data_dir, source.key, painting.jpeg)
-    story["provider"] = painting.provider
-    return story, "made"
+        return {**story, "made": int(time.time())}, "made", sid
+    image = store.save_image(data_dir, source.key, painting.jpeg)
+    return (
+        {**story, "image": image, "provider": painting.provider, "made": int(time.time())},
+        "made",
+        sid,
+    )
 
 
-def _unfinished(
-    data_dir: Path, source: Source, item: feeds.Item, log: Callable[[str], None]
-) -> dict[str, Any]:
-    """The earlier attempt at this very story, if one was left unfinished
-    recently. Anything else is forgotten, and a paid task given up on says so:
-    only then may a new one be ordered for the story."""
-    job = store.load_job(data_dir, source.key)
-    if not job:
-        return {}
-    same = job.get("link") == item.link and job.get("title") == item.title
-    if same and time.time() - float(job.get("at") or 0) < painters.KIE_RESUME_S:
-        return job
-    if (job.get("kie") or {}).get("task_id"):
-        why = "is too old to collect" if same else "was for a story the feed has moved on from"
-        log(f"Giving up on the paid kie.ai task that {why}")
-    store.save_job(data_dir, source.key, None)
-    return {}
+def holds(job: dict[str, Any], now: float) -> bool:
+    """True while a job protects money: a kie.ai task paid for and not yet
+    collected (for KIE_RESUME_S), or a create that may have been accepted (for
+    KIE_UNANSWERED_S). Both are timed from the one moment in the record."""
+    task = job.get("kie")
+    if not isinstance(task, dict):
+        return False
+    age = now - float(task.get("at") or 0)
+    if task.get("task_id"):
+        return age < painters.KIE_RESUME_S
+    return bool(task.get("unanswered")) and age < painters.KIE_UNANSWERED_S
 
 
-def _settle(data_dir: Path, source: Source, story: dict[str, Any] | None) -> None:
-    """After the story list is saved: forget the unfinished attempt once
-    nothing in it is owed any more. That is when the story it was for is
-    saved with its picture, or when it holds no paid (or possibly paid) task."""
-    job = store.load_job(data_dir, source.key)
+def owed(data_dir: Path, now: float) -> list[str]:
+    """Ids of stories whose kie.ai task was paid for and not yet collected."""
+    return [
+        sid
+        for sid, job in store.load_jobs(data_dir).items()
+        if holds(job, now) and (job.get("kie") or {}).get("task_id")
+    ]
+
+
+def _settle(data_dir: Path, sid: str, committed: dict[str, Any] | None) -> None:
+    """After the story list is saved: forget the attempt at story ``sid`` once
+    the saved story is that very story with its picture, or once the attempt
+    protects no money."""
+    if not sid:
+        return
+    job = store.load_job(data_dir, sid)
     if not job:
         return
-    painted = bool(story and story.get("image") and story.get("title") == job.get("title"))
-    if painted or not job.get("kie"):
-        store.save_job(data_dir, source.key, None)
+    painted = bool(committed and committed.get("story_id") == sid and committed.get("image"))
+    if painted or not holds(job, time.time()):
+        store.save_job(data_dir, sid, None)
+
+
+def _prune_jobs(data_dir: Path, cfg: Config) -> None:
+    """Keep only attempts that protect money, for sources still configured."""
+    keys = {s.key for s in cfg.sources}
+    now = time.time()
+    store.keep_jobs(
+        data_dir,
+        lambda job: (job.get("story") or {}).get("source_key") in keys and holds(job, now),
+    )
+
+
+def collect_owed(
+    cfg: Config,
+    data_dir: Path,
+    *,
+    stopped: Callable[[], bool] = lambda: False,
+    log: Callable[[str], None] = logger.info,
+    budget: Callable[[], painters.Budget] = painters.Budget,
+) -> Outcome:
+    """Collect the kie.ai pictures already paid for, and do nothing else: no
+    feed, no Groq, never a new task. A picture goes up with the story it was
+    painted for, unless the source has moved on to a newer story since."""
+    data_dir = Path(data_dir)
+    outcome = Outcome()
+    for sid in owed(data_dir, time.time()):
+        if stopped():
+            break
+        job = store.load_job(data_dir, sid)
+        story = job.get("story") if isinstance(job.get("story"), dict) else None
+        if not story:
+            store.save_job(data_dir, sid, None)
+            continue
+        log(f"Collecting the paid picture for: {story.get('title')}")
+
+        def remember(
+            task: dict[str, Any] | None, sid: str = sid, job: dict[str, Any] = job
+        ) -> None:
+            job["kie"] = task
+            store.save_job(data_dir, sid, job)
+
+        memo = painters.TaskMemo(job.get("kie"), save=remember)
+        ordered_at = float((job.get("kie") or {}).get("at") or 0)
+        painting = painters.collect(cfg.paint, memo, budget=budget(), log=log, stopped=stopped)
+        if painting is None:
+            if not memo.record:
+                store.save_job(data_dir, sid, None)  # failed for good
+            continue
+        stories = {s.get("source_key"): s for s in store.load_stories(data_dir)}
+        current = stories.get(story.get("source_key"))
+        newer = (
+            current is not None
+            and current.get("story_id") != sid
+            and float(current.get("made") or 0) > ordered_at
+        )
+        if newer or story.get("source_key") not in {s.key for s in cfg.sources}:
+            log("That story has been replaced since, so its picture is not shown")
+            store.save_job(data_dir, sid, None)
+            outcome.count("kept")
+            continue
+        image = store.save_image(data_dir, str(story["source_key"]), painting.jpeg)
+        stories[story["source_key"]] = {
+            **story,
+            "image": image,
+            "provider": painting.provider,
+            "made": int(time.time()),
+        }
+        store.save_stories(data_dir, [stories[s.key] for s in cfg.sources if s.key in stories])
+        store.save_job(data_dir, sid, None)  # only once the story holding it is saved
+        outcome.count("made")
+    _prune_jobs(data_dir, cfg)
+    store.prune_images(
+        data_dir, {str(s.get("image")) for s in store.load_stories(data_dir) if s.get("image")}
+    )
+    return outcome
 
 
 # ----------------------------------------------------------------------
@@ -380,7 +463,6 @@ def run_edition(
     stories as they land and a crash loses at most the one under way."""
     data_dir = Path(data_dir)
     today = datetime.now(tz).date()
-    store.keep_jobs(data_dir, {s.key for s in cfg.sources})
     before = {s.get("source_key"): s for s in store.load_stories(data_dir)}
     shown: dict[str, dict[str, Any]] = {}
     outcome = Outcome()
@@ -393,7 +475,7 @@ def run_edition(
         log(f"Story {n} of {total}: {source.label}")
         previous = before.get(source.key)
         try:
-            story, what = make_story(
+            story, what, sid = make_story(
                 source,
                 previous,
                 cfg,
@@ -408,7 +490,7 @@ def run_edition(
             log(
                 f"This story failed ({type(err).__name__}: {str(err)[:160]}), keeping the previous one"
             )
-            story, what = previous, "kept" if previous else "missing"
+            story, what, sid = previous, "kept" if previous else "missing", ""
         outcome.count(what)
         if story is not None:
             shown[source.key] = story
@@ -418,7 +500,8 @@ def run_edition(
             (shown | pending)[s.key] for s in cfg.sources if s.key in shown or s.key in pending
         ]
         store.save_stories(data_dir, ordered)
-        _settle(data_dir, source, story)
+        _settle(data_dir, sid, story)
+    _prune_jobs(data_dir, cfg)
     store.prune_images(
         data_dir, {str(s.get("image")) for s in store.load_stories(data_dir) if s.get("image")}
     )
@@ -548,15 +631,18 @@ class Runner:
             log(f"Run started ({reason})")
             for problem in cfg.problems:
                 log(problem)
-            outcome = run_edition(
-                cfg,
-                run.data_dir,
-                tz=tz,
-                force=force,
-                stopped=run.stop.is_set,
-                log=log,
-                progress=progress,
-            )
+            if reason == "collect":
+                outcome = collect_owed(cfg, run.data_dir, stopped=run.stop.is_set, log=log)
+            else:
+                outcome = run_edition(
+                    cfg,
+                    run.data_dir,
+                    tz=tz,
+                    force=force,
+                    stopped=run.stop.is_set,
+                    log=log,
+                    progress=progress,
+                )
             log(f"Run finished: {outcome.sentence()}")
         except Exception as err:  # a bug must not leave the lock held
             failure = text.redact(f"{type(err).__name__}: {str(err)[:200]}", cfg.secrets)
@@ -598,7 +684,8 @@ def _record_run(
     lines: list[str],
 ) -> None:
     state = store.load_state(run.data_dir)
-    if outcome is not None and not run.stop.is_set() and (outcome.made or outcome.unchanged):
+    edition_run = reason != "collect"
+    if edition_run and outcome and not run.stop.is_set() and (outcome.made or outcome.unchanged):
         state["edition"] = run.edition
     state["last_run"] = {
         "reason": reason,

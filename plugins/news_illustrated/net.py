@@ -12,7 +12,8 @@ so from anyone:
 * **Public addresses only.** The URL and every redirect hop go through the
   host's SSRF guard (``app.net_guard``): no loopback, LAN, link-local or cloud
   metadata targets, so a feed cannot steer the server at an intranet page
-  and paste it into a Groq prompt.
+  and paste it into a Groq prompt. Redirects are followed here, not by
+  urllib, so each hop is checked first and gets only the time left.
 * **A total time limit.** ``timeout`` bounds the whole call, connect and every
   read, so a server dripping bytes slowly cannot hold a run past its budget.
 * **A size limit on what is decoded,** not just on what crossed the wire, so
@@ -32,6 +33,7 @@ import urllib.request
 import zlib
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urljoin
 
 from app.net_guard import BlockedURLError, assert_public_url
 
@@ -41,6 +43,8 @@ MAX_BYTES = 25 * 1024 * 1024
 CHUNK = 64 * 1024
 # APIs explain an error in their body; this much is enough to read why.
 ERROR_BODY_BYTES = 4096
+MAX_REDIRECTS = 5
+_REDIRECTS = frozenset({301, 302, 303, 307, 308})
 API_USER_AGENT = "tesserae/0.1 (+news_illustrated)"
 # Article pages and some feeds sit behind bot filters that refuse a
 # bot-shaped User-Agent outright (the PHP original learned this the hard way).
@@ -97,24 +101,21 @@ class _OutOfTime(Exception):
     pass
 
 
-class _PublicRedirects(urllib.request.HTTPRedirectHandler):
-    """Follow a redirect only to a public address, and only with the time the
-    whole request has left (urllib reuses the first timeout for every hop)."""
+class _Redirect(Exception):
+    def __init__(self, url: str, method: str, body: bytes | None) -> None:
+        super().__init__(url)
+        self.url, self.method, self.body = url, method, body
 
-    def __init__(self, deadline: float = float("inf")) -> None:
-        super().__init__()
-        self.deadline = deadline
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """Turn urllib's automatic redirects off: it drains each 3xx body with an
+    unbounded read and reuses the first timeout for every hop. A 3xx then
+    arrives as an HTTPError and :func:`request` follows it itself."""
 
     def redirect_request(  # type: ignore[no-untyped-def]
         self, req, fp, code, msg, headers, newurl
     ):
-        assert_public_url(newurl)
-        left = self.deadline - time.monotonic()
-        if left <= 0:
-            raise _OutOfTime
-        # http_error_30x opens the next hop with ``req.timeout``.
-        req.timeout = left
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        return None
 
 
 def request(
@@ -126,27 +127,53 @@ def request(
     body: bytes | None = None,
     max_bytes: int = MAX_BYTES,
 ) -> Reply:
-    """Make one request in at most ``timeout`` seconds overall; never raises.
-    An HTTP error status still carries its body (truncated), since the APIs
-    explain themselves there."""
+    """Make one request in at most ``timeout`` seconds overall, redirects
+    included; never raises. An HTTP error status still carries its body
+    (truncated), since the APIs explain themselves there."""
     deadline = time.monotonic() + timeout
     if timeout <= 0:
         return Reply(0, error="no time left")
-    try:
-        assert_public_url(url)
-    except BlockedURLError:
-        return Reply(0, error="refused: not a public address")
     sent = {"User-Agent": API_USER_AGENT, "Accept-Encoding": "gzip, deflate", **(headers or {})}
+    for hop in range(MAX_REDIRECTS + 1):
+        try:
+            assert_public_url(url)
+        except BlockedURLError:
+            where = "redirected to a non-public address" if hop else "not a public address"
+            return Reply(0, error=f"refused: {where}")
+        if deadline - time.monotonic() <= 0:
+            return Reply(0, error="timed out")
+        try:
+            return _once(url, method, sent, body, deadline, max_bytes)
+        except _Redirect as moved:
+            url, method, body = moved.url, moved.method, moved.body
+    return Reply(0, error="too many redirects")
+
+
+def _once(
+    url: str,
+    method: str,
+    headers: dict[str, str],
+    body: bytes | None,
+    deadline: float,
+    max_bytes: int,
+) -> Reply:
+    """One hop, with whatever time is left. Raises _Redirect for a 3xx."""
     try:
-        req = urllib.request.Request(url, data=body, headers=sent, method=method)
-        opener = urllib.request.build_opener(_PublicRedirects(deadline))
-        with opener.open(req, timeout=max(0.5, timeout)) as resp:
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        opener = urllib.request.build_opener(_NoRedirects())
+        with opener.open(req, timeout=max(0.05, deadline - time.monotonic())) as resp:
             raw = _read(resp, deadline, max_bytes)
             encoding = str(resp.headers.get("Content-Encoding", "") or "")
             content_type = str(resp.headers.get("Content-Type", "") or "")
             return Reply(int(resp.status), decode(raw, encoding, max_bytes), content_type)
     except urllib.error.HTTPError as err:
         err_headers = getattr(err, "headers", None)
+        location = str(err_headers.get("Location", "") or "") if err_headers else ""
+        if err.code in _REDIRECTS and location:
+            err.close()  # not drained: the body of a redirect is never needed
+            if err.code == 303 or (err.code in (301, 302) and method == "POST"):
+                raise _Redirect(urljoin(url, location), "GET", None) from None
+            raise _Redirect(urljoin(url, location), method, body) from None
         try:
             # The error body is read under the same deadline: an API explaining
             # itself slowly must not hold the run past its budget.
@@ -163,8 +190,6 @@ def request(
             err.close()
         content_type = str(err_headers.get("Content-Type", "") or "") if err_headers else ""
         return Reply(int(err.code), raw, content_type)
-    except BlockedURLError:
-        return Reply(0, error="refused: redirected to a non-public address")
     except _TooLarge:
         return Reply(0, error="response too large")
     except (_OutOfTime, TimeoutError):

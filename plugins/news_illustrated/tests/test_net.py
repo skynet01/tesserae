@@ -4,8 +4,10 @@ here opens a connection."""
 
 from __future__ import annotations
 
+import email.message
 import gzip
 import time
+import urllib.error
 import urllib.request
 import zlib
 from typing import Any
@@ -65,20 +67,6 @@ def _serve(monkeypatch: pytest.MonkeyPatch, answer: Any) -> None:
 def test_non_public_addresses_are_refused(url: str) -> None:
     reply = net.request(url, timeout=5)
     assert reply.status == 0 and reply.error.startswith("refused")
-
-
-def test_redirects_to_private_addresses_are_refused() -> None:
-    handler = net._PublicRedirects()
-    req = urllib.request.Request("https://news.example.com/a")
-    with pytest.raises(BlockedURLError):
-        handler.redirect_request(req, None, 302, "Found", {}, "http://169.254.169.254/latest")
-
-
-def test_a_refused_redirect_is_a_failed_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    _serve(monkeypatch, BlockedURLError("private"))
-    assert net.request("https://news.example.com/a", timeout=5).error == (
-        "refused: redirected to a non-public address"
-    )
 
 
 def test_a_gzip_bomb_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,18 +134,69 @@ def test_an_error_body_is_truncated_not_dropped(monkeypatch: pytest.MonkeyPatch)
     assert reply.status == 429 and reply.body == b"e" * net.ERROR_BODY_BYTES
 
 
-def test_redirects_get_only_the_time_that_is_left() -> None:
-    req = urllib.request.Request("https://news.example.com/a")
-    req.timeout = 30  # type: ignore[attr-defined]
-    handler = net._PublicRedirects(time.monotonic() + 2)
-    monkeypatched_guard = net.assert_public_url
-    try:
-        net.assert_public_url = lambda url: None  # type: ignore[assignment]
-        handler.redirect_request(req, None, 302, "Found", {}, "https://news.example.com/b")
-        assert req.timeout <= 2  # type: ignore[attr-defined]
-        with pytest.raises(net._OutOfTime):
-            net._PublicRedirects(time.monotonic() - 1).redirect_request(
-                req, None, 302, "Found", {}, "https://news.example.com/c"
-            )
-    finally:
-        net.assert_public_url = monkeypatched_guard  # type: ignore[assignment]
+def _moved(location: str, hang: list[str]) -> urllib.error.HTTPError:
+    class _Body(_Resp):
+        def read1(self, n: int) -> bytes:
+            hang.append("read")
+            time.sleep(10)
+            return b""
+
+        def read(self, n: int = -1) -> bytes:
+            return self.read1(n)
+
+    headers = email.message.Message()
+    headers["Location"] = location
+    return urllib.error.HTTPError("https://a.example.com/", 302, "Found", headers, _Body([], {}))  # type: ignore[arg-type]
+
+
+def _hops(
+    monkeypatch: pytest.MonkeyPatch, answers: list[Any], seen: list[tuple[str, float]]
+) -> None:
+    """Answer successive opens in turn, recording each hop's URL and timeout."""
+
+    class _Opener:
+        def open(self, req: urllib.request.Request, timeout: float) -> Any:
+            seen.append((req.full_url, timeout))
+            answer = answers.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+
+    blocked = {"http://169.254.169.254/latest"}
+
+    def guard(url: str) -> None:
+        if url in blocked:
+            raise BlockedURLError("metadata")
+
+    monkeypatch.setattr(net, "assert_public_url", guard)
+    monkeypatch.setattr(net.urllib.request, "build_opener", lambda *h: _Opener())
+
+
+def test_redirects_are_followed_without_reading_their_bodies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hang: list[str] = []
+    seen: list[tuple[str, float]] = []
+    _hops(monkeypatch, [_moved("/b", hang), _Resp([b"done"], {})], seen)
+    started = time.monotonic()
+    reply = net.request("https://a.example.com/a", timeout=5)
+    assert reply.ok and reply.body == b"done"
+    assert hang == [], "a redirect body is never read"
+    assert time.monotonic() - started < 1.0
+    assert [u for u, _t in seen] == ["https://a.example.com/a", "https://a.example.com/b"]
+    assert seen[1][1] <= seen[0][1] <= 5, "each hop gets only the time left"
+
+
+def test_a_redirect_to_a_private_address_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, float]] = []
+    _hops(monkeypatch, [_moved("http://169.254.169.254/latest", [])], seen)
+    reply = net.request("https://a.example.com/a", timeout=5)
+    assert reply.error == "refused: redirected to a non-public address"
+    assert len(seen) == 1
+
+
+def test_redirect_hops_are_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, float]] = []
+    _hops(monkeypatch, [_moved("/again", []) for _ in range(10)], seen)
+    assert net.request("https://a.example.com/a", timeout=5).error == "too many redirects"
+    assert len(seen) == net.MAX_REDIRECTS + 1
