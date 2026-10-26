@@ -115,8 +115,16 @@ DIRECTORY_TIMEOUT_S = 4.0
 # fetch() waits this long at most for the state lock, which is only ever held
 # for file work (never a download).
 LOCK_WAIT_S = 2.0
-# Editors poll, and a push is followed up, this often while a download is due.
+# Editors poll, and a push is followed up, this often while the paper a render
+# waits for is next in line; later in the line the wait grows, up to the
+# host's ceiling for the hint.
 LIVE_REFRESH_S = 8
+LIVE_REFRESH_MAX_S = 120
+# One job per paper is all the queue ever needs; this only bounds a flood of
+# pinned codes.
+MAX_QUEUED = 32
+# All of one job's requests (today, yesterday, the day before) together.
+JOB_BUDGET_S = 90.0
 
 LOOKBACK_DAYS = 3  # today, yesterday, the day before
 RECHECK_S = 30 * 60  # how often to look again for an edition not out yet
@@ -367,10 +375,13 @@ def _read_capped(resp: Any, deadline: float) -> bytes:
     return b"".join(chunks)
 
 
-def download_edition(code: str, day: date) -> bytes | None:
+def download_edition(code: str, day: date, deadline: float | None = None) -> bytes | None:
     """The ``code`` front page for ``day``, validated, or None when that
-    edition isn't there. Raises :class:`CdnUnreachable` when the CDN fails."""
-    deadline = _clock() + DOWNLOAD_BUDGET_S
+    edition isn't there. Raises :class:`CdnUnreachable` when the CDN fails or
+    ``deadline`` (on ``_clock``; at most ``DOWNLOAD_BUDGET_S`` away) passes."""
+    deadline = min(deadline or math.inf, _clock() + DOWNLOAD_BUDGET_S)
+    if deadline <= _clock():
+        raise CdnUnreachable("out of time")
     url = PAGE_URL.format(day=day.day, code=code)
     request = urllib.request.Request(
         url, headers={"User-Agent": USER_AGENT, "Accept": "image/jpeg,image/*;q=0.8"}
@@ -517,15 +528,13 @@ class _Job:
     today: date
     force: bool = False  # ?fresh=1: skip the recheck wait
 
-    @property
-    def key(self) -> tuple[str, date]:
-        return self.code, self.today
-
 
 @dataclass
 class _Run:
     """One worker thread and its queue, for one data dir. Renders add to the
-    queue while it runs; it ends when the queue is empty."""
+    queue while it runs; it ends when the queue is empty, marking itself done
+    in the same locked step, so a render that queues after that starts a new
+    worker instead of handing work to one that is leaving."""
 
     data_dir: Path
     queue: list[_Job] = field(default_factory=list)
@@ -533,36 +542,57 @@ class _Run:
     done: bool = False
     thread: threading.Thread | None = None
 
-    def busy(self) -> set[tuple[str, date]]:
-        keys = {job.key for job in self.queue}
-        if self.active is not None:
-            keys.add(self.active.key)
-        return keys
+    def line(self) -> list[str]:
+        """Codes in the order they will be worked on, the running one first."""
+        head = [self.active.code] if self.active is not None else []
+        return head + [job.code for job in self.queue]
 
     def alive(self) -> bool:
         return not self.done and self.thread is not None and self.thread.is_alive()
+
+    def add(self, job: _Job, *, first: bool) -> None:
+        """Queue ``job``, at most once per paper: a paper already waiting
+        keeps its place (or moves to the front for ``first``), taking the
+        later day and the force flag. A paper being downloaded now for the
+        same day isn't queued again."""
+        active = self.active
+        if active is not None and active.code == job.code and active.today >= job.today:
+            return
+        for index, queued in enumerate(self.queue):
+            if queued.code == job.code:
+                job = _Job(job.code, max(job.today, queued.today), job.force or queued.force)
+                del self.queue[index]
+                self.queue.insert(0 if first else index, job)
+                return
+        if len(self.queue) >= MAX_QUEUED:
+            return  # a later render queues it again
+        if first:
+            self.queue.insert(0, job)
+        else:
+            self.queue.append(job)
 
 
 _RUNS: dict[str, _Run] = _shared("runs", dict)
 
 
-def _enqueue(data_dir: Path, codes: list[str], today: date, *, force: bool) -> None:
-    """Queue a job per code unless one for that paper and day is queued or
-    running, starting the worker if none runs. The worker runs in a copy of
-    this render's context, so the capability scope (the ``requires:`` hosts)
-    applies to its downloads too."""
+def _enqueue(
+    data_dir: Path, codes: list[str], today: date, *, force: bool, first: str | None = None
+) -> None:
+    """Queue a job per code, ``first`` (the paper this render is waiting
+    for) at the front, starting the worker if none runs. The worker runs in a
+    copy of this render's context, so the capability scope (the
+    ``requires:`` hosts) applies to its downloads too."""
     with _RUNS_LOCK:
         run = _RUNS.get(str(data_dir))
         start = run is None or not run.alive()
         if start:
             run = _RUNS[str(data_dir)] = _Run(data_dir)
         assert run is not None
-        known = run.busy()
         for code in codes:
-            job = _Job(code, today, force)
-            if job.key not in known:
-                run.queue.append(job)
-                known.add(job.key)
+            if code != first:
+                run.add(_Job(code, today, force), first=False)
+        if first in codes:
+            run.add(_Job(first, today, force), first=True)
         if start and run.queue:
             context = contextvars.copy_context()
             run.thread = threading.Thread(
@@ -571,11 +601,11 @@ def _enqueue(data_dir: Path, codes: list[str], today: date, *, force: bool) -> N
             run.thread.start()
 
 
-def _pending(data_dir: Path) -> set[str]:
-    """Codes with a download queued or running."""
+def _line(data_dir: Path) -> list[str]:
+    """Codes queued or being downloaded, in the order they'll be done."""
     with _RUNS_LOCK:
         run = _RUNS.get(str(data_dir))
-        return {code for code, _ in run.busy()} if run is not None and run.alive() else set()
+        return run.line() if run is not None and run.alive() else []
 
 
 def _join_worker(data_dir: Path, timeout: float) -> bool:
@@ -610,12 +640,15 @@ def _work(run: _Run) -> None:
         while True:
             with _RUNS_LOCK:
                 if not run.queue:
+                    run.done = True  # in the same step as the empty check
                     break
                 job = run.queue.pop(0)
                 run.active = job
                 waiting = len(run.queue)
             _report(job, waiting)
             _refresh(run.data_dir, job)
+            with _RUNS_LOCK:
+                run.active = None
     except Exception:
         logger.exception("%s: the download worker stopped", PLUGIN_ID)
     finally:
@@ -641,12 +674,13 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         return
     saved: tuple[date, bytes] | None = None
     failure = "missing"
+    deadline = _clock() + JOB_BUDGET_S
     for back in range(LOOKBACK_DAYS):
         day = job.today - timedelta(days=back)
         if have is not None and day <= have.day:
             break  # nothing older can beat an edition already kept
         try:
-            body = download_edition(job.code, day)
+            body = download_edition(job.code, day, deadline)
         except Exception as err:  # CdnUnreachable, or the host refusing the egress
             logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
             failure = "unreachable"
@@ -699,6 +733,70 @@ def _missing_error(codes: list[str], state: dict[str, Any], pinned: str | None) 
     return {"error": f"No {which} in the last {LOOKBACK_DAYS} days."}
 
 
+def _wait_hint(position: int) -> dict[str, Any]:
+    """Refresh hints for a render waiting on the job at ``position`` in the
+    worker's line (0 = downloading now). The host follows a push up a limited
+    number of times, so the wait grows with the jobs ahead instead of
+    spending those follow-ups on a fixed short interval."""
+    seconds = min(LIVE_REFRESH_MAX_S, LIVE_REFRESH_S * (position + 1))
+    return {"live_refresh_s": seconds, "live_pending": position + 1}
+
+
+@dataclass
+class _Selection:
+    """What one look at the saved pages found, under the lock."""
+
+    chosen: tuple[str, Page] | None
+    state: dict[str, Any]
+    due: list[str]  # papers whose edition for today is missing and due
+    wanted: str | None  # the due paper this render would show once it lands
+
+
+def _select(
+    data_dir: Path,
+    candidates: list[str],
+    *,
+    pinned: str | None,
+    today: date,
+    now: float,
+    force: bool,
+    preview: bool,
+) -> _Selection | None:
+    """Pick the paper and claim its newest page, all under the lock; None
+    when the lock can't be had within ``LOCK_WAIT_S``."""
+    pages = data_dir / PAGES_DIR
+    state_path = data_dir / STATE_FILE
+    if not _LOCK.acquire(timeout=LOCK_WAIT_S):
+        return None
+    try:
+        state = _read_json(state_path)
+        order, held = (candidates, None) if pinned else plan(candidates, state, now)
+        chosen: tuple[str, Page] | None = None
+        for code in order:
+            page = newest_page(pages, code, today)
+            if page is not None and _claim(page):
+                chosen = (code, page)
+                break
+        # A preview (the editor, the dashboards list) shows what the panel gets
+        # next but never moves the rotation; repeating the held paper doesn't either.
+        if chosen and not pinned and not preview and chosen[0] != held:
+            state["current"], state["since"] = chosen[0], now
+            _write_json(state_path, state)
+        due = [
+            code
+            for code in candidates
+            if not edition_path(pages, code, today).is_file()
+            and (force or not _recently_checked(state, code, now))
+        ]
+    finally:
+        _LOCK.release()
+    if chosen is not None:
+        wanted = chosen[0] if chosen[0] in due else None
+    else:
+        wanted = next((code for code in order if code in due), None)
+    return _Selection(chosen, state, due, wanted)
+
+
 def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
@@ -714,47 +812,42 @@ def fetch(
         }
 
     data_dir = Path(ctx["data_dir"])
-    pages = data_dir / PAGES_DIR
-    state_path = data_dir / STATE_FILE
     today = _edition_today()
     now = _wall()
     force = bool(ctx.get("fresh"))
     key = (str(data_dir), pinned or "")
-    if not _LOCK.acquire(timeout=LOCK_WAIT_S):
+
+    def select() -> _Selection | None:
+        return _select(
+            data_dir,
+            candidates,
+            pinned=pinned,
+            today=today,
+            now=now,
+            force=force,
+            preview=bool(ctx.get("preview")),
+        )
+
+    picked = select()
+    if picked is None:
         logger.info("%s: state busy, answering from the last page handed out", PLUGIN_ID)
         return _fallback(key, now)
-    try:
-        state = _read_json(state_path)
-        order, held = (candidates, None) if pinned else plan(candidates, state, now)
-        chosen: tuple[str, Page] | None = None
-        for code in order:
-            page = newest_page(pages, code, today)
-            if page is not None and _claim(page):
-                chosen = (code, page)
-                break
-        # A preview (the editor, the dashboards list) shows what the panel gets
-        # next but never moves the rotation; repeating the held paper doesn't either.
-        if chosen and not pinned and not ctx.get("preview") and chosen[0] != held:
-            state["current"], state["since"] = chosen[0], now
-            _write_json(state_path, state)
-        due = [
-            code
-            for code in candidates
-            if not edition_path(pages, code, today).is_file()
-            and (force or not _recently_checked(state, code, now))
-        ]
-    finally:
-        _LOCK.release()
+    if picked.due:
+        _enqueue(data_dir, picked.due, today, force=force, first=picked.wanted)
+        line = _line(data_dir)
+        if any(code not in line for code in picked.due):
+            # A download finished between queueing it and now: look again,
+            # rather than answer from the snapshot taken before it landed.
+            picked = select() or picked
+    line = _line(data_dir)
 
-    if due:
-        _enqueue(data_dir, due, today, force=force)
-    pending = _pending(data_dir) & set(candidates)
-    if chosen is None:
-        if pending:
-            return {"pending": True, "live_refresh_s": LIVE_REFRESH_S, "live_pending": len(pending)}
-        return _missing_error(candidates, state, pinned)
+    if picked.chosen is None:
+        waiting = [line.index(code) for code in candidates if code in line]
+        if waiting:
+            return {"pending": True, **_wait_hint(min(waiting))}
+        return _missing_error(candidates, picked.state, pinned)
 
-    code, page = chosen
+    code, page = picked.chosen
     trims = {p.code: p.trim for p in papers}
     payload: dict[str, Any] = {
         "url": f"/plugins/{PLUGIN_ID}/page/{page.path.name}",
@@ -765,9 +858,9 @@ def fetch(
         "trim": trims.get(code, 0.0),
     }
     _LAST_CLAIMED[key] = (now, payload)
-    if code in pending:
+    if code in line:
         # Only the shown paper's download changes this frame.
-        return {**payload, "live_refresh_s": LIVE_REFRESH_S, "live_pending": 1}
+        return {**payload, **_wait_hint(line.index(code))}
     return payload
 
 

@@ -421,6 +421,87 @@ def test_concurrent_renders_trigger_one_download(tmp_path: Path, cdn: FakeCdn) -
     assert cdn.calls == [_url("NY_NYT", 25)]
 
 
+class _HookLock:
+    """A lock that runs ``hook`` once, in the worker thread, right after the
+    worker releases it with an empty queue: the moment the exit race needs."""
+
+    def __init__(self, run_of: Any) -> None:
+        self._lock = threading.Lock()
+        self._run_of = run_of
+        self.hook: Any = None
+
+    def __enter__(self) -> _HookLock:
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        run = self._run_of()
+        idle = run is not None and not run.queue and run.active is None
+        self._lock.release()
+        if self.hook is not None and idle and threading.current_thread().name.endswith("downloads"):
+            hook, self.hook = self.hook, None
+            hook()
+
+
+def test_work_queued_as_the_worker_leaves_is_not_stranded(
+    tmp_path: Path, cdn: FakeCdn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = _HookLock(lambda: server._RUNS.get(str(tmp_path)))
+    monkeypatch.setattr(server, "_RUNS_LOCK", lock)
+    cdn.pages = {_url("NY_NYT", 25): PAGE, _url("WSJ", 25): PAGE}
+    lock.hook = lambda: server._enqueue(tmp_path, ["WSJ"], TODAY, force=False)
+    _fetch(tmp_path, paper="NY_NYT")
+    _settle(tmp_path)
+    assert _fetch(tmp_path, paper="WSJ")["date"] == "2026-10-25"
+    assert _url("WSJ", 25) in cdn.calls
+
+
+def test_a_download_landing_before_the_pending_check_is_shown(
+    tmp_path: Path, cdn: FakeCdn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = server._enqueue
+
+    def enqueue_and_finish(data_dir: Path, *args: Any, **kw: Any) -> None:
+        real(data_dir, *args, **kw)
+        _settle(data_dir)  # the download lands before fetch() looks at the queue
+
+    monkeypatch.setattr(server, "_enqueue", enqueue_and_finish)
+    cdn.pages = {_url("WSJ", 25): PAGE}
+    data = _fetch(tmp_path, paper="WSJ")
+    assert data["date"] == "2026-10-25"
+
+
+def test_the_queue_holds_each_paper_once() -> None:
+    run = server._Run(Path("."))
+    for _ in range(3):
+        run.add(server._Job("NY_NYT", TODAY), first=False)
+    run.add(server._Job("WSJ", TODAY), first=False)
+    run.add(server._Job("NY_NYT", TODAY, force=True), first=False)
+    assert [(j.code, j.force) for j in run.queue] == [("NY_NYT", True), ("WSJ", False)]
+    run.add(server._Job("WSJ", TODAY), first=True)
+    assert run.line() == ["WSJ", "NY_NYT"]
+    run.active = run.queue.pop(0)
+    run.add(server._Job("WSJ", TODAY), first=True)  # already downloading
+    assert run.line() == ["WSJ", "NY_NYT"]
+    for n in range(2 * server.MAX_QUEUED):
+        run.add(server._Job(f"P{n}", TODAY), first=False)
+    assert len(run.queue) == server.MAX_QUEUED
+
+
+def test_the_paper_a_render_waits_for_jumps_the_queue(tmp_path: Path, cdn: FakeCdn) -> None:
+    cdn.gate = threading.Event()
+    _fetch(tmp_path)  # queues NY_NYT (downloading), WSJ, USAT
+    data = _fetch(tmp_path, paper="USAT")
+    assert server._line(tmp_path)[:2] == ["NY_NYT", "USAT"]
+    assert data == {"pending": True, "live_refresh_s": 2 * server.LIVE_REFRESH_S, "live_pending": 2}
+
+
+def test_the_refresh_hint_grows_with_the_wait() -> None:
+    assert server._wait_hint(0) == {"live_refresh_s": server.LIVE_REFRESH_S, "live_pending": 1}
+    assert server._wait_hint(3)["live_refresh_s"] == 4 * server.LIVE_REFRESH_S
+    assert server._wait_hint(100)["live_refresh_s"] == server.LIVE_REFRESH_MAX_S
+
+
 def test_downloads_run_in_the_render_context(tmp_path: Path, cdn: FakeCdn) -> None:
     """The host's egress allowlist lives in the render's context; the worker
     must carry it."""
