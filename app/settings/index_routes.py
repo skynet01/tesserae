@@ -1833,11 +1833,12 @@ def _transport_badge(device: Device) -> str:
     Returns "HTTP" for legacy TRMNL devices (access-token + MQTT)
     so the header still reads cleanly when the card is collapsed, and
     "HA" for push devices (OpenDisplay-via-HA) delivered through a Home
-    Assistant service call rather than a broker."""
+    Assistant service call rather than a broker. Visionect signs are push
+    devices too, but over their own TCP protocol, not through HA."""
     if device.transport == "rest":
         return "REST"
     if device.transport == "push":
-        return "HA"
+        return "Visionect" if device.kind_of == "visionect" else "HA"
     if device.transport == "relay":
         # Before the access-token branch: relay devices carry a device token
         # too, but it authenticates against the relay, not this server.

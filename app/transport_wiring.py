@@ -1018,6 +1018,16 @@ def _rebuild_transport(
     except Exception:
         logger.exception("wiring OpenDisplay-HA publisher")
 
+    # Visionect signs: the TCP 11113 listener survives rebuilds (the signs
+    # hold their sockets open); register() re-attaches it to the fresh
+    # PUSH_MANAGER and starts / stops it as visionect devices come and go.
+    try:
+        from app import visionect
+
+        visionect.register(app)
+    except Exception:
+        logger.exception("wiring Visionect listener")
+
     # Cloud relay (remote panels): seal-and-upload publisher + rendezvous
     # pairing poller. Both no-op until the install is linked to a relay, so
     # they're always wired; they re-attach to the fresh PUSH_MANAGER like the
