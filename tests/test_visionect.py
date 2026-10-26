@@ -1394,6 +1394,8 @@ def test_a_history_resend_repaints_the_frame_once(harness: Harness) -> None:
         harness.latest = {**harness.latest, "timestamp": 2000.0}  # another resend
         harness.push()
         assert sign.wait_for(lambda s: len(s.images()) == 3)
+        # Again a checksum other than the one the sign now holds.
+        assert ImagePacket.decode(sign.images()[2].payload).checksum != resent
     finally:
         sign.close()
 
@@ -1539,3 +1541,19 @@ def test_binding_keeps_device_settings_saved_meanwhile(tmp_path: Path) -> None:
     assert h.svc._bind(UUID) is h.device
     stored = FakeSettings.get_section(h.settings, "devices")["lobby"]
     assert stored == {"uuid": UUID, "dither": "floyd"}
+
+
+def test_a_connection_already_replaced_in_the_library_is_ignored_not_refused() -> None:
+    """If a newer same-UUID connection registered before this one's
+    DeviceConnected was dispatched, its writer is unknown: ignore it (the
+    newer one's event follows) rather than log it as a hijack."""
+    svc = visionect.VisionectService()
+    newer, stale = object(), SimpleNamespace(device_id=visionect.uuid_bytes(UUID))
+    svc._server = SimpleNamespace(connection_for=lambda _key: newer, _writers={})
+    sign = svc._sign(UUID)
+    sign.conn = SimpleNamespace(closed=False)
+    sign.writer = SimpleNamespace(transport=SimpleNamespace(is_closing=lambda: False))
+    sign.remote = "10.0.0.5"
+    status = StatusPacket(records=STATUS_TAGS, sentinel=0)
+    assert svc._connected(stale, UUID, status) == ""
+    assert sign.refused is None and sign.status is None

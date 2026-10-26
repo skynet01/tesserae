@@ -8,22 +8,28 @@ is the sign's whole identity. The wire protocol comes from ``pyvisionect``
 (MIT, a clean-room reimplementation of the vendor gateway), so this module only
 glues it to Tesserae:
 
-* One process-wide listener (``pyvisionect.io.VisionectServer``) runs on its own
-  asyncio loop in a daemon thread, like ``app.embedded_broker``. It runs while
-  a ``visionect`` device exists. ``register()`` re-runs on every transport
-  rebuild: it re-attaches the push listener, rebinds signs and restarts the
-  listener only when the configured port changed.
+* One process-wide listener (``pyvisionect.io.VisionectServer``, wrapped by
+  ``app.visionect_listener.GuardedServer`` to bound what the open port
+  accepts) runs on its own asyncio loop in a daemon thread, like
+  ``app.embedded_broker``. It runs while a ``visionect`` device exists.
+  ``register()`` re-runs on every transport rebuild: it re-attaches the push
+  listener, rebinds signs and restarts the listener only when the configured
+  port changed.
+* Each sign has one connection Tesserae talks to. A re-dial replaces it; a
+  same-UUID connection from another address is refused while it lives.
 * Each sign has a small state machine, run one pass at a time
   (``_reconcile``): encode the device's latest renderer artifact
   (``trmnl_png_gray16``, already fitted, flipped and dithered onto the
   sign's 16 greys), send it if the sign hasn't acked that frame, and only once
-  it has, send a quiet-hours deep sleep. At most one image and one sleep are
-  ever in flight, and both are forgotten when the sign reconnects. A NACK
-  retries after a back-off.
+  it has (and no render for it is under way), send a quiet-hours deep sleep.
+  At most one frame or sleep is in flight. It is forgotten when the sign
+  reconnects, and an ACK that never comes drops the connection so the sign
+  re-dials. A NACK retries after a back-off.
 * Status packets feed ``record_status_heartbeat``, so the device card, battery
   history and Home Assistant sensors work as for any other device.
-* An unknown sign is bound to a visionect device with a blank UUID, or listed
-  under Settings -> Devices as a discovered device to register.
+* An unknown sign is bound to a visionect device with a blank UUID (within an
+  hour of that device being added or its UUID cleared), or listed under
+  Settings -> Devices as a discovered device to register.
 
 What the sign shows is tracked from its ACKs. Its own ``DisplayStateCRC`` is
 only trusted before the first ACK of a run (a Tesserae restart): firmware
@@ -940,8 +946,13 @@ class VisionectService:
                 self._schedule(sign.uuid, delay=wait)
                 return
             checksum = int(sign.frame.state_checksum)
-            if sign.frame_digest == sign.shown_digest:
+            resending = sign.frame_digest == sign.shown_digest
+            if resending:
+                # Any checksum other than the one the sign holds (after an
+                # earlier resend that is the perturbed one).
                 checksum = perturbed_checksum(checksum)
+                if checksum == sign.shown_checksum:
+                    checksum = int(sign.frame.state_checksum)
                 packet_id = int(conn.send_image(sign.frame, checksum_override=checksum))
             else:
                 packet_id = int(conn.send_image(sign.frame))
@@ -961,7 +972,7 @@ class VisionectService:
                 device.id,
                 sign.frame_digest[:12],
                 sign.uuid,
-                " (resend)" if checksum != int(sign.frame.state_checksum) else "",
+                " (resend)" if resending else "",
             )
             await self._send(sign, inflight, IMAGE_ACK_TIMEOUT_S)
             return  # the ACK re-runs us; sleep must wait for it
@@ -1167,6 +1178,12 @@ class VisionectService:
         from app.visionect_listener import abort, peer_ip
 
         writer = self._writer_for(uuid, conn)
+        if writer is None:
+            # A newer connection for the UUID registered before this event
+            # was dispatched; that one's DeviceConnected follows. This one
+            # can't be written to, and the listener's identify deadline
+            # drops it.
+            return ""
         remote = peer_ip(writer)
         sign = self._signs.get(uuid)
         device = self._device_for_uuid(uuid)
