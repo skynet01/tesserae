@@ -69,7 +69,9 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import queue
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -114,6 +116,11 @@ LINEUP_NONE = "(none)"
 
 # Hold entity bounds (minutes). 0 clears the hold.
 HOLD_MAX_MINUTES = 720
+
+# Next / Previous presses waiting for the step worker. A press can wait up
+# to the button service's navigation-lock timeout behind a render, so a
+# handful queued is plenty; more are refused with a Last error.
+STEP_QUEUE_MAX = 16
 
 # App-section switches (Settings -> Server -> Network & integrations) that
 # trim what's published. Both default ON when absent, so an install that
@@ -859,6 +866,12 @@ class HomeAssistantDiscovery:
         # recorded at publish time so teardown never guesses from ids.
         self._config_owner: dict[tuple[str, str], str] = {}
         self._stop_event = threading.Event()
+        # Next / Previous run on their own worker thread: a step can wait
+        # behind a render of the same display, and waiting inside Paho's
+        # callback would stall every other command, heartbeat and keepalive.
+        self._steps: queue.Queue[tuple[str, int] | None] = queue.Queue(maxsize=STEP_QUEUE_MAX)
+        self._step_worker: threading.Thread | None = None
+        self._step_worker_lock = threading.Lock()
         self._ticker: threading.Thread | None = None
 
     # -- device helpers -------------------------------------------------
@@ -1042,6 +1055,7 @@ class HomeAssistantDiscovery:
             self._started = False
         logger.info("HA discovery: stopping")
         self._stop_event.set()
+        self._stop_step_worker()
         ticker, self._ticker = self._ticker, None
         if ticker is not None and ticker.is_alive():
             ticker.join(timeout=2.0)
@@ -1671,29 +1685,89 @@ class HomeAssistantDiscovery:
             raise
 
     def _step_device(self, device: Any, delta: int) -> None:
-        """Next / Previous button: step what this display follows right now
-        one page, for this display only. The hook runs the physical-button
-        path (``ButtonService.step``): within the lineup on the glass, else
-        the display's rotation; a no-op when it follows neither. Busy is
-        cleared here because a promoted warm frame produces no push result
-        to clear it."""
-        fn = self._hooks.step_device_fn
-        if fn is None:
+        """Next / Previous button: queue a step of what this display follows
+        right now, one page, for this display only, and return at once (this
+        runs on the MQTT network thread). The worker runs the physical-button
+        path (``ButtonService.step``) and reports failures on Last error."""
+        if self._hooks.step_device_fn is None:
             return
+        self._ensure_step_worker()
+        try:
+            self._steps.put_nowait((str(device.id), delta))
+        except queue.Full:
+            logger.warning("HA discovery: step queue full; dropping a step for %r", device.id)
+            self._publish_str(
+                STATE_TOPIC_LAST_ERROR,
+                f"{device.display_name}: too many Next / Previous presses waiting; try again."[
+                    :240
+                ],
+                retain=True,
+            )
+
+    def _ensure_step_worker(self) -> None:
+        with self._step_worker_lock:
+            worker = self._step_worker
+            if worker is not None and worker.is_alive():
+                return
+            self._step_worker = threading.Thread(
+                target=self._step_worker_loop, name="ha-discovery-steps", daemon=True
+            )
+            self._step_worker.start()
+
+    def _stop_step_worker(self) -> None:
+        """Let queued steps finish, then end the worker (bounded wait)."""
+        with self._step_worker_lock:
+            worker, self._step_worker = self._step_worker, None
+        if worker is None or not worker.is_alive():
+            return
+        with contextlib.suppress(queue.Full):
+            self._steps.put(None, timeout=1.0)
+        worker.join(timeout=2.0)
+
+    def _step_worker_loop(self) -> None:
+        while True:
+            item = self._steps.get()
+            try:
+                if item is None:
+                    return
+                self._run_step(*item)
+            except Exception:
+                logger.exception("HA discovery: step worker failed")
+            finally:
+                self._steps.task_done()
+
+    def _wait_steps_idle(self, timeout: float = 5.0) -> bool:
+        """Block until every queued step has run (tests, shutdown)."""
+        deadline = time.monotonic() + timeout
+        with self._steps.all_tasks_done:
+            while self._steps.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._steps.all_tasks_done.wait(remaining)
+        return True
+
+    def _run_step(self, device_id: str, delta: int) -> None:
+        """One queued step (worker thread). Busy is cleared here because a
+        promoted warm frame produces no push result to clear it."""
+        fn = self._hooks.step_device_fn
+        device = self._device(device_id)
+        if fn is None or device is None:
+            return  # the display was removed while the step waited
         logger.info(
-            "HA discovery: %s on display %r", "next" if delta > 0 else "previous", device.id
+            "HA discovery: %s on display %r", "next" if delta > 0 else "previous", device_id
         )
         self._publish_str(STATE_TOPIC_BUSY, "1", retain=True)
         try:
-            err = fn(str(device.id), delta)
+            err = fn(device_id, delta)
         except Exception:
-            logger.exception("HA discovery: step failed for %r", device.id)
+            logger.exception("HA discovery: step failed for %r", device_id)
             err = "step failed"
         finally:
             self._publish_str(STATE_TOPIC_BUSY, "0", retain=True)
         if err:
             self._publish_str(STATE_TOPIC_LAST_ERROR, err[:240], retain=True)
-        self._publish_device_runtime(self._device(device.id) or device)
+        self._publish_device_runtime(self._device(device_id) or device)
 
     def _set_wake_interval(self, device: Any, text: str) -> None:
         fn = self._hooks.set_device_config_fn

@@ -695,6 +695,7 @@ def test_next_prev_commands_route_to_the_hook(tmp_path: Path) -> None:
     ha.start()
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/action", b"next")
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/action", b" prev\n")
+    assert ha._wait_steps_idle()
     assert calls == [("lounge", 1), ("lounge", -1)]
     # Busy is cleared even when nothing pushed (a promoted warm frame).
     assert _payload_for(client, "tesserae/ha/state/busy") == b"0"
@@ -713,6 +714,7 @@ def test_next_prev_ignore_junk_and_unknown_displays(tmp_path: Path) -> None:
     ha._on_device_cmd("tesserae/ha/dev/ghost/cmd/action", b"next")  # unknown / deleted
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/next", b"next")  # wrong leaf
     ha._on_device_cmd("tesserae/ha/devlounge/cmd/action", b"next")  # malformed topic
+    assert ha._wait_steps_idle()
     assert calls == []
     pm.push.assert_not_called()
 
@@ -726,6 +728,7 @@ def test_step_error_and_exception_land_on_last_error(tmp_path: Path) -> None:
     )
     ha.start()
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/action", b"next")
+    assert ha._wait_steps_idle()
     assert _payload_for(client, "tesserae/ha/state/last_error") == b"Lounge: render failed"
 
     def boom(_device_id: str, _delta: int) -> str | None:
@@ -733,6 +736,7 @@ def test_step_error_and_exception_land_on_last_error(tmp_path: Path) -> None:
 
     ha._hooks.step_device_fn = boom
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/action", b"prev")  # must not raise
+    assert ha._wait_steps_idle()
     assert _payload_for(client, "tesserae/ha/state/last_error") == b"step failed"
     assert _payload_for(client, "tesserae/ha/state/busy") == b"0"
 
@@ -771,6 +775,7 @@ def test_next_steps_only_the_pressed_display_through_the_button_service(
     )
     ha.start()
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/action", b"next")
+    assert ha._wait_steps_idle()
     assert pm.push.call_args.args[0] == "weather"
     assert pm.push.call_args.kwargs["device_ids"] == {"lounge"}
     assert pm.push.call_args.kwargs["source"] == "home_assistant"
@@ -1177,3 +1182,79 @@ def test_removing_the_longer_id_spares_the_shorter_ones_lookalikes(tmp_path: Pat
     # ``a``'s own sensor survives although its id starts with ``dev_a_next_``.
     assert "homeassistant/sensor/tesserae/dev_a_next_change/config" not in blanked
     assert ("sensor", "dev_a_next_change") in ha._published_configs
+
+
+def test_next_returns_from_the_mqtt_callback_at_once(tmp_path: Path) -> None:
+    # A step can wait behind a render of the same display (the navigation
+    # lock); it must not wait inside Paho's callback, which would stall
+    # every other command, heartbeat and keepalive meanwhile.
+    import threading
+    import time
+
+    gate = threading.Event()
+    calls: list[tuple[str, int]] = []
+
+    def slow_step(device_id: str, delta: int) -> str | None:
+        calls.append((device_id, delta))
+        assert gate.wait(5)
+        return "Lounge: b superseded"
+
+    rot_state = DeviceRotationStateStore(tmp_path / "rot.json")
+    ha, client, _pm, _ = _wire(
+        tmp_path,
+        devices=_FakeRegistry([_FakeDevice("lounge", "Lounge")]),
+        hooks=HaHooks(step_device_fn=slow_step, rotation_state_store=rot_state),
+    )
+    ha.start()
+    started = time.monotonic()
+    ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/action", b"next")
+    # Another command is handled while the step is still waiting.
+    ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/hold", b"30")
+    assert time.monotonic() - started < 1.0
+    assert rot_state.get("lounge").automation_hold_until is not None
+    gate.set()
+    assert ha._wait_steps_idle()
+    assert calls == [("lounge", 1)]
+    # The outcome still reaches Home Assistant.
+    assert _payload_for(client, "tesserae/ha/state/last_error") == b"Lounge: b superseded"
+    ha.stop()
+    assert ha._step_worker is None
+
+
+def test_a_full_step_queue_refuses_with_last_error(tmp_path: Path) -> None:
+    import threading
+
+    from app import ha_discovery as ha_module
+
+    gate = threading.Event()
+
+    def slow_step(_device_id: str, _delta: int) -> str | None:
+        gate.wait(5)
+        return None
+
+    ha, client, _pm, _ = _wire(
+        tmp_path,
+        devices=_FakeRegistry([_FakeDevice("lounge", "Lounge")]),
+        hooks=HaHooks(step_device_fn=slow_step),
+    )
+    ha.start()
+    try:
+        for _ in range(ha_module.STEP_QUEUE_MAX + 2):
+            ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/action", b"next")
+        assert b"too many" in (_payload_for(client, "tesserae/ha/state/last_error") or b"")
+    finally:
+        gate.set()
+    assert ha._wait_steps_idle()
+
+
+def test_a_step_for_a_display_removed_while_queued_is_dropped(tmp_path: Path) -> None:
+    calls: list[tuple[str, int]] = []
+    registry = _FakeRegistry([_FakeDevice("lounge", "Lounge")])
+    ha, _client, _pm, _ = _wire(
+        tmp_path, devices=registry, hooks=HaHooks(step_device_fn=_steps_hook(calls))
+    )
+    ha.start()
+    ha._run_step("ghost", 1)
+    del registry._d["lounge"]
+    ha._run_step("lounge", 1)
+    assert calls == []
