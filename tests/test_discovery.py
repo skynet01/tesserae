@@ -413,3 +413,67 @@ def test_register_discovered_visionect_sign_keeps_its_uuid(app: Flask) -> None:
     assert dev.transport == "push"
     section = app.config["SETTINGS_STORE"].get_section("devices")
     assert section["desk_joan"]["uuid"] == "aabbccdd-0000-1111-2222-333344445555"
+
+
+def test_adding_a_visionect_sign_with_a_bad_uuid_creates_nothing(app: Flask) -> None:
+    # A mistyped UUID used to be dropped after the device was created,
+    # leaving a blank device that binds whichever unknown sign connects next.
+    client = app.test_client()
+    _sign_in(client)
+    resp = client.post(
+        "/settings/devices/add",
+        data={"kind": "visionect", "id": "hall_sign", "name": "Hall", "uuid": "36002000-1247"},
+        follow_redirects=True,
+    )
+    assert resp.status_code == 200
+    assert "Device not added" in resp.get_data(as_text=True)
+    assert app.config["DEVICE_REGISTRY"].get("hall_sign") is None
+    section = app.config["SETTINGS_STORE"].get_section("devices")
+    assert "hall_sign" not in section
+
+
+def test_one_sign_uuid_binds_one_device(app: Flask) -> None:
+    sign = "aabbccdd-0000-1111-2222-333344445555"
+    client = app.test_client()
+    _sign_in(client)
+    resp = client.post(
+        "/settings/devices/add",
+        data={"kind": "visionect", "id": "hall_sign", "name": "Hall", "uuid": sign.upper()},
+    )
+    assert resp.status_code == 302
+    assert app.config["DEVICE_REGISTRY"].get("hall_sign") is not None
+    # The same sign again, written without dashes: refused.
+    resp = client.post(
+        "/settings/devices/add",
+        data={
+            "kind": "visionect",
+            "id": "lobby_sign",
+            "name": "Lobby",
+            "uuid": sign.replace("-", ""),
+        },
+        follow_redirects=True,
+    )
+    assert "already bound to device &#39;hall_sign&#39;" in resp.get_data(as_text=True)
+    assert app.config["DEVICE_REGISTRY"].get("lobby_sign") is None
+    # Registering a discovered entry that claims the same sign: refused too.
+    app.config["DISCOVERY_CACHE"].record(
+        "visionect_aa11bb22cc33dd44ee55",
+        ('{"kind":"visionect","transport":"visionect","uuid":"' + sign + '"}').encode(),
+    )
+    resp = client.post(
+        "/settings/devices/discovery/visionect_aa11bb22cc33dd44ee55/register",
+        data={"id": "desk_sign", "name": "Desk"},
+        follow_redirects=True,
+    )
+    assert "Device not registered" in resp.get_data(as_text=True)
+    assert app.config["DEVICE_REGISTRY"].get("desk_sign") is None
+    # Nor can a device card's Save move a bound sign onto a second device.
+    client.post(
+        "/settings/devices/add", data={"kind": "visionect", "id": "spare_sign", "name": "Spare"}
+    )
+    resp = client.post(
+        "/settings/devices/spare_sign/save", data={"uuid": sign}, follow_redirects=True
+    )
+    assert "already bound to device &#39;hall_sign&#39;" in resp.get_data(as_text=True)
+    section = app.config["SETTINGS_STORE"].get_section("devices")
+    assert not (section.get("spare_sign") or {}).get("uuid")

@@ -834,6 +834,24 @@ def visionect_devices(devices: DeviceRegistry) -> list[Device]:
     return [d for d in list(devices.devices.values()) if d.kind_of and is_visionect_device(d)]
 
 
+def device_bound_to(
+    devices: DeviceRegistry, settings: Any, uuid: str, *, exclude: str = ""
+) -> str | None:
+    """The id of the Visionect device (other than ``exclude``) whose stored
+    UUID is ``uuid``, or None. One sign drives one device."""
+    want = normalise_uuid(uuid)
+    if not want:
+        return None
+    section = settings.get_section("devices") or {}
+    for device in sorted(visionect_devices(devices), key=lambda d: d.id):
+        if device.id == exclude:
+            continue
+        cfg = section.get(device.id) if isinstance(section, dict) else None
+        if isinstance(cfg, dict) and normalise_uuid(cfg.get("uuid")) == want:
+            return device.id
+    return None
+
+
 def canvas_size(panel: Any) -> tuple[int, int] | None:
     """The sign's full canvas (w, h) from its pyvisionect panel geometry."""
     from pyvisionect.imaging.panel import Panel as ImagingPanel
