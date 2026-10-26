@@ -125,8 +125,10 @@ to the hub via `via_device`):
   home page), the same things the hub's *Automation* switch pauses for
   every display. Manual sends, *Next* / *Previous* and the Play / Fire
   now buttons still go through. Setting it replaces any hold already
-  there; 0 ends it. When it ends, the display goes straight back to its
-  lineup's current page. Counts down as the hold runs.
+  there; 0 ends it. When it ends, the display gets what it missed, on
+  that display only: its lineup's current page, or a daily or interval
+  fire it sat out that day if that came later. If it ends in quiet hours,
+  that waits until they're over. Counts down as the hold runs.
 - **switch** *Quiet hours override*, the per-display quiet-hours
   override. Turning it on without stored times copies the app-level
   window.

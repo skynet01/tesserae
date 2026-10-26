@@ -301,3 +301,133 @@ def test_hook_surfaces_the_reason_to_home_assistant(tmp_path: Path) -> None:
     assert ha_hooks._step_device(app, "frame", 1) == "Frame: b superseded"
     rig.push.status.pop("b")
     assert ha_hooks._step_device(app, "frame", 1) is None
+
+
+# ---------- a press never undoes a Hold set while it rendered ----------
+
+
+def _ha(tmp_path: Path, states: DeviceRotationStateStore) -> Any:
+    from unittest.mock import MagicMock
+
+    from app.ha_discovery import HaHooks, HomeAssistantDiscovery
+
+    device = MagicMock(id="frame", display_name="Frame", kind_of="x", panel={"w": 1, "h": 1})
+    device.manifest, device.config_schema = {}, {}
+    registry = MagicMock()
+    registry.get.return_value = device
+    registry.all.return_value = [device]
+    return HomeAssistantDiscovery(
+        transport=MagicMock(connected=False),
+        push_manager=MagicMock(),
+        page_store=PageStore(tmp_path / "ha-pages.json"),
+        base_url_fn=lambda: "http://x",
+        device_registry=registry,
+        hooks=HaHooks(rotation_state_store=states),
+        state_refresh_s=0,
+    )
+
+
+def test_a_press_finishing_after_a_new_hold_keeps_the_hold(tmp_path: Path) -> None:
+    # The reproduced bug: block a press during delivery, set Hold=60, let
+    # the press finish, and the hold was gone (the press wrote back the
+    # whole record it had read before rendering).
+    rig = _rig(tmp_path)
+    states = rig.svc._state  # the one store production shares
+    rig.decks.upsert(_cycle("cycle", ["a", "b"], advance="manual"))
+    rig.nav.set("frame", "cycle", "a")
+    rig.push.block_on = "b"
+    press = threading.Thread(
+        target=lambda: rig.svc.handle_button(device_id="frame", button="right", event_id=7)
+    )
+    press.start()
+    assert rig.push.started.wait(5)
+    _ha(tmp_path, states)._on_device_cmd("tesserae/ha/dev/frame/cmd/hold", b"60")
+    rig.push.release.set()
+    press.join(5)
+    state = states.get("frame")
+    assert state.automation_hold_until is not None
+    assert state.automation_hold_until > datetime.now(UTC)
+    # And the press's own fields landed too.
+    assert state.last_button_event_id == 7
+    assert rig.nav.current_page("frame", "cycle") == "b"
+
+
+def test_a_remote_step_committing_after_a_new_hold_keeps_the_hold(tmp_path: Path) -> None:
+    # Rotation path: the step's position is committed after delivery.
+    rig = _rig(tmp_path)
+    states = rig.svc._state  # the one store production shares
+    rig.decks.upsert(_cycle("cycle", ["a", "b"], device_ids=[]))
+    rig.push.block_on = "b"
+    step = threading.Thread(target=lambda: rig.svc.step(device_id="frame", forward=True))
+    step.start()
+    assert rig.push.started.wait(5)
+    _ha(tmp_path, states)._on_device_cmd("tesserae/ha/dev/frame/cmd/hold", b"60")
+    rig.push.release.set()
+    step.join(5)
+    state = states.get("frame")
+    assert state.automation_hold_until is not None
+    assert state.rotation_id == "cycle" and state.step_index == 1
+
+
+def test_a_hold_release_never_clears_a_newer_hold(tmp_path: Path) -> None:
+    from app.state.device_rotation_state_model import DeviceRotationState
+
+    rig = _rig(tmp_path)
+    states = DeviceRotationStateStore(tmp_path / "state.json")
+    lapsed = DeviceRotationState(device_id="frame", automation_hold_until=at(1, 0))
+    states.upsert(lapsed)
+    snapshot = states.all()  # what the scheduler read
+    newer = at(3, 0)
+    states.patch("frame", {"automation_hold_until": newer})  # Hold set meanwhile
+
+    class Stale:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(states, name)
+
+        def all(self) -> dict[str, DeviceRotationState]:
+            return snapshot
+
+    rig.sched._rotation_state_store = Stale()
+    rig.sched._release_lapsed_device_holds(at(2, 0))
+    assert states.get("frame").automation_hold_until == newer
+    assert "frame" not in rig.sched._hold_catchups
+
+
+def test_a_rejoin_keeps_a_hold_set_after_it_read_the_state(tmp_path: Path) -> None:
+    from app.state.device_rotation_state_model import DeviceRotationState
+
+    rig = _rig(tmp_path)
+    states = DeviceRotationStateStore(tmp_path / "state.json")
+    rig.decks.upsert(_cycle("cycle", ["a", "b"]))
+    states.upsert(
+        DeviceRotationState(
+            device_id="frame", rotation_id="cycle", step_index=1, override_until=at(0, 5)
+        )
+    )
+    snapshot = states.all()
+    states.patch("frame", {"automation_hold_until": at(5, 0)})
+
+    class Stale:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(states, name)
+
+        def all(self) -> dict[str, DeviceRotationState]:
+            return snapshot
+
+    rig.sched._rotation_state_store = Stale()
+    rig.sched._maybe_rejoin_rotations(at(0, 10))
+    state = states.get("frame")
+    assert state.override_until is None  # the rejoin's own field
+    assert state.automation_hold_until == at(5, 0)  # someone else's, kept
+
+
+def test_state_patch_is_field_level_and_compare_and_set(tmp_path: Path) -> None:
+    states = DeviceRotationStateStore(tmp_path / "state.json")
+    states.patch("frame", {"last_button": "right", "step_index": 2})
+    states.patch("frame", {"automation_hold_until": at(1, 0)})
+    state = states.get("frame")
+    assert (state.last_button, state.step_index) == ("right", 2)
+    assert states.patch("frame", {"step_index": 3}, expect={"step_index": 9}) is None
+    assert states.get("frame").step_index == 2
+    assert states.patch("frame", {"step_index": 3}, expect={"step_index": 2}) is not None
+    assert states.get("frame").step_index == 3

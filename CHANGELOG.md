@@ -28,9 +28,12 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   runs, nothing automated reaches it (lineup steps, daily and interval
   lineups, rotations, schedules, page refreshes, returns to a lineup's
   home page), while manual sends and Next / Previous still go. When it
-  ends, or is set to 0, the display goes straight back to its lineup's
-  current page. Until now it only held a rotation the panel had been
-  paged away from by a button, so lineups kept advancing through it.
+  ends, or is set to 0, the display gets what it missed: its lineup's
+  current page, or a daily or interval fire it sat out that day if that
+  came later, waiting for quiet hours to end if need be. The other
+  displays aren't repainted. Until now it only held a rotation the panel
+  had been paged away from by a button, so lineups kept advancing through
+  it.
 
 ### Fixed
 

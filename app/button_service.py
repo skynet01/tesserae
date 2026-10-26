@@ -585,6 +585,17 @@ class ButtonService:
             return replace(result, pushed_page_id=None, error=error)
         return result
 
+    def _record_press(
+        self, device_id: str, trigger: str, event_id: int | None, now: datetime
+    ) -> None:
+        """Record a press's dedup fingerprint, and nothing else: patched into
+        the stored record so fields other writers own (a Hold set while the
+        press was rendering) keep their current values."""
+        self._state.patch(
+            device_id,
+            {"last_button": trigger, "last_button_event_id": event_id, "last_button_at": now},
+        )
+
     def _step_noop(
         self,
         device_id: str,
@@ -708,14 +719,7 @@ class ButtonService:
                 device_id,
                 button,
             )
-            new_state = state.model_copy(
-                update={
-                    "last_button": button,
-                    "last_button_event_id": event_id,
-                    "last_button_at": now,
-                }
-            )
-            self._state.upsert(new_state)
+            self._record_press(device_id, button, event_id, now)
             step_page_id = (
                 rotation.steps[current_step_index].page_id if rotation is not None else None
             )
@@ -930,15 +934,7 @@ class ButtonService:
             self._deck_nav.set(device_id, deck.id, target_page)
         # Dedup bookkeeping so a retry of the same event doesn't double-navigate.
         if not remote:
-            self._state.upsert(
-                state.model_copy(
-                    update={
-                        "last_button": trigger_label,
-                        "last_button_event_id": event_id,
-                        "last_button_at": now,
-                    }
-                )
-            )
+            self._record_press(device_id, trigger_label, event_id, now)
         result = ButtonHandleResult(
             device_id=device_id,
             dedup=False,
@@ -1721,15 +1717,7 @@ class ButtonService:
                     )
         # Record the wake fingerprint for event-id dedup, same as the
         # string path does inside _dispatch_spec.
-        self._state.upsert(
-            state.model_copy(
-                update={
-                    "last_button": "touch",
-                    "last_button_event_id": event_id,
-                    "last_button_at": now,
-                }
-            )
-        )
+        self._record_press(device_id, "touch", event_id, now)
         push_result: PushResult | None = None
         if outcome == "ha_dispatched" and reconcile:
             # Catch the panel up with the new HA state OFF this wake: a
@@ -2125,7 +2113,7 @@ class ButtonService:
                 exc,
             )
             if press_fields:
-                self._state.upsert(state.model_copy(update=press_fields))
+                self._state.patch(device_id, press_fields)
             step_page_id = (
                 rotation.steps[current_step_index].page_id if rotation is not None else None
             )
@@ -2169,16 +2157,20 @@ class ButtonService:
             else state.override_until
         )
 
-        new_state = state.model_copy(
-            update={
-                "rotation_id": rotation.id if rotation is not None else None,
-                "step_index": result.new_step_index if rotation is not None else state.step_index,
-                "override_until": override_until,
-                **press_fields,
-            }
-        )
+        # Only the fields this press owns are written (position, its own
+        # hold when it took one, the dedup fingerprint), patched into the
+        # record as stored now, so a Hold set from Home Assistant while the
+        # press was rendering survives it.
+        position_fields: dict[str, Any] = {
+            "rotation_id": rotation.id if rotation is not None else None,
+            "step_index": result.new_step_index if rotation is not None else state.step_index,
+            **press_fields,
+        }
+        if wants_hold:
+            position_fields["override_until"] = override_until
+        new_state = state.model_copy(update=position_fields)
         if not commit_on_delivery:
-            self._state.upsert(new_state)
+            self._state.patch(device_id, position_fields)
 
         # Push the resolved page so the returned frame reflects the
         # new state on this same wake. If we can't push (missing
@@ -2219,7 +2211,7 @@ class ButtonService:
                     )
                     if push_result.status in DELIVERED_STATUSES:
                         if commit_on_delivery:
-                            self._state.upsert(new_state)
+                            self._state.patch(device_id, position_fields)
                         self._note_deck_position(device_id, pushed_page_id)
                 except Exception:
                     log.exception(
@@ -2541,14 +2533,9 @@ class ButtonService:
             and state.last_button_at is None
         ):
             return
-        self._state.upsert(
-            state.model_copy(
-                update={
-                    "last_button_event_id": None,
-                    "last_button": None,
-                    "last_button_at": None,
-                }
-            )
+        self._state.patch(
+            device_id,
+            {"last_button_event_id": None, "last_button": None, "last_button_at": None},
         )
         log.info("button dedup reset: device=%s (re-pair)", device_id)
 

@@ -1605,20 +1605,22 @@ class HomeAssistantDiscovery:
             minutes = max(0, min(int(float(text)), HOLD_MAX_MINUTES))
         except (TypeError, ValueError, OverflowError):
             return
-        from app.state.device_rotation_state_model import DeviceRotationState
-
         now = datetime.now(UTC)
-        state = store.get(device.id) or DeviceRotationState(device_id=device.id)
-        store.upsert(
-            state.model_copy(
-                update={
-                    # A lapsed (not cleared) value on 0, so the scheduler
-                    # sees the hold end and catches the display up.
-                    "automation_hold_until": now + timedelta(minutes=minutes),
-                    "override_until": None,
-                }
-            )
-        )
+        fields = {
+            # A lapsed (not cleared) value on 0, so the scheduler sees the
+            # hold end and catches the display up.
+            "automation_hold_until": now + timedelta(minutes=minutes),
+            "override_until": None,
+        }
+        if hasattr(store, "patch"):
+            # Only the hold fields, so a button press rendering right now
+            # can't be undone by (or undo) this write.
+            store.patch(device.id, fields)
+        else:
+            from app.state.device_rotation_state_model import DeviceRotationState
+
+            state = store.get(device.id) or DeviceRotationState(device_id=device.id)
+            store.upsert(state.model_copy(update=fields))
         logger.info("HA discovery: hold %r for %d min", device.id, minutes)
         self._publish_device_runtime(device)
 

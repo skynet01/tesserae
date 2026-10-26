@@ -39,6 +39,8 @@ class RecPush:
 
     calls: list[dict[str, Any]] = field(default_factory=list)
     bound: dict[str, list[str]] = field(default_factory=dict)
+    quiet: set[str] = field(default_factory=set)
+    fail: set[str] = field(default_factory=set)
 
     def push(self, page_id: str, **kw: Any) -> PushResult:
         self.calls.append({"page_id": page_id, **kw})
@@ -46,6 +48,12 @@ class RecPush:
         targets -= set(kw.get("exclude_device_ids") or ())
         if not targets:
             return PushResult(status="held", page_id=page_id)
+        if kw.get("respect_quiet_hours"):
+            targets -= self.quiet
+            if not targets:
+                return PushResult(status="quiet", page_id=page_id)
+        if page_id in self.fail:
+            return PushResult(status="failed", page_id=page_id, error="render failed")
         rows = [
             RendererResult(renderer_id=f"r__{d}", topic="", digest="x", url="", bytes_written=1)
             for d in sorted(targets)
@@ -55,8 +63,8 @@ class RecPush:
     def promote_deck_page(self, _device_id: str, _page_id: str) -> bool:
         return False
 
-    def device_in_quiet_hours(self, _device_id: str) -> bool:
-        return False
+    def device_in_quiet_hours(self, device_id: str) -> bool:
+        return device_id in self.quiet
 
     def latest_render_for(self, _device_id: str) -> dict[str, Any] | None:
         return None
@@ -228,7 +236,7 @@ def test_interval_schedule_leaves_a_held_display_out(tmp_path: Path) -> None:
     assert call["exclude_device_ids"] == {"frame"}
 
 
-def test_schedule_with_every_display_held_stays_due(tmp_path: Path) -> None:
+def test_schedule_with_every_display_held_lands_when_the_hold_ends(tmp_path: Path) -> None:
     rig = _rig(tmp_path, bound={"news": ["frame"]})
     rig.schedules.upsert(
         Schedule(id="news", name="News", page_id="news", type="interval", interval_minutes=30)
@@ -238,7 +246,9 @@ def test_schedule_with_every_display_held_stays_due(tmp_path: Path) -> None:
     rig.sched._tick_once(at(10, 10))
     assert rig.push.calls == []
     rig.sched._tick_once(at(10, 21))
-    assert rig.push.to() == [("news", None)]
+    assert rig.push.to() == [("news", frozenset({"frame"}))]
+    rig.sched._tick_once(at(10, 25))
+    assert len(rig.push.calls) == 1  # caught up once, not again
 
 
 def test_unbound_rotation_leaves_a_held_display_out(tmp_path: Path) -> None:
@@ -466,3 +476,118 @@ def test_push_manager_excludes_held_displays(tmp_path: Path) -> None:
         result = manager.push("home", exclude_device_ids={"hallway"}, settle=False)
     assert result.status == "held"
     assert events.list(limit=5) == []  # no History row: callers retry
+
+
+# ---------- shared fires and quiet hours ----------
+
+
+def _shared_dinner() -> Deck:
+    return Deck(
+        id="dinner",
+        name="Dinner",
+        device_ids=["frame", "hall"],
+        advance="timer",
+        advance_trigger="daily",
+        advance_fires_at="18:00",
+        advance_min_hold_minutes=0,
+        pages=[DeckPage(page_id="x"), DeckPage(page_id="y")],
+    )
+
+
+def test_a_shared_daily_fire_reaches_the_held_display_when_its_hold_ends(
+    tmp_path: Path,
+) -> None:
+    # The reproduced bug: dinner targets frame and hall, frame is held, hall
+    # gets dinner, and releasing frame never delivered it.
+    rig = _rig(tmp_path)
+    rig.decks.upsert(_shared_dinner())
+    rig.sched._tick_once(at(17, 0))
+    _hold(rig, "frame", at(18, 30))
+    rig.sched._tick_once(at(18, 0, 30))
+    assert rig.push.to() == [("x", frozenset({"hall"}))]
+    rig.push.calls.clear()
+    rig.sched._tick_once(at(18, 31))
+    # Only the display that missed it, and only once.
+    assert rig.push.to() == [("x", frozenset({"frame"}))]
+    assert rig.nav.current_page("frame", "dinner") == "x"
+    rig.sched._tick_once(at(18, 40))
+    assert len(rig.push.calls) == 1
+
+
+def test_a_missed_fire_expires_with_its_day(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    rig.decks.upsert(_shared_dinner())
+    rig.sched._tick_once(at(17, 0))
+    _hold(rig, "frame", DAY + timedelta(days=1, hours=8))
+    rig.sched._tick_once(at(18, 0, 30))
+    rig.push.calls.clear()
+    # The hold ends the next morning: yesterday's dinner isn't delivered.
+    rig.sched._tick_once(DAY + timedelta(days=1, hours=8, minutes=1))
+    assert [c["page_id"] for c in rig.push.calls] == []
+
+
+def test_a_newer_lineup_step_wins_over_an_older_missed_fire(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    rig.decks.upsert(_shared_dinner())
+    rig.decks.upsert(_cycle(["frame"], advance_anchor="19:00", advance_end_at="23:00"))
+    rig.sched._tick_once(at(17, 0))
+    _hold(rig, "frame", at(19, 20))
+    rig.sched._tick_once(at(18, 0, 30))  # dinner, frame held
+    rig.sched._tick_once(at(19, 0))  # the evening lineup starts, frame held
+    rig.push.calls.clear()
+    rig.sched._tick_once(at(19, 21))
+    # What frame would show had it never been held: the 19:00 step.
+    assert rig.push.to() == [("a", frozenset({"frame"}))]
+
+
+def test_a_hold_ending_in_quiet_hours_catches_up_when_they_end(tmp_path: Path) -> None:
+    # The reproduced bug: the catch-up was spent in quiet hours, so nothing
+    # reached the display until the next boundary.
+    rig = _rig(tmp_path)
+    rig.decks.upsert(_cycle(["frame"], advance_interval_minutes=120))
+    rig.sched._tick_once(at(0, 0))
+    _hold(rig, "frame", at(0, 20))
+    rig.push.quiet.add("frame")
+    rig.push.calls.clear()
+    rig.sched._tick_once(at(0, 21))
+    rig.sched._tick_once(at(0, 30))
+    assert rig.push.calls == []  # quiet hours are respected
+    rig.push.quiet.discard("frame")
+    rig.sched._tick_once(at(0, 40))  # quiet hours over, same step
+    assert rig.push.to() == [("a", frozenset({"frame"}))]
+    rig.sched._tick_once(at(0, 50))
+    assert len(rig.push.calls) == 1
+
+
+def test_a_missed_fire_waits_out_quiet_hours_too(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    rig.decks.upsert(_shared_dinner())
+    rig.sched._tick_once(at(17, 0))
+    _hold(rig, "frame", at(18, 30))
+    rig.sched._tick_once(at(18, 0, 30))
+    rig.push.quiet.add("frame")
+    rig.push.calls.clear()
+    rig.sched._tick_once(at(18, 31))
+    assert rig.push.calls == []
+    rig.push.quiet.discard("frame")
+    rig.sched._tick_once(at(19, 0))
+    assert rig.push.to() == [("x", frozenset({"frame"}))]
+
+
+def test_a_failed_catch_up_retries_after_a_pause(tmp_path: Path) -> None:
+    from app.scheduler import HOLD_CATCHUP_RETRY_S
+
+    rig = _rig(tmp_path)
+    rig.decks.upsert(_cycle(["frame"], advance_interval_minutes=120))
+    rig.sched._tick_once(at(0, 0))
+    _hold(rig, "frame", at(0, 20))
+    rig.push.fail.add("a")
+    rig.push.calls.clear()
+    rig.sched._tick_once(at(0, 21))
+    rig.sched._tick_once(at(0, 21, 30))  # inside the retry pause
+    assert len(rig.push.calls) == 1
+    rig.push.fail.clear()
+    rig.sched._tick_once(at(0, 21) + timedelta(seconds=HOLD_CATCHUP_RETRY_S + 1))
+    assert len(rig.push.calls) == 2
+    assert rig.push.calls[-1]["page_id"] == "a"
+    assert "frame" not in rig.sched._hold_catchups

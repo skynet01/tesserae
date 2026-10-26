@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, tzinfo
 from functools import partial
 from time import monotonic
@@ -205,6 +205,40 @@ def _deck_to_rotation(deck: Deck) -> Rotation | None:
         )
     except ValidationError:
         return None
+
+
+# A display's catch-up after a per-display hold waits this long after an
+# attempt that didn't reach the panel (a failed render) before trying again.
+# Quiet hours don't count as an attempt: the catch-up just waits them out.
+HOLD_CATCHUP_RETRY_S = 300.0
+
+
+@dataclass
+class _PendingFire:
+    """A daily / interval fire a display sat out while held."""
+
+    page_id: str
+    deck_id: str | None  # the trigger lineup, to record the nav position
+    fired_at: float
+    priority: int
+    expires_at: float  # end of the fire's local day: no "dinner" at breakfast
+
+
+@dataclass
+class _HoldCatchup:
+    """What a display missed while held, delivered once it's free.
+
+    ``cycles``: its hold ended, so whatever cycle lineup / rotation reaches
+    it now is due on it. ``fires``: schedule fires it missed, by record id.
+    Kept until something actually reaches the panel (quiet hours and failed
+    renders keep it), then dropped. In memory, like the scheduler's other
+    bookkeeping: a restart keeps the cycle catch-up (the lapsed hold is on
+    disk) but forgets missed schedule fires."""
+
+    cycles: bool = False
+    since: float = 0.0
+    fires: dict[str, _PendingFire] = field(default_factory=dict)
+    retry_after: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -465,6 +499,9 @@ class Scheduler:
         self._stuck_warned_at: float | None = None
         # schedule_id -> last fired POSIX timestamp
         self._last_fired: dict[str, float] = {}
+        # Per-display catch-ups after a per-display hold (device_id -> what
+        # it missed); see ``_run_hold_catchups``.
+        self._hold_catchups: dict[str, _HoldCatchup] = {}
         # schedule_id -> first observed POSIX timestamp. Cleared when a
         # schedule gets disabled or removed, so re-enable starts a fresh
         # window. Used to suppress daily backfill (see find_due).
@@ -759,6 +796,9 @@ class Scheduler:
         # when HA is offline.
         if self._condition_evaluator is not None:
             self._condition_evaluator.refresh_ha_states()
+        # Displays whose hold ended get what they missed, display-targeted.
+        # Before the fire pass, so anything newer due this tick lands last.
+        self._run_hold_catchups(now)
         # Rejoin pass: devices manually paged away (physical button /
         # touch) whose hold has lapsed get the rotation's current page
         # pushed back, device-targeted. Without this, a rotation with a
@@ -844,11 +884,10 @@ class Scheduler:
         }
 
     def _release_lapsed_device_holds(self, now: datetime) -> None:
-        """Clear holds that ran out (or were set to zero) and bring each
-        display back: every cycle record reaching it forgets its last fire,
-        so this tick's fire pass delivers the current step (a lineup only
-        repaints the display that was held; other panels already on the
-        step are skipped), the same catch-up a global resume gets."""
+        """Clear holds that ran out (or were set to zero) and queue each
+        display's catch-up (``_run_hold_catchups``): the current step of
+        whatever lineup reaches it, or a schedule fire it missed if that's
+        newer. Only that display is repainted."""
         store = self._rotation_state_store
         if store is None:
             return
@@ -861,32 +900,218 @@ class Scheduler:
             if not isinstance(until, datetime) or _hold_active(until, now):
                 continue
             try:
-                current = store.get(state.device_id)
-                if current is None or current.automation_hold_until != until:
-                    continue  # a new Hold landed meanwhile; leave it
-                store.upsert(current.model_copy(update={"automation_hold_until": None}))
+                # Compare-and-set: clear only the lapsed value we read; a
+                # newer Hold that landed meanwhile stays, and nothing else
+                # in the record is touched.
+                cleared = store.patch(
+                    state.device_id,
+                    {"automation_hold_until": None},
+                    expect={"automation_hold_until": until},
+                )
             except Exception:
                 logger.exception("device holds: clearing %s failed", state.device_id)
                 continue
-            self._resume_cycles_for(str(state.device_id))
+            if cleared is None:
+                continue  # a new Hold landed meanwhile; leave it
+            with self._lock:
+                entry = self._hold_catchups.setdefault(str(state.device_id), _HoldCatchup())
+                entry.cycles = True
+                entry.since = now.timestamp()
+                entry.retry_after = 0.0
             logger.info("display hold over: device=%s back to its schedule", state.device_id)
 
-    def _resume_cycles_for(self, device_id: str) -> None:
-        """Make every cycle record that reaches ``device_id`` due again,
-        including the display's own lineup memory, so the next fire pass
-        repaints it with the current step whatever it shows now (a page
-        sent by hand during the hold included)."""
-        for rotation in self._cycle_records():
-            if not self._cycle_reaches(rotation, device_id):
-                continue
+    def _note_missed_fire(
+        self, devices: set[str], schedule: Schedule, page_id: str, deck: Deck | None, now: datetime
+    ) -> None:
+        """Remember a schedule fire that left these held displays out, for
+        their catch-up. A newer fire of the same record replaces it."""
+        if not devices:
+            return
+        local = _local(now, self._tz_provider())
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        pending = _PendingFire(
+            page_id=page_id,
+            deck_id=deck.id if deck is not None else None,
+            fired_at=now.timestamp(),
+            priority=schedule.priority,
+            expires_at=midnight.timestamp(),
+        )
+        with self._lock:
+            for device_id in devices:
+                entry = self._hold_catchups.setdefault(device_id, _HoldCatchup())
+                entry.fires[schedule.id] = pending
+
+    def _catchup_satisfied(self, device_ids: set[str]) -> None:
+        """A regular delivery reached these displays after their hold: it's
+        newer than anything they missed, so their catch-up is done."""
+        if not device_ids:
+            return
+        with self._lock:
+            for device_id in device_ids:
+                self._hold_catchups.pop(device_id, None)
+
+    def _run_hold_catchups(self, now: datetime) -> None:
+        """Deliver each freed display what it missed while held: the most
+        recent of the current step of the lineups / rotations reaching it
+        and the schedule fires it sat out (the same page it would show had
+        it never been held), to that display only. Quiet hours are waited
+        out; a failed delivery is retried after ``HOLD_CATCHUP_RETRY_S``;
+        only a delivery that reached the panel ends the catch-up."""
+        with self._lock:
+            pending = list(self._hold_catchups.items())
+        if not pending:
+            return
+        on_hold = self._device_hold_ids(now)
+        now_ts = now.timestamp()
+        pusher = self._push_factory()
+        quiet = getattr(pusher, "device_in_quiet_hours", None)
+        for device_id, entry in pending:
+            if device_id in on_hold:
+                continue  # held again before it caught up: wait for that hold
             with self._lock:
-                self._rotation_last_step.pop(rotation.id, None)
-                self._rotation_last_pushed_at.pop(rotation.id, None)
-                self._rotation_last_window_start.pop(rotation.id, None)
-                key = f"{rotation.id}:{device_id}"
-                self._deck_last_advance.pop(key, None)
-                self._deck_last_advance_at.pop(key, None)
-                self._deck_last_advance_window.pop(key, None)
+                entry.fires = {k: f for k, f in entry.fires.items() if f.expires_at > now_ts}
+                if not entry.cycles and not entry.fires:
+                    self._hold_catchups.pop(device_id, None)
+                    continue
+            if now_ts < entry.retry_after:
+                continue
+            if callable(quiet) and quiet(device_id) is True:
+                continue  # respects quiet hours; lands when they end
+            with navigation_locked(self._deck_nav_store, [device_id]):
+                outcome = self._deliver_catchup(device_id, entry, now)
+            with self._lock:
+                if outcome is None or outcome:
+                    # Delivered, already satisfied, or nothing to deliver.
+                    if self._hold_catchups.get(device_id) is entry:
+                        self._hold_catchups.pop(device_id, None)
+                else:
+                    entry.retry_after = now_ts + HOLD_CATCHUP_RETRY_S
+
+    def _deliver_catchup(self, device_id: str, entry: _HoldCatchup, now: datetime) -> bool | None:
+        """Deliver one display's catch-up winner. True when it reached the
+        panel (or a regular fire already put it there), False to retry,
+        None when there is nothing to catch up."""
+        candidates: list[tuple[float, int, int, Callable[[], bool | None]]] = []
+        if entry.cycles:
+            for rotation in self._cycle_records():
+                if not rotation.enabled or not self._cycle_reaches(rotation, device_id):
+                    continue
+                state = self.compute_step_state(rotation, now)
+                if state is None:
+                    continue
+                picked = self._pick_eligible_step(rotation, state.step_index, now)
+                if picked is None:
+                    continue
+                page_id = rotation.steps[picked].page_id
+                if self._page_exists is not None and not self._page_exists(page_id):
+                    continue
+                candidates.append(
+                    (
+                        state.step_started_at.timestamp(),
+                        rotation.priority,
+                        0,
+                        partial(
+                            self._catchup_cycle, device_id, rotation, picked, state, now, entry
+                        ),
+                    )
+                )
+        for fire in entry.fires.values():
+            candidates.append(
+                (
+                    fire.fired_at,
+                    fire.priority,
+                    1,
+                    partial(self._catchup_fire, device_id, fire),
+                )
+            )
+        if not candidates:
+            return None
+        # What the panel would show had it never been held: the newest
+        # event; on a tie the higher priority, then a schedule over a cycle
+        # (the order the fire pass lands them in).
+        _when, _priority, _rank, deliver = max(candidates, key=lambda c: (c[0], c[1], c[2]))
+        return deliver()
+
+    def _catchup_cycle(
+        self,
+        device_id: str,
+        rotation: Rotation,
+        step_index: int,
+        state: StepState,
+        now: datetime,
+        entry: _HoldCatchup,
+    ) -> bool:
+        target = rotation.steps[step_index].page_id
+        deck = self._deck_store.get(rotation.id) if self._deck_store is not None else None
+        if (
+            deck is not None
+            and deck.advance != "manual"
+            and deck.advance_trigger == "cycle"
+            and device_id in deck.device_ids
+            and self._deck_nav_store is not None
+        ):
+            key = f"{deck.id}:{device_id}"
+            with self._lock:
+                last = self._deck_last_advance.get(key)
+                last_at = self._deck_last_advance_at.get(key)
+            if last == target and last_at is not None and last_at >= entry.since:
+                return True  # the regular advance already brought it back
+            return self._advance_device(deck, target, state, now, device_id, key)
+        with self._lock:
+            fired_step = self._rotation_last_step.get(rotation.id)
+            fired_at = self._rotation_last_pushed_at.get(rotation.id)
+        if fired_step == step_index and fired_at is not None and fired_at >= entry.since:
+            return True  # the rotation fired to it since its hold ended
+        result = self._push_factory().push(
+            target, device_ids={device_id}, respect_quiet_hours=True, source="rotation"
+        )
+        logger.info(
+            "display hold catch-up: device=%s rotation=%s -> %s (%s)",
+            device_id,
+            rotation.id,
+            target,
+            result.status,
+        )
+        return result.status in DELIVERED_STATUSES
+
+    def _catchup_fire(self, device_id: str, fire: _PendingFire) -> bool:
+        result = self._push_factory().push(
+            fire.page_id, device_ids={device_id}, respect_quiet_hours=True, source="scheduler"
+        )
+        logger.info(
+            "display hold catch-up: device=%s missed fire -> %s (%s)",
+            device_id,
+            fire.page_id,
+            result.status,
+        )
+        if result.status not in DELIVERED_STATUSES:
+            return False
+        deck = (
+            self._deck_store.get(fire.deck_id)
+            if fire.deck_id is not None and self._deck_store is not None
+            else None
+        )
+        if deck is not None and self._deck_nav_store is not None and fire.page_id in deck.page_ids:
+            try:
+                self._deck_nav_store.set(device_id, deck.id, fire.page_id)
+            except Exception:
+                logger.exception("display hold catch-up: nav record for %s failed", device_id)
+        return True
+
+    def _patch_state(self, state: Any, fields: dict[str, Any]) -> None:
+        """Write ``fields`` of a display's state read earlier this tick, only
+        while its ``override_until`` is still the value read (a press may
+        have taken a new hold since) and without touching any other field (a
+        Hold set from Home Assistant meanwhile survives). Falls back to a
+        whole-record write for stores without ``patch`` (test fakes)."""
+        store = self._rotation_state_store
+        if store is None:
+            return
+        patch = getattr(store, "patch", None)
+        if callable(patch):
+            patch(state.device_id, fields, expect={"override_until": state.override_until})
+        else:
+            store.upsert(state.model_copy(update=fields))
 
     def _cycle_reaches(self, rotation: Rotation, device_id: str) -> bool:
         """Whether a cycle record delivers to ``device_id``: a bound
@@ -945,7 +1170,7 @@ class Scheduler:
             rotation = rotations.get(state.rotation_id or "")
             if rotation is None or not rotation.enabled or not rotation.steps:
                 # Rotation gone or off: just drop the stale hold.
-                self._rotation_state_store.upsert(state.model_copy(update={"override_until": None}))
+                self._patch_state(state, {"override_until": None})
                 continue
             step_state = self.compute_step_state(rotation, now)
             if step_state is None:
@@ -958,7 +1183,7 @@ class Scheduler:
                 continue
             if state.step_index == picked:
                 # Already showing the current step; nothing to push.
-                self._rotation_state_store.upsert(state.model_copy(update={"override_until": None}))
+                self._patch_state(state, {"override_until": None})
                 continue
             result = self._push_factory().push(
                 page_id,
@@ -975,9 +1200,9 @@ class Scheduler:
                 result.status,
             )
             if result.status in ("sent", "quiet", "no_change"):
-                self._rotation_state_store.upsert(
-                    state.model_copy(update={"override_until": None, "step_index": picked})
-                )
+                self._patch_state(state, {"override_until": None, "step_index": picked})
+            if result.status in DELIVERED_STATUSES:
+                self._catchup_satisfied({state.device_id})
             if self._event_log is not None:
                 self._event_log.record(
                     type="rotation",
@@ -1425,6 +1650,7 @@ class Scheduler:
             if result.status not in DELIVERED_STATUSES:
                 return  # the panel didn't move: retry next tick, nav untouched
         self._deck_nav_store.set(device_id, deck.id, home)
+        self._catchup_satisfied({device_id})
         logger.info(
             "deck home return: device=%s deck=%s -> %s (%s)",
             device_id,
@@ -1648,6 +1874,7 @@ class Scheduler:
             self._deck_last_advance[key] = target
             self._deck_last_advance_at[key] = now.timestamp()
             self._deck_last_advance_window[key] = state.step_started_at.timestamp()
+        self._catchup_satisfied({device_id})
         logger.info(
             "deck timer advance: device=%s deck=%s -> %s (%s)",
             device_id,
@@ -2314,9 +2541,7 @@ class Scheduler:
                 and state.device_id in held
                 and state.device_id in bound
             ):
-                self._rotation_state_store.upsert(
-                    state.model_copy(update={"override_until": None, "step_index": step_index})
-                )
+                self._patch_state(state, {"override_until": None, "step_index": step_index})
 
     def _fire_rotation(
         self,
@@ -2398,6 +2623,11 @@ class Scheduler:
             return result
         if bypass_holds and held and result.status in ("sent", "no_change"):
             self._clear_holds(rotation.id, held, step.page_id, step_index)
+        if not bypass_holds and result.status in DELIVERED_STATUSES:
+            reached = (
+                device_filter if device_filter is not None else self._page_devices(step.page_id)
+            )
+            self._catchup_satisfied(reached - on_hold)
         # Same status semantics as _fire: a quiet result still counts
         # as "we tried" so the next tick doesn't re-attempt within the
         # quiet window. Failures don't bump so the next tick retries.
@@ -2561,29 +2791,29 @@ class Scheduler:
         respect_device_holds: bool = False,
         nav_deck: Deck | None = None,
     ) -> PushResult:
-        # Per-display automation holds (tick-driven fires only): leave the
-        # held displays out. When every target is held the fire doesn't
-        # count, no render and no History row, so the record stays due and
-        # lands as soon as the hold is over, as after a global resume.
+        # Per-display automation holds (tick-driven fires only): the fire
+        # goes to the displays that aren't held, and each held one records
+        # it as missed, delivered to just that display once its hold ends
+        # (``_run_hold_catchups``), so a shared daily fire isn't lost for it.
         exclude: set[str] = set()
+        held_targets: set[str] = set()
+        known_targets: set[str] | None = None
+        all_held = False
         if respect_device_holds:
             on_hold = self._device_hold_ids(now)
+            targets = (
+                set(device_ids) if device_ids is not None else self._page_devices(schedule.page_id)
+            )
+            known_targets = targets or None
             if on_hold:
-                targets = (
-                    set(device_ids)
-                    if device_ids is not None
-                    else self._page_devices(schedule.page_id)
-                )
+                held_targets = targets & on_hold
                 if targets and targets <= on_hold:
-                    with self._lock:
-                        self._last_status[schedule.id] = "held"
-                        self._last_reason[schedule.id] = "every display is on hold"
-                    return PushResult(
-                        status="held", page_id=schedule.page_id, error="every display is on hold"
-                    )
-                if device_ids is not None:
+                    all_held = True
+                elif device_ids is not None:
                     device_ids = device_ids - on_hold
                 else:
+                    # Unknown or partly held bindings: the push manager
+                    # drops the held displays itself.
                     exclude = on_hold
         # Conditional-schedule gate (v0.48). Evaluated before the push
         # so a held schedule incurs zero rendering cost. ``fire_now``
@@ -2622,6 +2852,17 @@ class Scheduler:
                     self._last_status[schedule.id] = "held"
                     self._last_reason[schedule.id] = "conditions not met"
                 return PushResult(status="held", page_id=schedule.page_id)
+        if all_held:
+            # Nothing to paint now. The fire still counts, so it isn't
+            # re-attempted every tick through the hold, and every held
+            # display catches it up when its hold ends.
+            logger.info("Schedule %s: every display on hold; catching up later", schedule.id)
+            with self._lock:
+                self._last_fired[schedule.id] = now.timestamp()
+                self._last_status[schedule.id] = "held"
+                self._last_reason[schedule.id] = "every display is on hold"
+            self._note_missed_fire(held_targets, schedule, target_page, nav_deck, now)
+            return PushResult(status="held", page_id=target_page, error="every display is on hold")
         logger.info("Firing schedule %s -> page %s", schedule.id, target_page)
         # Tick-driven firings (the background loop) are automation -
         # they should respect quiet hours so a 22:30 schedule doesn't
@@ -2667,6 +2908,10 @@ class Scheduler:
         if result.status in ("sent", "quiet", "no_change"):
             with self._lock:
                 self._last_fired[schedule.id] = now.timestamp()
+            # The fire counted: displays it left out for a hold get it later.
+            self._note_missed_fire(held_targets, schedule, target_page, nav_deck, now)
+        if respect_device_holds and result.status in DELIVERED_STATUSES and known_targets:
+            self._catchup_satisfied(known_targets - held_targets)
         with self._lock:
             self._last_status[schedule.id] = result.status
             if held:
