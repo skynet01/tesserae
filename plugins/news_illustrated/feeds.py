@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from html.parser import HTMLParser
+from urllib.parse import urljoin
 from xml.etree.ElementTree import Element, ParseError
 
 from defusedxml import DefusedXmlException
@@ -45,6 +46,7 @@ _SKIPPED_TAGS = frozenset(
     {"script", "style", "noscript", "nav", "header", "footer", "aside", "iframe", "form", "svg"}
 )
 _ATOM = "{http://www.w3.org/2005/Atom}"
+_XML_BASE = "{http://www.w3.org/XML/1998/namespace}base"
 _FEED_ACCEPT = "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.5"
 
 
@@ -80,7 +82,7 @@ def newest_item(
         if not reply.ok:
             log(f"Feed attempt {attempt} failed: {reply.reason()}")
         else:
-            item = parse_first_item(reply.body)
+            item = parse_first_item(reply.body, base_url=url)
             if item is not None:
                 return item
             log(f"Feed attempt {attempt}: no story in the feed (not RSS or Atom?)")
@@ -89,25 +91,28 @@ def newest_item(
     return None
 
 
-def parse_first_item(body: bytes) -> Item | None:
-    """The first ``<item>`` of an RSS 2.0 feed or ``<entry>`` of an Atom feed."""
+def parse_first_item(body: bytes, base_url: str = "") -> Item | None:
+    """The first ``<item>`` of an RSS 2.0 feed or ``<entry>`` of an Atom feed.
+    A relative link is resolved against ``xml:base`` and the feed's own URL."""
     try:
         root = fromstring(body)
-    except (ParseError, DefusedXmlException, ValueError):
+    except (ParseError, DefusedXmlException, ValueError, LookupError):
+        # LookupError: the XML declares an encoding Python does not know.
         return None
+    base = urljoin(base_url, root.attrib.get(_XML_BASE, ""))
     if root.tag == "rss":
         node = root.find("channel/item")
         if node is None:
             return None
         title = _child_text(node, "title")
-        link = _child_text(node, "link")
+        link = urljoin(base, _child_text(node, "link").strip())
         description = _child_text(node, "description")
     elif root.tag == f"{_ATOM}feed":
         node = root.find(f"{_ATOM}entry")
         if node is None:
             return None
         title = _child_text(node, f"{_ATOM}title")
-        link = _atom_link(node)
+        link = _atom_link(node, urljoin(base, node.attrib.get(_XML_BASE, "")))
         summary = node.find(f"{_ATOM}summary")
         if summary is None:
             summary = node.find(f"{_ATOM}content")
@@ -209,9 +214,11 @@ def _child_text(node: Element, tag: str) -> str:
     return "".join(child.itertext()) if child is not None else ""
 
 
-def _atom_link(entry: Element) -> str:
-    """The entry's alternate link (Atom allows several, ``rel`` defaults to it)."""
+def _atom_link(entry: Element, base: str) -> str:
+    """The entry's alternate link (Atom allows several, ``rel`` defaults to it),
+    resolved against the ``xml:base`` in force."""
     for link in entry.findall(f"{_ATOM}link"):
         if link.attrib.get("rel", "alternate") == "alternate" and link.attrib.get("href"):
-            return str(link.attrib["href"])
+            here = urljoin(base, link.attrib.get(_XML_BASE, ""))
+            return urljoin(here, str(link.attrib["href"]).strip())
     return ""

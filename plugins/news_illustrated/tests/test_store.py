@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-import os
+import importlib.util
+import subprocess
+import sys
+import threading
 from pathlib import Path
+
+import pytest
 
 from plugins.news_illustrated import store
 
@@ -39,21 +44,76 @@ def test_forgotten_placements_are_dropped(tmp_path: Path) -> None:
     assert set(store.read_json(tmp_path / store.CURSOR, {})) == {"new"}
 
 
-def test_run_lock(tmp_path: Path) -> None:
-    assert store.take_lock(tmp_path, now=T0)
+def test_run_lock_is_exclusive_and_needs_no_stale_guess(tmp_path: Path) -> None:
+    first = store.run_lock(tmp_path)
+    assert first.acquire(wait=False)
     assert store.lock_held(tmp_path)
-    assert not store.take_lock(tmp_path)
-    store.release_lock(tmp_path)
+    assert not store.run_lock(tmp_path).acquire(wait=False)
+    first.release()
     assert not store.lock_held(tmp_path)
-    assert store.take_lock(tmp_path)
+    # The file left behind is not a lock: only a live holder is.
+    assert (tmp_path / store.LOCK).exists()
+    second = store.run_lock(tmp_path)
+    assert second.acquire(wait=False)
+    second.release()
 
 
-def test_a_dead_runs_lock_is_taken_over(tmp_path: Path) -> None:
-    assert store.take_lock(tmp_path)
-    stale = (tmp_path / store.LOCK).stat().st_mtime - store.LOCK_STALE_S - 5
-    os.utime(tmp_path / store.LOCK, (stale, stale))
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX child process")
+def test_a_lock_held_by_another_process_dies_with_it(tmp_path: Path) -> None:
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time; fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT); "
+            "fcntl.flock(fd, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(30)",
+            str(tmp_path / store.LOCK),
+        ],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert holder.stdout is not None and holder.stdout.readline().strip() == b"locked"
+        assert store.lock_held(tmp_path)
+        assert not store.run_lock(tmp_path).acquire(wait=False)
+    finally:
+        holder.kill()
+        holder.wait()
+        if holder.stdout is not None:
+            holder.stdout.close()
     assert not store.lock_held(tmp_path)
-    assert store.take_lock(tmp_path)
+
+
+def test_cursor_updates_from_two_module_copies_are_not_lost(tmp_path: Path) -> None:
+    spec = importlib.util.spec_from_file_location(
+        "news_illustrated_store_copy", Path(store.__file__)
+    )
+    assert spec and spec.loader
+    copy = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = copy
+    try:
+        spec.loader.exec_module(copy)
+
+        def advance(n: int) -> None:
+            module = store if n % 2 else copy
+            module.pick(tmp_path, f"cell-{n}", 3, advance=True, now=T0)
+
+        threads = [threading.Thread(target=advance, args=(n,)) for n in range(24)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        sys.modules.pop(spec.name, None)
+    assert len(store.read_json(tmp_path / store.CURSOR, {})) == 24
+
+
+def test_unfinished_jobs_round_trip(tmp_path: Path) -> None:
+    assert store.load_job(tmp_path, "tech") == {}
+    store.save_job(tmp_path, "tech", {"summary": "S", "kie": {"task_id": "t"}})
+    store.save_job(tmp_path, "world", {"summary": "W"})
+    assert store.load_job(tmp_path, "tech")["kie"] == {"task_id": "t"}
+    store.save_job(tmp_path, "tech", None)
+    assert store.load_job(tmp_path, "tech") == {}
+    assert store.load_job(tmp_path, "world") == {"summary": "W"}
 
 
 def test_pictures_are_named_by_content_and_only_ours_are_served(tmp_path: Path) -> None:

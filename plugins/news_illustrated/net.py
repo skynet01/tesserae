@@ -1,28 +1,44 @@
 """One HTTP call shape for every upstream this widget talks to.
 
 Feeds, article pages, Groq and four image providers all want the same
-thing: a request with a hard timeout that never raises, a status code (0
-when nothing answered), the body capped at a size, and a short reason on
-failure. Callers branch on that instead of on urllib's exception zoo, and
-the tests replace :func:`request` alone to keep every byte off the network.
+thing: a request that never raises, a status code (0 when nothing answered),
+the body capped at a size, and a short reason on failure. Callers branch on
+that instead of on urllib's exception zoo, and the tests replace
+:func:`request` alone to keep every byte off the network.
 
-Nothing here logs: URLs can carry a key in their query (Pollinations), so
-callers log what they know is safe.
+Three guards hold for every call, because article links come from feeds and
+so from anyone:
+
+* **Public addresses only.** The URL and every redirect hop go through the
+  host's SSRF guard (``app.net_guard``): no loopback, LAN, link-local or cloud
+  metadata targets, so a feed cannot steer the server at an intranet page
+  and paste it into a Groq prompt.
+* **A total time limit.** ``timeout`` bounds the whole call, connect and every
+  read, so a server dripping bytes slowly cannot hold a run past its budget.
+* **A size limit on what is decoded,** not just on what crossed the wire, so
+  a small gzip bomb cannot expand into memory.
+
+Nothing here logs, and failure reasons never carry exception text that could
+hold a header or a URL (a key can sit in either).
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import time
 import urllib.error
 import urllib.request
+import zlib
 from dataclasses import dataclass
 from typing import Any
 
-from app.plugin_http import decode_content_encoding
+from app.net_guard import BlockedURLError, assert_public_url
 
 # A news site or an image CDN answering with something bigger than this is
 # not sending what we asked for.
 MAX_BYTES = 25 * 1024 * 1024
+CHUNK = 64 * 1024
 API_USER_AGENT = "tesserae/0.1 (+news_illustrated)"
 # Article pages and some feeds sit behind bot filters that refuse a
 # bot-shaped User-Agent outright (the PHP original learned this the hard way).
@@ -71,6 +87,24 @@ class Reply:
         return f"HTTP {self.status}"
 
 
+class _TooLarge(Exception):
+    pass
+
+
+class _OutOfTime(Exception):
+    pass
+
+
+class _PublicRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to a public address."""
+
+    def redirect_request(  # type: ignore[no-untyped-def]
+        self, req, fp, code, msg, headers, newurl
+    ):
+        assert_public_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def request(
     url: str,
     *,
@@ -80,37 +114,56 @@ def request(
     body: bytes | None = None,
     max_bytes: int = MAX_BYTES,
 ) -> Reply:
-    """Make one request; never raises. An HTTP error status still carries its
-    body (truncated), since the APIs explain themselves there."""
-    sent = {"User-Agent": API_USER_AGENT, "Accept-Encoding": "identity", **(headers or {})}
-    req = urllib.request.Request(url, data=body, headers=sent, method=method)
+    """Make one request in at most ``timeout`` seconds overall; never raises.
+    An HTTP error status still carries its body (truncated), since the APIs
+    explain themselves there."""
+    deadline = time.monotonic() + timeout
+    if timeout <= 0:
+        return Reply(0, error="no time left")
     try:
-        with urllib.request.urlopen(req, timeout=max(1.0, timeout)) as resp:
-            raw = resp.read(max_bytes + 1)
-            if len(raw) > max_bytes:
-                return Reply(int(resp.status), b"", "", "response too large")
+        assert_public_url(url)
+    except BlockedURLError:
+        return Reply(0, error="refused: not a public address")
+    sent = {"User-Agent": API_USER_AGENT, "Accept-Encoding": "gzip, deflate", **(headers or {})}
+    try:
+        req = urllib.request.Request(url, data=body, headers=sent, method=method)
+        opener = urllib.request.build_opener(_PublicRedirects())
+        with opener.open(req, timeout=max(0.5, timeout)) as resp:
+            raw = _read(resp, deadline, max_bytes)
             encoding = str(resp.headers.get("Content-Encoding", "") or "")
-            return Reply(
-                int(resp.status),
-                decode_content_encoding(raw, encoding),
-                str(resp.headers.get("Content-Type", "") or ""),
-            )
+            content_type = str(resp.headers.get("Content-Type", "") or "")
+            return Reply(int(resp.status), decode(raw, encoding, max_bytes), content_type)
     except urllib.error.HTTPError as err:
+        err_headers = getattr(err, "headers", None)
         try:
-            raw = err.read(4096)
+            raw = decode(
+                err.read(4096),
+                str(err_headers.get("Content-Encoding", "") or "") if err_headers else "",
+                64 * 1024,
+            )
         except Exception:
             raw = b""
         finally:
             err.close()
-        err_headers = getattr(err, "headers", None)
         content_type = str(err_headers.get("Content-Type", "") or "") if err_headers else ""
         return Reply(int(err.code), raw, content_type)
-    except urllib.error.URLError as err:
-        return Reply(0, error=f"could not connect ({_short(err.reason)})")
-    except TimeoutError:
+    except BlockedURLError:
+        return Reply(0, error="refused: redirected to a non-public address")
+    except _TooLarge:
+        return Reply(0, error="response too large")
+    except (_OutOfTime, TimeoutError):
         return Reply(0, error="timed out")
-    except (OSError, ValueError) as err:
-        return Reply(0, error=f"{type(err).__name__}: {_short(err)}")
+    except urllib.error.URLError as err:
+        reason = err.reason
+        if isinstance(reason, TimeoutError):
+            return Reply(0, error="timed out")
+        return Reply(0, error=f"could not connect ({type(reason).__name__})")
+    except OSError as err:
+        return Reply(0, error=f"connection failed ({type(err).__name__})")
+    except ValueError:
+        # http.client quotes a bad header value (a key with a newline in it)
+        # back in its message, so the message is dropped.
+        return Reply(0, error="invalid request")
 
 
 def post_json(
@@ -122,5 +175,51 @@ def post_json(
     return request(url, timeout=timeout, method="POST", headers=sent, body=data)
 
 
-def _short(value: object) -> str:
-    return " ".join(str(value).split())[:160]
+def _read(resp: Any, deadline: float, max_bytes: int) -> bytes:
+    """The body, one network read at a time, inside the deadline and the cap."""
+    chunks: list[bytes] = []
+    size = 0
+    read = getattr(resp, "read1", None) or resp.read
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise _OutOfTime
+        _socket_timeout(resp, left)
+        chunk = read(CHUNK)
+        if not chunk:
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > max_bytes:
+            raise _TooLarge
+        chunks.append(chunk)
+
+
+def _socket_timeout(resp: Any, seconds: float) -> None:
+    """Shrink the socket timeout to what is left, so the read that straddles
+    the deadline cannot wait a whole timeout past it. Best effort: the socket
+    sits behind private attributes of http.client."""
+    with contextlib.suppress(AttributeError, OSError, ValueError):
+        resp.fp.raw._sock.settimeout(max(0.05, seconds))
+
+
+def decode(raw: bytes, content_encoding: str, max_bytes: int) -> bytes:
+    """Undo gzip or deflate, refusing output over ``max_bytes``. Other
+    encodings pass through untouched."""
+    encoding = content_encoding.lower().strip()
+    if encoding in ("gzip", "x-gzip"):
+        attempts = [zlib.MAX_WBITS | 16]
+    elif encoding == "deflate":
+        # deflate is ambiguous in the wild: zlib-wrapped or raw.
+        attempts = [zlib.MAX_WBITS, -zlib.MAX_WBITS]
+    else:
+        return raw
+    for wbits in attempts:
+        inflater = zlib.decompressobj(wbits)
+        try:
+            out = inflater.decompress(raw, max_bytes + 1)
+        except zlib.error:
+            continue
+        if len(out) > max_bytes or inflater.unconsumed_tail:
+            raise _TooLarge
+        return out
+    return raw

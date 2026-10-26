@@ -68,3 +68,24 @@ def truncate_bytes(text: str, limit: int) -> str:
 def first_words(text: str, count: int) -> str:
     """The first ``count`` words of ``text``."""
     return " ".join(text.split()[: max(1, count)])
+
+
+_URL_SECRET = re.compile(
+    r"([?&](?:key|api_key|apikey|token|access_token)=)[^&\s'\"]+", re.IGNORECASE
+)
+_BEARER = re.compile(r"(Bearer\s+)[^\s'\"]+", re.IGNORECASE)
+
+
+def redact(line: str, secrets: tuple[str, ...] | list[str]) -> str:
+    """``line`` with every configured secret, any key in a URL query and any
+    Bearer token replaced by ``***``. For everything that is logged or saved."""
+    for secret in sorted((s for s in secrets if len(s) >= 4), key=len, reverse=True):
+        line = line.replace(secret, "***")
+    return _BEARER.sub(r"\1***", _URL_SECRET.sub(r"\1***", line))
+
+
+def is_clean_key(key: str) -> bool:
+    """True when ``key`` has no whitespace or control characters inside it.
+    A pasted key with a newline would otherwise end up in an HTTP header,
+    and http.client quotes the header back in its error message."""
+    return all(c.isprintable() and not c.isspace() for c in key)

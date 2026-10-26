@@ -116,7 +116,7 @@ def test_kie_polling_stops_inside_the_budget(fake_net: FakeNet) -> None:
     clock = Clock()
     got, log = _paint(_settings("kie"), clock)
     assert got is None
-    assert "kie: timed out waiting for the picture" in log
+    assert "kie: still painting when the time ran out; the next run collects it" in log
     # Polls stop at 120 s, which also keeps 15 s of the 150 s budget for a download.
     assert clock.now - 1000.0 <= painters.KIE_POLL_MAX_S + painters.KIE_POLL_EVERY_S
     assert len(fake_net.to(painters.KIE_RECORD_URL)) == int(
@@ -262,8 +262,9 @@ def test_request_timeouts_shrink_with_the_budget(fake_net: FakeNet) -> None:
     assert budget.timeout(90) == 90
     clock.sleep(140)
     assert budget.timeout(90) == 10
-    clock.sleep(20)
-    assert budget.timeout(90) == 5  # never below the floor
+    clock.sleep(10)
+    with pytest.raises(painters.PaintError, match="budget used up"):
+        budget.timeout(90)  # no request is started once the time is gone
 
 
 def test_prompts() -> None:
@@ -275,3 +276,95 @@ def test_prompts() -> None:
         "Far Side-style black and white ink comic, crosshatching, bold outlines. Title. Summary. "
         "No content in bottom 25% or near edges."
     )
+
+
+def _kie_paint(
+    memo: painters.TaskMemo, clock: Clock | None = None
+) -> tuple[painters.Painting | None, list[str]]:
+    clock = clock or Clock()
+    log: list[str] = []
+    got = painters.paint(
+        "T",
+        "S",
+        _settings("kie"),
+        budget=painters.Budget(clock=clock, sleep=clock.sleep),
+        log=log.append,
+        memo=memo,
+    )
+    return got, log
+
+
+def test_kie_task_id_is_saved_before_polling_and_collected_later(fake_net: FakeNet) -> None:
+    saved: list[object] = []
+    memo = painters.TaskMemo(save=saved.append, clock=lambda: 5000.0)
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t9"}}))
+    fake_net.on(painters.KIE_RECORD_URL, _kie_record("generating"))
+    got, _log = _kie_paint(memo)
+    assert got is None
+    assert saved == [None, {"task_id": "t9", "at": 5000.0}], "kept for the next run"
+    # The next run (a restart, say) collects the same task: no second create, no second charge.
+    fake_net.calls.clear()
+    fake_net.routes.clear()
+    fake_net.on(painters.KIE_RECORD_URL, _kie_success())
+    fake_net.on(RESULT_URL, ok(picture(), "image/png"))
+    later = painters.TaskMemo(memo.record, save=saved.append, clock=lambda: 5000.0 + 3600)
+    got, log = _kie_paint(later)
+    assert got is not None and got.provider == "kie"
+    assert fake_net.to(painters.KIE_CREATE_URL) == []
+    assert "taskId=t9" in fake_net.to(painters.KIE_RECORD_URL)[0].url
+    assert "kie: collecting the task an earlier run paid for" in log
+    assert later.record is None and saved[-1] is None
+
+
+def test_an_old_kie_task_is_not_collected(fake_net: FakeNet) -> None:
+    memo = painters.TaskMemo(
+        {"task_id": "old", "at": 0.0}, clock=lambda: painters.KIE_RESUME_S + 1.0
+    )
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "new"}}))
+    fake_net.on(painters.KIE_RECORD_URL, _kie_success())
+    fake_net.on(RESULT_URL, ok(picture(), "image/png"))
+    assert _kie_paint(memo)[0] is not None
+    assert len(fake_net.to(painters.KIE_CREATE_URL)) == 1
+
+
+def test_an_unanswered_kie_create_is_not_resent_at_once(fake_net: FakeNet) -> None:
+    memo = painters.TaskMemo(clock=lambda: 100.0)
+    fake_net.on(painters.KIE_CREATE_URL, net.Reply(0, error="timed out"))
+    got, log = _kie_paint(memo)
+    assert got is None and memo.record == {"unanswered": True, "at": 100.0}
+    assert "kie: task request unanswered (timed out); not resending yet" in log
+    got, log = _kie_paint(painters.TaskMemo(memo.record, clock=lambda: 100.0 + 600))
+    assert got is None and len(fake_net.to(painters.KIE_CREATE_URL)) == 1
+    assert "may have been accepted" in log[-1]
+    # A refusal is definite: nothing is remembered.
+    refused = painters.TaskMemo()
+    fake_net.routes.clear()
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"code": 402, "msg": "Insufficient credits"}))
+    _kie_paint(refused)
+    assert refused.record is None
+
+
+def test_an_answer_after_the_budget_does_not_count(fake_net: FakeNet) -> None:
+    clock = Clock()
+
+    def late_success(call: Call) -> net.Reply:
+        del call
+        clock.now = 1000.0 + painters.BUDGET_S + 15  # the answer lands at 165 s
+        return _kie_success()
+
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    fake_net.on(painters.KIE_RECORD_URL, late_success)
+    fake_net.on(RESULT_URL, ok(picture(), "image/png"))
+    got, log = _kie_paint(painters.TaskMemo(), clock)
+    assert got is None
+    assert fake_net.to(RESULT_URL) == []
+    assert log[-1] == "kie: image time budget used up"
+
+
+def test_polling_never_sleeps_past_the_budget(fake_net: FakeNet) -> None:
+    clock = Clock()
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    fake_net.on(painters.KIE_RECORD_URL, _kie_record("generating"))
+    budget = painters.Budget(seconds=60, clock=clock, sleep=clock.sleep)
+    painters.paint("T", "S", _settings("kie"), budget=budget, log=[].append)
+    assert clock.now <= budget.deadline - painters.KIE_DOWNLOAD_RESERVE_S

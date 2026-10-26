@@ -44,6 +44,11 @@ KIE_POLL_EVERY_S = 5.0
 KIE_POLL_MAX_S = 120.0
 # Kept back from the budget for downloading the finished picture.
 KIE_DOWNLOAD_RESERVE_S = 15.0
+# A task an earlier run paid for is collected if it is younger than this...
+KIE_RESUME_S = 6 * 3600
+# ...and after a create request that got no answer, kie.ai is not asked again
+# for that story for this long (the day's retry comes two hours later).
+KIE_UNANSWERED_S = 2 * 3600
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 POLLINATIONS_URL = "https://gen.pollinations.ai/image/"
 HUGGINGFACE_URL = "https://router.huggingface.co/hf-inference/models/"
@@ -74,16 +79,54 @@ class Budget:
     def left(self) -> float:
         return self.deadline - self.clock()
 
-    def timeout(self, cap: float, floor: float = 5.0) -> float:
-        """A request timeout: what is left of the budget, within [floor, cap]."""
-        return max(floor, min(cap, self.left()))
+    def timeout(self, cap: float) -> float:
+        """A request's total time: what is left of the budget, at most ``cap``.
+        Raises PaintError once nothing is left."""
+        self.check()
+        return min(cap, self.left())
+
+    def check(self) -> None:
+        """Raise PaintError when the budget is spent: an answer that arrives
+        after it does not count."""
+        if self.left() <= 0:
+            raise PaintError("image time budget used up")
+
+
+@dataclass
+class TaskMemo:
+    """A paid kie.ai task that has to outlive this process: its id once kie
+    accepted it, or the time of a request whose answer never came (kie may
+    have accepted it). Saved through ``save`` as soon as it changes, so a
+    restart mid-poll collects the same task instead of paying for another."""
+
+    record: dict[str, Any] | None = None
+    save: Callable[[dict[str, Any] | None], None] = lambda record: None
+    clock: Callable[[], float] = time.time
+
+    def remember(self, record: dict[str, Any] | None) -> None:
+        self.record = record
+        self.save(record)
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """One provider call's inputs."""
+
+    settings: Settings
+    key: str
+    detailed: str
+    short: str
+    budget: Budget
+    stopped: Callable[[], bool]
+    memo: TaskMemo
+    log: Callable[[str], None]
 
 
 @dataclass(frozen=True)
 class Settings:
     """What the cascade needs from the widget's settings."""
 
-    keys: dict[str, str]
+    keys: dict[str, str] = field(repr=False)
     order: tuple[str, ...] = PROVIDERS
     kie_model: str = "google/nano-banana"
     gemini_model: str = "gemini-2.5-flash-image"
@@ -121,8 +164,10 @@ def paint(
     budget: Budget,
     log: Callable[[str], None],
     stopped: Callable[[], bool] = lambda: False,
+    memo: TaskMemo | None = None,
 ) -> Painting | None:
     """The first provider's picture, as a JPEG; None when none produced one."""
+    memo = memo or TaskMemo()
     detailed, short = prompts(title, summary, settings.image_prompt)
     for name in settings.order:
         key = settings.keys.get(name, "")
@@ -136,7 +181,7 @@ def paint(
             return None
         log(f"Painting with {name}")
         try:
-            raw = _CALLS[name](settings, key, detailed, short, budget, stopped)
+            raw = _CALLS[name](Attempt(settings, key, detailed, short, budget, stopped, memo, log))
             jpeg, size = to_jpeg(raw)
         except PaintError as err:
             log(f"{name}: {err}")
@@ -174,34 +219,30 @@ def to_jpeg(raw: bytes) -> tuple[bytes, tuple[int, int]]:
 # ----------------------------------------------------------------------
 
 
-def kie(
-    settings: Settings,
-    key: str,
-    detailed: str,
-    short: str,
-    budget: Budget,
-    stopped: Callable[[], bool],
-) -> bytes:
-    """kie.ai: create a task, poll it until it has a picture, download that."""
-    del short
-    auth = {"Authorization": f"Bearer {key}"}
-    created = net.post_json(
-        KIE_CREATE_URL,
-        {"model": settings.kie_model, "input": {"prompt": detailed, "image_size": "9:16"}},
-        timeout=budget.timeout(30),
-        headers=auth,
-    )
-    answer = created.json()
-    task_id = _dig(answer, "data", "taskId")
-    if not created.ok or not task_id:
-        raise PaintError(f"task not created ({_message(answer) or created.reason()})")
-    poll_until = min(budget.clock() + KIE_POLL_MAX_S, budget.deadline - KIE_DOWNLOAD_RESERVE_S)
-    url = f"{KIE_RECORD_URL}?{urllib.parse.urlencode({'taskId': str(task_id)})}"
-    while budget.clock() < poll_until:
-        budget.sleep(KIE_POLL_EVERY_S)
-        if stopped():
-            raise PaintError("stopped")
-        polled = net.request(url, timeout=budget.timeout(15), headers=auth)
+def kie(a: Attempt) -> bytes:
+    """kie.ai: create a task (or take up the one an earlier run left), poll it
+    until it has a picture, download that."""
+    auth = {"Authorization": f"Bearer {a.key}"}
+    earlier = a.memo.record or {}
+    age = a.memo.clock() - float(earlier.get("at") or 0)
+    if earlier.get("task_id") and age < KIE_RESUME_S:
+        task_id = str(earlier["task_id"])
+        a.log("kie: collecting the task an earlier run paid for")
+    elif earlier.get("unanswered") and age < KIE_UNANSWERED_S:
+        raise PaintError(
+            "an earlier task request went unanswered and may have been accepted; "
+            "not sending another yet"
+        )
+    else:
+        task_id = _kie_create(a, auth)
+    url = f"{KIE_RECORD_URL}?{urllib.parse.urlencode({'taskId': task_id})}"
+    poll_until = min(a.budget.clock() + KIE_POLL_MAX_S, a.budget.deadline - KIE_DOWNLOAD_RESERVE_S)
+    while a.budget.clock() + KIE_POLL_EVERY_S <= poll_until:
+        a.budget.sleep(KIE_POLL_EVERY_S)
+        if a.stopped():
+            raise PaintError("stopped (the task is collected next run)")
+        polled = net.request(url, timeout=a.budget.timeout(15), headers=auth)
+        a.budget.check()
         record = polled.json()
         if not polled.ok:
             continue
@@ -209,39 +250,59 @@ def kie(
         if state == "success":
             image_url = _kie_result_url(_dig(record, "data", "resultJson"))
             if not image_url:
+                a.memo.remember(None)
                 raise PaintError("finished without a picture URL")
-            got = net.request(image_url, timeout=budget.timeout(60, 15))
+            got = net.request(image_url, timeout=a.budget.timeout(60))
+            a.budget.check()
             if not got.ok:
-                raise PaintError(f"download failed ({got.reason()})")
+                raise PaintError(f"download failed ({got.reason()}); tried again next run")
+            a.memo.remember(None)
             return got.body
         if state == "fail":
+            a.memo.remember(None)
             raise PaintError(
                 f"generation failed ({_dig(record, 'data', 'failMsg') or 'no reason'})"
             )
         # waiting / queuing / generating: keep polling
-    raise PaintError("timed out waiting for the picture")
+    raise PaintError("still painting when the time ran out; the next run collects it")
 
 
-def gemini(
-    settings: Settings,
-    key: str,
-    detailed: str,
-    short: str,
-    budget: Budget,
-    stopped: Callable[[], bool],
-) -> bytes:
+def _kie_create(a: Attempt, auth: dict[str, str]) -> str:
+    """Ask kie.ai for a picture; the task id, remembered before anything else."""
+    a.memo.remember(None)
+    created = net.post_json(
+        KIE_CREATE_URL,
+        {"model": a.settings.kie_model, "input": {"prompt": a.detailed, "image_size": "9:16"}},
+        timeout=a.budget.timeout(30),
+        headers=auth,
+    )
+    answer = created.json()
+    task_id = _dig(answer, "data", "taskId")
+    if task_id:
+        a.memo.remember({"task_id": str(task_id), "at": a.memo.clock()})
+        a.budget.check()
+        return str(task_id)
+    if created.status == 0 or created.status >= 500:
+        # No answer (or a server error) after the request went out: kie may
+        # have accepted and be charging for it. Do not ask again for a while.
+        a.memo.remember({"unanswered": True, "at": a.memo.clock()})
+        raise PaintError(f"task request unanswered ({created.reason()}); not resending yet")
+    raise PaintError(f"task not created ({_message(answer) or created.reason()})")
+
+
+def gemini(a: Attempt) -> bytes:
     """Gemini image generation: one call, the picture inline as base64."""
-    del short, stopped
     reply = net.post_json(
-        GEMINI_URL.format(model=urllib.parse.quote(settings.gemini_model, safe="-._")),
+        GEMINI_URL.format(model=urllib.parse.quote(a.settings.gemini_model, safe="-._")),
         {
-            "contents": [{"parts": [{"text": detailed}]}],
+            "contents": [{"parts": [{"text": a.detailed}]}],
             "generationConfig": {"imageConfig": {"aspectRatio": "9:16", "imageSize": "2K"}},
         },
-        timeout=budget.timeout(90),
+        timeout=a.budget.timeout(90),
         # The header rather than ?key= keeps the key out of any URL that gets logged.
-        headers={"x-goog-api-key": key},
+        headers={"x-goog-api-key": a.key},
     )
+    a.budget.check()
     answer = reply.json()
     if isinstance(answer, dict) and isinstance(answer.get("error"), dict):
         raise PaintError(_message(answer) or reply.reason())
@@ -258,58 +319,44 @@ def gemini(
     raise PaintError("no picture in the answer")
 
 
-def pollinations(
-    settings: Settings,
-    key: str,
-    detailed: str,
-    short: str,
-    budget: Budget,
-    stopped: Callable[[], bool],
-) -> bytes:
+def pollinations(a: Attempt) -> bytes:
     """Pollinations (FLUX): a GET whose path is the prompt."""
-    del detailed, stopped
     query = urllib.parse.urlencode(
         {
             "width": FLUX_WIDTH,
             "height": FLUX_HEIGHT,
-            "model": settings.pollinations_model,
+            "model": a.settings.pollinations_model,
             "nologo": "true",
             # Keep the prompt as written rather than letting the service rewrite it.
             "enhance": "false",
-            "key": key,
+            "key": a.key,
         }
     )
     reply = net.request(
-        f"{POLLINATIONS_URL}{urllib.parse.quote(short, safe='')}?{query}",
-        timeout=budget.timeout(90),
+        f"{POLLINATIONS_URL}{urllib.parse.quote(a.short, safe='')}?{query}",
+        timeout=a.budget.timeout(90),
     )
+    a.budget.check()
     if not reply.ok:
         raise PaintError(reply.reason())
     return reply.body
 
 
-def huggingface(
-    settings: Settings,
-    key: str,
-    detailed: str,
-    short: str,
-    budget: Budget,
-    stopped: Callable[[], bool],
-) -> bytes:
+def huggingface(a: Attempt) -> bytes:
     """HuggingFace Inference (FLUX.1-schnell): the picture is the response body."""
-    del detailed, stopped
     reply = net.post_json(
-        HUGGINGFACE_URL + urllib.parse.quote(settings.huggingface_model, safe="/-._"),
-        {"inputs": short, "parameters": {"width": FLUX_WIDTH, "height": FLUX_HEIGHT}},
-        timeout=budget.timeout(90),
-        headers={"Authorization": f"Bearer {key}", "Accept": "image/jpeg"},
+        HUGGINGFACE_URL + urllib.parse.quote(a.settings.huggingface_model, safe="/-._"),
+        {"inputs": a.short, "parameters": {"width": FLUX_WIDTH, "height": FLUX_HEIGHT}},
+        timeout=a.budget.timeout(90),
+        headers={"Authorization": f"Bearer {a.key}", "Accept": "image/jpeg"},
     )
+    a.budget.check()
     if not reply.ok:
         raise PaintError(_message(reply.json()) or reply.reason())
     return reply.body
 
 
-_CALLS: dict[str, Callable[..., bytes]] = {
+_CALLS: dict[str, Callable[[Attempt], bytes]] = {
     "kie": kie,
     "gemini": gemini,
     "pollinations": pollinations,

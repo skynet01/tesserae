@@ -112,10 +112,20 @@ def summarise(
 
 
 def _content(answer: object) -> str:
+    """The reply text: a string, or a list of ``{"type": "text", "text": ...}``
+    parts. Anything else (an object, numbers) is not a summary."""
     try:
-        return str(answer["choices"][0]["message"]["content"] or "").strip()  # type: ignore[index]
+        content = answer["choices"][0]["message"]["content"]  # type: ignore[index]
     except (KeyError, IndexError, TypeError):
         return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list) and all(
+        isinstance(p, dict) and p.get("type") == "text" and isinstance(p.get("text"), str)
+        for p in content
+    ):
+        return " ".join(p["text"] for p in content).strip()
+    return ""
 
 
 def _error(answer: object) -> str:

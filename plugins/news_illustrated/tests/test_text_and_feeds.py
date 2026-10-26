@@ -142,3 +142,37 @@ def test_failed_or_odd_article_fetch_falls_back(fake_net: FakeNet) -> None:
 def test_article_shorter_than_the_description_is_ignored(fake_net: FakeNet) -> None:
     fake_net.on("https://news.example.com/a", ok(article_page("Tiny.")))
     assert feeds.article(_item(), [].append).origin == "feed description"
+
+
+def test_unknown_xml_encoding_is_a_parse_failure() -> None:
+    body = b'<?xml version="1.0" encoding="x-made-up"?><rss><channel><item><title>T</title></item></channel></rss>'
+    assert feeds.parse_first_item(body) is None
+
+
+def test_relative_links_resolve_against_xml_base_and_the_feed_url() -> None:
+    atom = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"
+        xml:base="https://blog.example.com/posts/">
+      <entry><title>Relative</title><link href="article"/></entry></feed>"""
+    item = feeds.parse_first_item(atom, base_url="https://blog.example.com/feed.xml")
+    assert item is not None and item.link == "https://blog.example.com/posts/article"
+    entry_base = b"""<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+      <entry xml:base="/2026/"><title>T</title><link href="story"/></entry></feed>"""
+    item = feeds.parse_first_item(entry_base, base_url="https://site.example.com/feed")
+    assert item is not None and item.link == "https://site.example.com/2026/story"
+    plain = rss("T", "/news/1").encode()
+    item = feeds.parse_first_item(plain, base_url="https://site.example.com/rss")
+    assert item is not None and item.link == "https://site.example.com/news/1"
+
+
+def test_redact_scrubs_keys_url_keys_and_bearer_tokens() -> None:
+    line = "failed: Bearer abc123 for https://x.example/i?w=1&key=pol-secret&h=2 with gsk_SECRET_1"
+    assert text.redact(line, ("gsk_SECRET_1",)) == (
+        "failed: Bearer *** for https://x.example/i?w=1&key=***&h=2 with ***"
+    )
+
+
+def test_keys_with_whitespace_or_control_characters_are_not_clean() -> None:
+    assert text.is_clean_key("gsk_abc-123")
+    assert not text.is_clean_key("gsk_abc\nheader: x")
+    assert not text.is_clean_key("two words")
+    assert not text.is_clean_key("bell\x07")

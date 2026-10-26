@@ -91,3 +91,13 @@ def test_no_key_makes_no_request_and_falls_back(fake_net: FakeNet) -> None:
 
 def test_headline_only_fallback_is_the_headline(fake_net: FakeNet) -> None:
     assert _run(body="", key="")[0] == "Tram line approved"
+
+
+def test_only_text_content_counts_as_a_summary(fake_net: FakeNet) -> None:
+    fake_net.on(
+        summarise.GROQ_URL,
+        ok_json(_answer({"text": "an object"})),  # type: ignore[arg-type]
+        ok_json({"choices": [{"message": {"content": [{"type": "text", "text": "Parts."}]}}]}),
+    )
+    assert _run(words=3)[0] == "The council voted"
+    assert _run(words=3)[0] == "Parts."

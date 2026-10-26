@@ -240,16 +240,17 @@ def test_runner_makes_the_edition_in_the_background(fake_net: FakeNet, tmp_path:
     last = state["last_run"]
     assert last["reason"] == "schedule" and last["outcome"] == "3 new" and not last["failed"]
     assert any("Story 2 of 3: Business" in line for line in last["log"])
-    assert not (tmp_path / store.LOCK).exists()
+    assert not store.lock_held(tmp_path)
     assert not pipeline.due(tmp_path, "06:05", datetime.now())
 
 
 def test_only_one_run_at_a_time(tmp_path: Path) -> None:
     runner = pipeline.Runner()
-    assert store.take_lock(tmp_path)  # another process is running
+    other = store.run_lock(tmp_path)
+    assert other.acquire(wait=False)  # another process is running
     assert not runner.start(_cfg(), tmp_path, tz=None, reason="manual")
     assert runner.running(tmp_path) and runner.pending(tmp_path) == 1
-    store.release_lock(tmp_path)
+    other.release()
     assert not runner.running(tmp_path)
 
 
@@ -266,7 +267,7 @@ def test_a_run_that_crashes_releases_the_lock(
     last = store.load_state(tmp_path)["last_run"]
     assert last["failed"] and last["outcome"] == "RuntimeError: bug"
     assert "edition" not in store.load_state(tmp_path)
-    assert not (tmp_path / store.LOCK).exists()
+    assert not store.lock_held(tmp_path)
 
 
 def test_manual_runs_do_not_use_up_the_days_attempts(fake_net: FakeNet, tmp_path: Path) -> None:
@@ -276,3 +277,115 @@ def test_manual_runs_do_not_use_up_the_days_attempts(fake_net: FakeNet, tmp_path
     _wait(runner, tmp_path)
     today = pipeline.edition(datetime.now(), "06:05")
     assert store.load_state(tmp_path)["attempts"] == {today: []}
+
+
+def test_a_failed_setup_leaves_no_phantom_run(
+    monkeypatch: pytest.MonkeyPatch, fake_net: FakeNet, tmp_path: Path
+) -> None:
+    def disk_full(*a: Any, **k: Any) -> None:
+        raise OSError("No space left on device")
+
+    real = pipeline._note_attempt
+    monkeypatch.setattr(pipeline, "_note_attempt", disk_full)
+    runner = pipeline.Runner()
+    assert not runner.start(_cfg(), tmp_path, tz=None, reason="schedule")
+    assert not runner.running(tmp_path) and not store.lock_held(tmp_path)
+    monkeypatch.setattr(pipeline, "_note_attempt", real)
+    _news(fake_net)
+    assert runner.start(_cfg(), tmp_path, tz=None, reason="schedule")
+    _wait(runner, tmp_path)
+
+
+def test_the_edition_is_the_one_the_run_started_in(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    days = iter(["2026-10-24", "2026-10-25", "2026-10-25"])
+    monkeypatch.setattr(pipeline, "edition", lambda now, run_at: next(days))
+
+    def made_one(*a: Any, **k: Any) -> pipeline.Outcome:
+        return pipeline.Outcome(made=1)  # the clock passes 06:05 meanwhile
+
+    monkeypatch.setattr(pipeline, "run_edition", made_one)
+    runner = pipeline.Runner()
+    assert runner.start(_cfg(), tmp_path, tz=None, reason="schedule")
+    _wait(runner, tmp_path)
+    state = store.load_state(tmp_path)
+    assert state["edition"] == "2026-10-24"
+    assert list(state["attempts"]) == ["2026-10-24"]
+
+
+def test_one_broken_source_does_not_cost_the_others(
+    monkeypatch: pytest.MonkeyPatch, fake_net: FakeNet, tmp_path: Path
+) -> None:
+    _news(fake_net)
+    real = feeds.newest_item
+
+    def flaky(url: str, log: Any, sleep: Any = None) -> Any:
+        if url == FEEDS["Business"]:
+            raise LookupError("unknown encoding: x-made-up")
+        return real(url, log)
+
+    monkeypatch.setattr(feeds, "newest_item", flaky)
+    assert _run(tmp_path) == pipeline.Outcome(made=2, missing=1)
+    assert [s["source"] for s in store.load_stories(tmp_path)] == ["Tech", "Global"]
+
+
+def test_a_paid_kie_task_survives_into_the_next_run(fake_net: FakeNet, tmp_path: Path) -> None:
+    cfg = _cfg(huggingface_api_key="", kie_api_key="kie", sources=f"Tech | {FEEDS['Tech']}")
+    _news(fake_net)
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    fake_net.on(painters.KIE_RECORD_URL, ok_json({"data": {"state": "generating"}}))
+    clock = {"now": 0.0}
+
+    def budget() -> painters.Budget:
+        def sleep(s: float) -> None:
+            clock["now"] += s
+
+        return painters.Budget(clock=lambda: clock["now"], sleep=sleep)
+
+    # Nothing earlier to keep, so the story goes up as text only meanwhile.
+    assert _run(tmp_path, cfg, budget=budget) == pipeline.Outcome(made=1)
+    assert store.load_stories(tmp_path)[0]["image"] == ""
+    job = store.load_job(tmp_path, cfg.sources[0].key)
+    assert job["kie"]["task_id"] == "t1" and job["summary"] == "Summary here."
+    # The next run (after a restart, say) collects the task with the same summary.
+    fake_net.calls.clear()
+    fake_net.routes = [r for r in fake_net.routes if not r[0].startswith(painters.KIE_RECORD_URL)]
+    fake_net.on(
+        painters.KIE_RECORD_URL,
+        ok_json(
+            {
+                "data": {
+                    "state": "success",
+                    "resultJson": '{"resultUrls": ["https://cdn.example.com/p.png"]}',
+                }
+            }
+        ),
+    )
+    fake_net.on("https://cdn.example.com/p.png", ok(picture(), "image/png"))
+    assert _run(tmp_path, cfg, budget=budget) == pipeline.Outcome(made=1)
+    assert fake_net.to(painters.KIE_CREATE_URL) == []
+    assert fake_net.to(summarise.GROQ_URL) == []
+    assert store.load_stories(tmp_path)[0]["provider"] == "kie"
+    assert store.load_job(tmp_path, cfg.sources[0].key) == {}
+
+
+def test_secrets_never_reach_the_log(fake_net: FakeNet, tmp_path: Path) -> None:
+    _news(fake_net)
+    fake_net.routes.insert(
+        0,
+        (
+            summarise.GROQ_URL,
+            [ok_json({"error": {"message": "Invalid API Key gsk_live_SECRET"}}, 401)],
+        ),
+    )
+    cfg = _cfg(groq_api_key="gsk_live_SECRET", gemini_api_key="AIza\nInjected: 1")
+    assert cfg.paint.keys["gemini"] == "" and cfg.problems
+    assert "gsk_live_SECRET" not in repr(cfg)
+    runner = pipeline.Runner()
+    assert runner.start(cfg, tmp_path, tz=None, reason="manual")
+    _wait(runner, tmp_path)
+    saved = (tmp_path / store.STATE).read_text(encoding="utf-8")
+    assert "gsk_live_SECRET" not in saved and "AIza" not in saved
+    assert "Groq failed: Invalid API Key ***" in saved
+    assert "gemini_api_key has spaces or control characters in it" in saved

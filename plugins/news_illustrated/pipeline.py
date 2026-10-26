@@ -21,13 +21,14 @@ import logging
 import re
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
-from . import feeds, painters, store, summarise
+from . import feeds, painters, store, summarise, text
 
 try:
     from app import jobs
@@ -74,25 +75,43 @@ class Source:
 @dataclass(frozen=True)
 class Config:
     sources: tuple[Source, ...]
-    groq_key: str = ""
+    groq_key: str = field(default="", repr=False)
     groq_model: str = "openai/gpt-oss-120b"
     summary_words: int = DEFAULT_WORDS
     summary_prompt: str = ""
     run_at: str = DEFAULT_RUN_AT
     paint: painters.Settings = field(default_factory=lambda: painters.Settings(keys={}))
+    # Every key as configured, for scrubbing anything logged or saved.
+    secrets: tuple[str, ...] = field(default=(), repr=False)
+    # Settings that could not be used, said in words for the log and the page.
+    problems: tuple[str, ...] = ()
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> Config:
         def get(name: str, default: str = "") -> str:
             return str(settings.get(name) or "").strip() or default
 
-        keys = {name: get(f"{name}_api_key") for name in painters.PROVIDERS}
+        secrets: list[str] = []
+        problems: list[str] = []
+
+        def key(name: str) -> str:
+            raw = get(name)
+            if raw:
+                secrets.append(raw)
+                secrets.extend(part for part in raw.split() if len(part) >= 8)
+            if raw and not text.is_clean_key(raw):
+                problems.append(f"{name} has spaces or control characters in it, so it is not used")
+                return ""
+            return raw
+
+        keys = {name: key(f"{name}_api_key") for name in painters.PROVIDERS}
+        groq_key = key("groq_api_key")
         return cls(
             # Absent is the default list; saved blank means no sources at all.
             sources=parse_sources(
                 DEFAULT_SOURCES if settings.get("sources") is None else str(settings["sources"])
             ),
-            groq_key=get("groq_api_key"),
+            groq_key=groq_key,
             groq_model=get("groq_model", "openai/gpt-oss-120b"),
             summary_words=_whole(settings.get("summary_words"), DEFAULT_WORDS, 10, 300),
             summary_prompt=get("summary_prompt"),
@@ -106,6 +125,8 @@ class Config:
                 huggingface_model=get("huggingface_model", "black-forest-labs/FLUX.1-schnell"),
                 image_prompt=get("image_prompt"),
             ),
+            secrets=tuple(secrets),
+            problems=tuple(problems),
         )
 
     @property
@@ -232,22 +253,38 @@ def make_story(
         return previous, "unchanged"
     if stopped():
         return previous, "kept" if previous else "missing"
-    found = feeds.article(item, log)
-    log(f"Summarising {len(found.text)} characters from the {found.origin}")
-    summary = summarise.summarise(
-        item.title,
-        found.text,
-        api_key=cfg.groq_key,
-        model=cfg.groq_model,
-        words=cfg.summary_words,
-        template=cfg.summary_prompt,
-        log=log,
-    )
+    job = _unfinished(data_dir, source, item)
+    if job.get("summary"):
+        summary = str(job["summary"])
+        log("Taking up the unfinished attempt at this story and its summary")
+    else:
+        found = feeds.article(item, log)
+        log(f"Summarising {len(found.text)} characters from the {found.origin}")
+        summary = summarise.summarise(
+            item.title,
+            found.text,
+            api_key=cfg.groq_key,
+            model=cfg.groq_model,
+            words=cfg.summary_words,
+            template=cfg.summary_prompt,
+            log=log,
+        )
+        job = {"link": item.link, "title": item.title, "summary": summary, "at": time.time()}
+        store.save_job(data_dir, source.key, job)
     if stopped():
         return previous, "kept" if previous else "missing"
+
+    def remember(task: dict[str, Any] | None) -> None:
+        job["kie"] = task
+        store.save_job(data_dir, source.key, job)
+
+    memo = painters.TaskMemo(job.get("kie"), save=remember)
     painting = painters.paint(
-        item.title, summary, cfg.paint, budget=budget(), log=log, stopped=stopped
+        item.title, summary, cfg.paint, budget=budget(), log=log, stopped=stopped, memo=memo
     )
+    if painting is not None or not memo.record:
+        # Done with it, or nothing paid for is left to collect: start afresh next time.
+        store.save_job(data_dir, source.key, None)
     story = {
         "source_key": source.key,
         "source": source.label,
@@ -269,6 +306,19 @@ def make_story(
     story["image"] = store.save_image(data_dir, source.key, painting.jpeg)
     story["provider"] = painting.provider
     return story, "made"
+
+
+def _unfinished(data_dir: Path, source: Source, item: feeds.Item) -> dict[str, Any]:
+    """The earlier attempt at this very story, if one was left unfinished
+    recently; anything else is forgotten."""
+    job = store.load_job(data_dir, source.key)
+    if not job:
+        return {}
+    same = job.get("link") == item.link and job.get("title") == item.title
+    if same and time.time() - float(job.get("at") or 0) < painters.KIE_RESUME_S:
+        return job
+    store.save_job(data_dir, source.key, None)
+    return {}
 
 
 # ----------------------------------------------------------------------
@@ -299,21 +349,26 @@ def run_edition(
         if stopped():
             log("Stopped")
             break
-        store.refresh_lock(data_dir)
         progress(n - 1, total, source.label)
         log(f"Story {n} of {total}: {source.label}")
         previous = before.get(source.key)
-        story, what = make_story(
-            source,
-            previous,
-            cfg,
-            data_dir,
-            today=today,
-            force=force,
-            log=log,
-            stopped=stopped,
-            budget=budget,
-        )
+        try:
+            story, what = make_story(
+                source,
+                previous,
+                cfg,
+                data_dir,
+                today=today,
+                force=force,
+                log=log,
+                stopped=stopped,
+                budget=budget,
+            )
+        except Exception as err:  # one bad source must not cost the others their stories
+            log(
+                f"This story failed ({type(err).__name__}: {str(err)[:160]}), keeping the previous one"
+            )
+            story, what = previous, "kept" if previous else "missing"
         outcome.count(what)
         if story is not None:
             shown[source.key] = story
@@ -340,14 +395,18 @@ class _Run:
     data_dir: Path
     stop: threading.Event
     total: int
+    lock: store.FileLock
+    # The edition this run makes, fixed when it starts: a run that starts at
+    # 06:04 and ends at 06:06 made yesterday's, not today's.
+    edition: str
     done: int = 0
     label: str = ""
 
 
 class Runner:
-    """At most one run per data dir, on a daemon thread. The run lock in the
-    data dir keeps a second process (or a reloaded copy of this module) from
-    starting another alongside it."""
+    """At most one run per data dir, on a daemon thread. The run holds an OS
+    lock on a file in the data dir for its whole life, which keeps a second
+    process (or a reloaded copy of this module) from starting another."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -385,39 +444,55 @@ class Runner:
         reason: str,
         force: bool = False,
     ) -> bool:
-        """Start a run unless one is going. Returns at once."""
+        """Start a run unless one is going. Returns at once; False when no run
+        was started (one is going, or it could not be set up)."""
         data_dir = Path(data_dir)
         if not cfg.sources:
             return False
         with self._lock:
-            if data_dir in self._runs or not store.take_lock(data_dir):
+            if data_dir in self._runs:
                 return False
-            run = _Run(data_dir, threading.Event(), len(cfg.sources))
+            lock = store.run_lock(data_dir)
+            try:
+                if not lock.acquire(wait=False):
+                    return False
+            except OSError:
+                logger.warning("%s: could not open the run lock", PLUGIN_ID)
+                return False
+            now = datetime.now(tz)
+            run = _Run(
+                data_dir, threading.Event(), len(cfg.sources), lock, edition(now, cfg.run_at)
+            )
             self._runs[data_dir] = run
-        _note_attempt(data_dir, datetime.now(tz), cfg.run_at, reason)
-        # The copied context carries the widget's capability scope into the
-        # thread, so the run is held to the hosts the manifest declares.
-        context = contextvars.copy_context()
-        thread = threading.Thread(
-            target=context.run,
-            args=(self._work, cfg, run, tz, reason, force),
-            name=f"{PLUGIN_ID}-run",
-            daemon=True,
-        )
         try:
-            thread.start()
-        except RuntimeError:
-            with self._lock:
-                self._runs.pop(data_dir, None)
-            store.release_lock(data_dir)
-            raise
+            _note_attempt(data_dir, run.edition, now, reason)
+            # The copied context carries the widget's capability scope into the
+            # thread, so the run is held to the hosts the manifest declares.
+            context = contextvars.copy_context()
+            threading.Thread(
+                target=context.run,
+                args=(self._work, cfg, run, tz, reason, force),
+                name=f"{PLUGIN_ID}-run",
+                daemon=True,
+            ).start()
+        except Exception as err:
+            # Nothing is running: undo everything taken above.
+            logger.warning("%s: could not start a run (%s)", PLUGIN_ID, type(err).__name__)
+            self._finish(run)
+            return False
         return True
+
+    def _finish(self, run: _Run) -> None:
+        with self._lock:
+            self._runs.pop(run.data_dir, None)
+        run.lock.release()
 
     def _work(self, cfg: Config, run: _Run, tz: tzinfo | None, reason: str, force: bool) -> None:
         lines: list[str] = []
         started = time.time()
 
         def log(line: str) -> None:
+            line = text.redact(line, cfg.secrets)
             lines.append(f"{time.strftime('%H:%M:%S')} {line}")
             del lines[:-LOG_LINES]
             logger.info("%s: %s", PLUGIN_ID, line)
@@ -430,6 +505,8 @@ class Runner:
         failure = ""
         try:
             log(f"Run started ({reason})")
+            for problem in cfg.problems:
+                log(problem)
             outcome = run_edition(
                 cfg,
                 run.data_dir,
@@ -441,25 +518,25 @@ class Runner:
             )
             log(f"Run finished: {outcome.sentence()}")
         except Exception as err:  # a bug must not leave the lock held
-            logger.exception("%s: run failed", PLUGIN_ID)
-            failure = f"{type(err).__name__}: {str(err)[:200]}"
+            failure = text.redact(f"{type(err).__name__}: {str(err)[:200]}", cfg.secrets)
+            # No traceback: exception text can quote a key. Where it broke is enough.
+            frame = traceback.extract_tb(err.__traceback__)[-1:]
+            where = f" at {Path(frame[0].filename).name}:{frame[0].lineno}" if frame else ""
+            logger.error("%s: run failed%s: %s", PLUGIN_ID, where, failure)
             log(f"Run failed: {failure}")
         finally:
             try:
-                _record_run(run.data_dir, cfg, tz, reason, started, outcome, failure, lines, run)
+                _record_run(run, reason, started, outcome, failure, lines)
             finally:
-                with self._lock:
-                    self._runs.pop(run.data_dir, None)
-                store.release_lock(run.data_dir)
+                self._finish(run)
                 _tray_close(run, outcome, failure)
 
 
 RUNNER = Runner()
 
 
-def _note_attempt(data_dir: Path, now: datetime, run_at: str, reason: str) -> None:
+def _note_attempt(data_dir: Path, current: str, now: datetime, reason: str) -> None:
     state = store.load_state(data_dir)
-    current = edition(now, run_at)
     attempts = state.get("attempts") if isinstance(state.get("attempts"), dict) else {}
     # Only the current edition's attempts matter; older ones are dropped.
     tries = [float(t) for t in (attempts or {}).get(current, [])]
@@ -470,20 +547,16 @@ def _note_attempt(data_dir: Path, now: datetime, run_at: str, reason: str) -> No
 
 
 def _record_run(
-    data_dir: Path,
-    cfg: Config,
-    tz: tzinfo | None,
+    run: _Run,
     reason: str,
     started: float,
     outcome: Outcome | None,
     failure: str,
     lines: list[str],
-    run: _Run,
 ) -> None:
-    state = store.load_state(data_dir)
-    finished_edition = edition(datetime.now(tz), cfg.run_at)
+    state = store.load_state(run.data_dir)
     if outcome is not None and not run.stop.is_set() and (outcome.made or outcome.unchanged):
-        state["edition"] = finished_edition
+        state["edition"] = run.edition
     state["last_run"] = {
         "reason": reason,
         "started": int(started),
@@ -494,9 +567,9 @@ def _record_run(
         "log": lines,
     }
     try:
-        store.save_state(data_dir, state)
+        store.save_state(run.data_dir, state)
     except OSError:
-        logger.exception("%s: could not save the run state", PLUGIN_ID)
+        logger.error("%s: could not save the run state", PLUGIN_ID)
 
 
 def _tray_report(run: _Run, total: int) -> None:
