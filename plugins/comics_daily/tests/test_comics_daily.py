@@ -680,20 +680,71 @@ def test_gocomics_freshness_follows_the_edition() -> None:
     today = "2026-10-25"
     pics = True
     ok_today = {"fetched_on": today, "edition": today}
-    assert srv.freshness(go, ok_today, pics, False, today) == ("ok", None)
-    # Yesterday's strip while today's retries remain: not published yet.
+    assert srv.freshness(go, ok_today, pics, False, today, today) == ("ok", None)
+    # Yesterday's strip before today's is due (published is still yesterday).
     lagging = {"fetched_on": today, "edition": "2026-10-24", "attempted_on": today, "attempts": 1}
-    assert srv.freshness(go, lagging, pics, False, today) == ("ok", None)
-    spent = dict(lagging, attempts=srv.EDITION_ATTEMPTS)
-    assert srv.freshness(go, spent, pics, False, today) == ("stale", "2026-10-24")
+    assert srv.freshness(go, lagging, pics, False, today, "2026-10-24") == ("ok", None)
+    # Once today's is due it is late, however few attempts were made.
+    assert srv.freshness(go, lagging, pics, False, today, today) == ("stale", "2026-10-24")
     # The request "worked" today but the site keeps serving an old strip.
-    old = {"fetched_on": today, "edition": "2026-10-20", "attempted_on": today, "attempts": 1}
-    assert srv.freshness(go, old, pics, False, today) == ("stale", "2026-10-20")
-    # Archived Dilbert carries an old date by design.
+    old = dict(lagging, edition="2026-10-20")
+    assert srv.freshness(go, old, pics, False, today, "2026-10-24") == ("stale", "2026-10-20")
+    # Archived Dilbert and image addresses carry old dates by design.
     dilbert = srv.Source("dilbert", "dilbert", "dilbert")
-    assert srv.freshness(dilbert, dict(old), pics, False, today) == ("ok", None)
+    assert srv.freshness(dilbert, dict(old), pics, False, today, today) == ("ok", None)
+    url = srv.Source("url:x", "url", "garfield", "https://featureassets.gocomics.com/assets/x")
+    assert srv.freshness(url, dict(old), pics, False, today, today) == ("ok", None)
     assert srv.freshness(go, {"error": "x"}, False, False, today) == ("missing", None)
     assert srv.freshness(go, {}, False, True, today) == ("pending", None)
+
+
+def test_published_edition_uses_eastern_midnight_plus_grace() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    def at(hour: int, offset: int, day: int) -> datetime:
+        return datetime(2026, 10, day, hour, 15, tzinfo=timezone(timedelta(hours=offset)))
+
+    # Phoenix 06:15: New York is past 03:00 on the 26th, so the 26th is due.
+    assert srv.published_edition(at(6, -7, 26), "2026-10-26") == "2026-10-26"
+    # Phoenix 21:15 on the 25th: New York is just past midnight, within the
+    # grace, and the local day is still the 25th anyway.
+    assert srv.published_edition(at(21, -7, 25), "2026-10-25") == "2026-10-25"
+    # Berlin 07:15 on the 26th: New York's 26th is not three hours old yet.
+    assert srv.published_edition(at(7, 1, 26), "2026-10-26") == "2026-10-25"
+    # Melbourne 09:15 on the 26th is still the 25th in New York.
+    assert srv.published_edition(at(9, 11, 26), "2026-10-26") == "2026-10-25"
+    # Honolulu late on the 25th: never ahead of the local day.
+    assert srv.published_edition(at(22, -10, 25), "2026-10-25") == "2026-10-25"
+
+
+def test_partial_set_gives_way_to_a_fuller_one(web: FakeWeb, tmp_path: Path) -> None:
+    store = images.Store(tmp_path)
+    base = "https://featureassets.amuniversal.com/assets/"
+    web.routes[("GET", srv.FARSIDE_URL)] = [_html(FARSIDE_PAGE)]
+
+    def serve(*good: str) -> None:
+        for name in ("one", "two", "three"):
+            reply = _img(_jpeg((95 + len(name), 110))) if name in good else (503, {}, b"")
+            web.routes[("GET", base + name)] = [reply]
+
+    def refresh() -> bool:
+        return srv.refresh_source(store, srv.FARSIDE, TODAY, web=srv.Web(), gocomics=None)
+
+    serve("one")
+    assert not refresh()
+    assert len(store.sources()["farside"]["pictures"]) == 1
+    serve("one", "two")
+    assert not refresh()
+    record = store.sources()["farside"]
+    assert len(record["pictures"]) == 2
+    assert record["error"] == "Only 2 of 3 pictures came through."
+    serve("one", "two", "three")
+    assert refresh()
+    assert len(store.sources()["farside"]["pictures"]) == 3
+    assert store.sources()["farside"]["partial"] is False
+    serve("one", "two")
+    assert not refresh()
+    assert len(store.sources()["farside"]["pictures"]) == 3
 
 
 def test_decoded_size_is_capped() -> None:
@@ -707,3 +758,15 @@ def test_decoded_size_is_capped() -> None:
     assert srv.decode_body(b"plain", "", 100, "example.org") == b"plain"
     with pytest.raises(srv.SourceError, match="damaged"):
         srv.decode_body(b"not gzip", "gzip", 100, "example.org")
+
+
+def test_gzip_members_trailers_and_cumulative_cap() -> None:
+    two = gzip.compress(b"hello") + gzip.compress(b"world")
+    assert srv.decode_body(two, "gzip", 100, "example.org") == b"helloworld"
+    with pytest.raises(srv.SourceError, match="more than"):
+        srv.decode_body(gzip.compress(b"a" * 60) * 2, "gzip", 100, "example.org")
+    # A stream cut before its CRC/length trailer is damaged, not short.
+    with pytest.raises(srv.SourceError, match="damaged"):
+        srv.decode_body(gzip.compress(b"hello")[:-4], "gzip", 100, "example.org")
+    with pytest.raises(srv.SourceError, match="damaged"):
+        srv.decode_body(zlib.compress(b"hello") + b"junk", "deflate", 100, "example.org")

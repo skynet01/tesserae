@@ -49,12 +49,13 @@ import urllib.request
 import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from email.message import Message
 from http.cookiejar import CookieJar, LoadError, MozillaCookieJar
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from flask import Blueprint, abort, current_app, send_file
 from werkzeug.wrappers import Response
@@ -153,6 +154,10 @@ RETRY_STALE_S = 60 * 60
 # many times a day. The newest strip shows meanwhile, so this is not urgent.
 EDITION_RETRY_S = 3 * 3600
 EDITION_ATTEMPTS = 5
+# GoComics publishes each day's strips at midnight US Eastern. Once this much
+# later, a strip still on the day before is reported as not updated.
+GOCOMICS_TZ = "America/New_York"
+PUBLISH_GRACE = timedelta(hours=3)
 # How long the very first render waits for pictures before painting the
 # "fetching" state; the composer gives a widget six seconds in all.
 FIRST_RENDER_WAIT_S = 4.0
@@ -283,15 +288,34 @@ def decode_body(body: bytes, encoding: str, limit: int, host: str) -> bytes:
     else:
         return body
     for wbits in attempts:
-        decoder = zlib.decompressobj(wbits)
         try:
-            out = decoder.decompress(body, limit + 1)
+            return _inflate(body, wbits, limit, multi=coding != "deflate")
         except zlib.error:
             continue
-        if len(out) > limit or decoder.unconsumed_tail:
-            raise SourceError(f"{host} sent more than this widget will download.")
-        return out
+        except OverflowError as err:
+            raise SourceError(f"{host} sent more than this widget will download.") from err
     raise SourceError(f"{host} sent a damaged compressed answer.")
+
+
+def _inflate(body: bytes, wbits: int, limit: int, *, multi: bool) -> bytes:
+    """Decompress every member of ``body`` (gzip allows several back to back)
+    under one cumulative ``limit``. A stream that ends before its trailer, or
+    leaves bytes after it that aren't another member, is a ``zlib.error``;
+    going past ``limit`` is an OverflowError."""
+    out = bytearray()
+    data = body
+    while True:
+        decoder = zlib.decompressobj(wbits)
+        out += decoder.decompress(data, limit + 1 - len(out))
+        if len(out) > limit or decoder.unconsumed_tail:
+            raise OverflowError("decoded body over the limit")
+        if not decoder.eof:
+            raise zlib.error("truncated compressed stream")
+        data = decoder.unused_data
+        if not data:
+            return bytes(out)
+        if not multi:
+            raise zlib.error("data after the end of the stream")
 
 
 def _download(web: Web, url: str, what: str) -> bytes:
@@ -826,10 +850,12 @@ def _succeeded(
 ) -> Callable[[dict[str, Any]], None]:
     def record(entry: dict[str, Any]) -> None:
         if len(stored) < expected:
-            # Keep the last complete set; a partial one only stands in when
-            # there is nothing else. Not marked fetched today, so it retries.
-            if not entry.get("pictures"):
-                entry.update(pictures=stored, edition=fetched.edition)
+            # Never let a partial set replace a complete one. A partial set
+            # stands in when there is nothing else, and gives way to a fuller
+            # one. Not marked fetched today, so it retries.
+            cached = entry.get("pictures") or []
+            if not cached or (entry.get("partial") and len(stored) > len(cached)):
+                entry.update(pictures=stored, edition=fetched.edition, partial=True)
             entry["error"] = f"Only {len(stored)} of {expected} pictures came through."
             return
         entry.update(
@@ -838,6 +864,7 @@ def _succeeded(
             fetched_on=today,
             last_success=time.time(),
             error=None,
+            partial=False,
         )
         if fetched.label:
             entry["label"] = fetched.label
@@ -923,33 +950,50 @@ def fetch(
             run.thread.join(FIRST_RENDER_WAIT_S)
         records = store.sources()
     busy = _running_keys(store.root)
-    return _payload(wanted, problems, records, busy, options, store, today_iso)
+    published = published_edition(datetime.now(UTC), today_iso)
+    return _payload(wanted, problems, records, busy, options, store, today_iso, published)
+
+
+def published_edition(now: datetime, today: str) -> str:
+    """The newest GoComics edition that should be out at ``now`` (aware).
+
+    GoComics publishes at midnight US Eastern; after a few hours' grace the
+    Eastern date is due. Never later than the local ``today``, the date the
+    strip pages are asked for, so a server west of New York isn't told its
+    strip is late before its own day has begun.
+    """
+    try:
+        zone: Any = ZoneInfo(GOCOMICS_TZ)
+    except ZoneInfoNotFoundError:
+        zone = timezone(timedelta(hours=-5))
+    eastern = (now.astimezone(zone) - PUBLISH_GRACE).date().isoformat()
+    return min(eastern, today)
 
 
 def freshness(
-    source: Source, record: dict[str, Any], has_pictures: bool, busy: bool, today: str
+    source: Source,
+    record: dict[str, Any],
+    has_pictures: bool,
+    busy: bool,
+    today: str,
+    published: str | None = None,
 ) -> tuple[str, str | None]:
     """How current a source's pictures are, and the date a note should show.
 
     ``ok``, ``stale`` (old pictures up), ``missing`` (none, and the last try
-    failed) or ``pending``. A GoComics strip is judged by its own edition,
-    not by whether today's request went through: a page that keeps answering
-    with an old strip is stale once it is more than a day behind, or a day
-    behind with today's retries spent. Archived sources (Dilbert) and image
-    addresses carry no such date and go by the last success.
+    failed) or ``pending``. A GoComics strip is judged by its own edition
+    against the one that should be out by now (``published``), not by
+    whether a request went through or how many were made: a page that keeps
+    answering with an old strip is stale, and so is yesterday's once today's
+    is due. Archived sources (Dilbert) and image addresses carry no such
+    date and go by the last success.
     """
     error = record.get("error")
     if not has_pictures:
         return ("missing" if error and not busy else "pending"), None
     edition = record.get("edition")
-    if source.kind == "gocomics" and isinstance(edition, str) and edition < today:
-        yesterday = (date.fromisoformat(today) - timedelta(days=1)).isoformat()
-        spent = (
-            record.get("attempted_on") == today
-            and int(record.get("attempts") or 0) >= EDITION_ATTEMPTS
-        )
-        if edition < yesterday or spent or (error and record.get("fetched_on") != today):
-            return "stale", edition
+    if source.kind == "gocomics" and isinstance(edition, str) and edition < (published or today):
+        return "stale", edition
     if error and record.get("fetched_on") != today:
         return "stale", record.get("fetched_on")
     return "ok", None
@@ -963,6 +1007,7 @@ def _payload(
     options: dict[str, Any],
     store: Any,
     today: str,
+    published: str | None = None,
 ) -> dict[str, Any]:
     farside: list[dict[str, Any]] = []
     strips: list[dict[str, Any]] = []
@@ -973,7 +1018,8 @@ def _payload(
         pictures = _pictures(record, store)
         label = str(record.get("label") or source.label)
         error = record.get("error")
-        state, since = freshness(source, record, bool(pictures), source.key in busy, today)
+        busy_now = source.key in busy
+        state, since = freshness(source, record, bool(pictures), busy_now, today, published)
         sources.append(
             {
                 "id": source.name,
