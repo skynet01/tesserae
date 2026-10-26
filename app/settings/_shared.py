@@ -25,6 +25,7 @@ from typing import Any
 from flask import Blueprint, current_app, flash, redirect, request, url_for
 from werkzeug.wrappers import Response
 
+from app import repeater
 from app import updater as _updater_mod
 from app.device_loader import Device, DeviceRegistry
 from app.discovery import DiscoveredDevice, DiscoveryCache
@@ -327,6 +328,12 @@ def coerce_form_value(field: dict[str, Any], raw: str | None) -> Any:
             if str(choice.get("value")) == raw:
                 return choice["value"]
         return raw
+    if ftype == repeater.TYPE:
+        # The rows arrive as JSON in one hidden input (static/components.js
+        # keeps it in step with the row controls). Malformed rows raise
+        # RepeaterValueError; the save handler refuses the whole save
+        # rather than store a partial or empty list over the saved rows.
+        return repeater.parse_rows(field, raw)
     if ftype == "server_colour":
         from app.server_identity import normalise_colour
 
@@ -381,6 +388,11 @@ def values_from_form(fields: list[dict[str, Any]]) -> dict[str, Any]:
             if raw == "custom":
                 raw = request.form.get(f"{name}__custom")
             values[name] = coerce_form_value(field, raw)
+        elif field.get("type") == repeater.TYPE:
+            # A form that never carried the repeater (an older page, a
+            # hand-built POST) leaves the saved rows alone.
+            if name in request.form:
+                values[name] = coerce_form_value(field, request.form.get(name))
         elif field.get("type") == "days":
             # A weekday picker submits one checkbox per ticked day plus a
             # marker input so "nothing ticked" is distinguishable from "the

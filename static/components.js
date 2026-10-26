@@ -993,6 +993,186 @@
       .replace(/'/g, "&#39;");
   }
 
+  // A repeater setting (``repeater_field`` in _components.html): rows of
+  // sub-field controls with Add, Remove and Move up / down. The row
+  // controls have no ``name``; the one hidden input that does carries the
+  // rows as JSON, rewritten on every edit and once more on submit, so what
+  // is saved is what the rows show. Structural edits (add, remove, move)
+  // fire ``input`` on that hidden input, which is what the settings page's
+  // unsaved-changes bar listens for. A form reset (the bar's Discard)
+  // rebuilds the rows the page was served with: a hidden input has no
+  // separate default value to fall back to once it has been written.
+  function attachRepeaters(root) {
+    root.querySelectorAll("[data-repeater]:not([data-repeater-bound])").forEach((box) => {
+      const storage = box.querySelector("[data-repeater-storage]");
+      const list = box.querySelector("[data-repeater-list]");
+      const tpl = box.querySelector("template[data-repeater-template]");
+      const addBtn = box.querySelector("[data-repeater-add]");
+      if (!storage || !list || !tpl || !addBtn) return;
+      box.dataset.repeaterBound = "1";
+      const empty = box.querySelector("[data-repeater-empty]");
+      const count = box.querySelector("[data-repeater-count]");
+      const status = box.querySelector("[data-repeater-status]");
+      const min = Math.max(0, parseInt(box.dataset.repeaterMin || "0", 10) || 0);
+      const max = Math.max(1, parseInt(box.dataset.repeaterMax || "50", 10) || 50);
+      const rowLabel = box.dataset.repeaterRowLabel || "Row";
+      const fieldId = box.dataset.repeaterId || "repeater";
+      const served = storage.value;
+      let serial = 0;
+
+      const rows = () =>
+        Array.from(list.children).filter((el) => el.matches("[data-repeater-row]"));
+      const controls = (row) => Array.from(row.querySelectorAll("[data-repeater-key]"));
+
+      function readRow(row) {
+        const out = {};
+        controls(row).forEach((el) => {
+          const key = el.dataset.repeaterKey;
+          const type = el.dataset.repeaterType;
+          if (type === "boolean") out[key] = el.checked;
+          else if (type === "number") out[key] = el.value === "" ? null : Number(el.value);
+          else out[key] = el.value;
+        });
+        return out;
+      }
+
+      function fillRow(row, data) {
+        controls(row).forEach((el) => {
+          const value = data ? data[el.dataset.repeaterKey] : undefined;
+          if (value === undefined) return; // keep the template's default
+          if (el.dataset.repeaterType === "boolean") el.checked = Boolean(value);
+          else el.value = value === null ? "" : String(value);
+        });
+      }
+
+      // Disabled buttons drop focus mid-keypress, so an unavailable move is
+      // marked aria-disabled and ignored instead.
+      function setOff(btn, off) {
+        if (!btn) return;
+        if (off) btn.setAttribute("aria-disabled", "true");
+        else btn.removeAttribute("aria-disabled");
+      }
+
+      function refresh() {
+        const all = rows();
+        all.forEach((row, i) => {
+          row.setAttribute("aria-label", `${rowLabel} ${i + 1} of ${all.length}`);
+          setOff(row.querySelector("[data-repeater-up]"), i === 0);
+          setOff(row.querySelector("[data-repeater-down]"), i === all.length - 1);
+          setOff(row.querySelector("[data-repeater-remove]"), all.length <= min);
+        });
+        setOff(addBtn, all.length >= max);
+        if (empty) empty.hidden = all.length > 0;
+        if (count) count.textContent = `${all.length} of at most ${max}`;
+      }
+
+      function serialise(notify) {
+        const value = JSON.stringify(rows().map(readRow));
+        const changed = storage.value !== value;
+        storage.value = value;
+        refresh();
+        if (notify && changed) storage.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      function announce(text) {
+        if (status) status.textContent = text;
+      }
+
+      function newRow(data) {
+        const frag = tpl.content.cloneNode(true);
+        const row = frag.querySelector("[data-repeater-row]");
+        if (!row) return null;
+        serial += 1;
+        const stem = `${fieldId}-__i__-`;
+        const fresh = `${fieldId}-n${serial}-`;
+        row.querySelectorAll("[id], label[for]").forEach((el) => {
+          if (el.id) el.id = el.id.replace(stem, fresh);
+          const target = el.getAttribute("for");
+          if (target) el.setAttribute("for", target.replace(stem, fresh));
+        });
+        fillRow(row, data);
+        return row;
+      }
+
+      function rebuild(json) {
+        let data = [];
+        try {
+          const parsed = JSON.parse(json || "[]");
+          if (Array.isArray(parsed)) data = parsed;
+        } catch {
+          data = [];
+        }
+        list.replaceChildren();
+        data.forEach((item) => {
+          const row = newRow(item && typeof item === "object" ? item : null);
+          if (row) list.appendChild(row);
+        });
+        storage.value = json || "[]";
+        refresh();
+      }
+
+      list.addEventListener("input", () => serialise(false));
+      list.addEventListener("change", () => serialise(false));
+
+      addBtn.addEventListener("click", () => {
+        if (rows().length >= max) {
+          announce(`At most ${max}.`);
+          return;
+        }
+        const row = newRow(null);
+        if (!row) return;
+        list.appendChild(row);
+        serialise(true);
+        const first =
+          row.querySelector("input:not([type=checkbox]), textarea, select") ||
+          row.querySelector("[data-repeater-key]");
+        if (first) first.focus();
+        announce(`${rowLabel} ${rows().length} added.`);
+      });
+
+      list.addEventListener("click", (ev) => {
+        const btn = ev.target.closest(
+          "[data-repeater-up], [data-repeater-down], [data-repeater-remove]"
+        );
+        if (!btn || !list.contains(btn) || btn.getAttribute("aria-disabled") === "true") return;
+        const row = btn.closest("[data-repeater-row]");
+        if (!row) return;
+        if (btn.hasAttribute("data-repeater-remove")) {
+          if (rows().length <= min) return;
+          const all = rows();
+          const at = all.indexOf(row);
+          const next = all[at + 1] || all[at - 1] || null;
+          row.remove();
+          serialise(true);
+          const focusTo = next ? next.querySelector("[data-repeater-remove]") : addBtn;
+          if (focusTo) focusTo.focus();
+          announce(`${rowLabel} ${at + 1} removed.`);
+          return;
+        }
+        // Move the neighbour rather than the row itself, so the focused
+        // button stays put in the DOM and keeps focus for the next press.
+        if (btn.hasAttribute("data-repeater-up")) {
+          const prev = row.previousElementSibling;
+          if (!prev) return;
+          list.insertBefore(prev, row.nextElementSibling);
+        } else {
+          const next = row.nextElementSibling;
+          if (!next) return;
+          list.insertBefore(next, row);
+        }
+        serialise(true);
+        announce(`${rowLabel} moved to ${rows().indexOf(row) + 1} of ${rows().length}.`);
+      });
+
+      const form = storage.form;
+      if (form) {
+        form.addEventListener("submit", () => serialise(false));
+        form.addEventListener("reset", () => setTimeout(() => rebuild(served), 0));
+      }
+      refresh();
+    });
+  }
+
   // Initial attach on DOMContentLoaded; re-attach when the editor reloads
   // its preview iframe (a side-effect of a save).
   function init() {
@@ -1003,6 +1183,7 @@
     attachTextareaPresets(document);
     attachLocationSearch(document);
     attachMultiSelect(document);
+    attachRepeaters(document);
     attachShowIf(document);
     attachLightbox();
     publishTopbarHeight();
@@ -1292,6 +1473,7 @@
     attachPresetNumbers,
     attachLocationSearch,
     attachMultiSelect,
+    attachRepeaters,
     attachShowIf,
     fitPreview,
   };

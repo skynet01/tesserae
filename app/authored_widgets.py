@@ -32,6 +32,8 @@ from typing import Any
 
 import jsonschema
 
+from app import repeater
+
 logger = logging.getLogger(__name__)
 
 # Extraction caps. Compressed bound is checked before reading; the uncompressed
@@ -180,6 +182,9 @@ def _validate_manifest(manifest: Any, schema: dict[str, Any]) -> dict[str, Any]:
     except jsonschema.ValidationError as err:
         field = ".".join(str(p) for p in err.absolute_path) or "<root>"
         raise InstallError(f"manifest schema [{field}]: {err.message}", 422) from err
+    problems = repeater.manifest_errors(manifest)
+    if problems:
+        raise InstallError(f"manifest {problems[0]}", 422)
     if manifest.get("kind") != "widget":
         raise InstallError(f"only kind:'widget' can be pushed (got {manifest.get('kind')!r})", 422)
     return manifest

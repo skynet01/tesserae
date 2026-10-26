@@ -156,6 +156,48 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   stores under `<name>_secret` in `settings.json` so an on-disk grep
   for `secret` reveals every sensitive value. `advanced: true` folds a
   setting into the card's "More options" section, as on cell options.
+* **`repeater` settings**, a list of rows the operator adds, removes and
+  moves up and down, each row a small fixed set of sub-fields. Settings
+  only (not `cell_options`), and no nesting:
+
+  ```json
+  {
+    "name": "feeds", "type": "repeater", "label": "Feeds",
+    "add_label": "Add feed", "row_label": "Feed", "max_rows": 20,
+    "fields": [
+      { "name": "enabled", "type": "boolean", "label": "On", "default": true },
+      { "name": "url", "type": "string", "label": "URL", "required": true, "unique": true },
+      { "name": "limit", "type": "number", "label": "Items", "min": 1, "max": 50, "default": 5 },
+      { "name": "notes", "type": "textarea", "label": "Notes", "max_length": 500 }
+    ],
+    "default": [{ "enabled": true, "url": "https://example.com/rss", "limit": 5, "notes": "" }]
+  }
+  ```
+
+  Sub-field types are `string`, `textarea`, `boolean`, `number` and
+  `select` (with inline `choices`). A sub-field may set `required`,
+  `unique` (string or select; compared ignoring case and surrounding
+  spaces), `max_length` (string 500 and textarea 5000 by default),
+  `pattern` with a `pattern_hint` (string), `min` / `max` / `step`
+  (number), `rows` and `monospace` (textarea), `placeholder` and `help`.
+  The repeater itself takes `min_rows`, `max_rows` (50 by default, at most
+  200), `add_label` and `row_label`. `secret`, `show_if` and
+  `choices_from` aren't supported inside one, and the loader refuses a
+  declaration that uses them, names a sub-field twice or has a `default`
+  that doesn't fit.
+
+  The value is a JSON list of objects, one per row, each carrying exactly
+  the declared sub-fields. A save whose rows don't fit (too many, a blank
+  `required`, a repeated `unique`, an out-of-range number) is refused as a
+  whole with a message naming the row, and the stored rows stay as they
+  were. `fetch()` gets the stored list; validate what your widget relies
+  on, since an older or hand-edited settings file can hold anything.
+
+  Changing an existing setting into a repeater: export
+  `legacy_rows(name, value)` from `server.py`. When the stored value isn't
+  a list, the settings card asks it for rows to show (return a list of row
+  objects, or `None`), and the next save stores them. Until then the old
+  value is what `fetch()` gets, so read both shapes.
 * **`icon`**, Phosphor name used in the editor's widget picker.
 * **`name`**, shown in the widget picker. Widgets that belong to a family
   are named `Family, Item` ("Weather, Now", "GitHub, Streak"), and the

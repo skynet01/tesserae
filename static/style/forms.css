@@ -2619,3 +2619,80 @@ input[type="range"].slider:focus::-moz-range-thumb {
   padding: 0;
   z-index: 1;
 }
+
+/* ----- Repeater (a list of rows of sub-fields) -----------------------
+   Drawn by ``repeater_field`` in templates/_components.html; Add, Remove
+   and the moves are wired by attachRepeaters in static/components.js.
+   Each row is a card: its sub-fields in a wrapping grid (a textarea takes
+   the full width), the row's buttons in a column on the right. */
+
+.repeater-list {
+  display: grid;
+  gap: var(--t-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.repeater-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--t-space-2);
+  padding: var(--t-space-2) var(--t-space-3);
+  background: var(--t-surface-soft);
+  border: 1px solid var(--t-border);
+  border-radius: var(--t-radius-sm);
+}
+.repeater-row-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  align-items: end;
+  gap: var(--t-space-2) var(--t-space-3);
+}
+.repeater-sub--textarea {
+  grid-column: 1 / -1;
+}
+.repeater-sub textarea.is-mono {
+  font-family: var(--t-font-mono, ui-monospace, monospace);
+  font-size: var(--t-size-sm);
+}
+.repeater-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.repeater-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.repeater-btn[aria-disabled="true"],
+.repeater-add[aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: default;
+  transform: none;
+}
+.repeater-empty {
+  margin: 0;
+  padding: var(--t-space-3);
+  font-size: var(--t-size-sm);
+  color: var(--t-muted);
+  background: var(--t-surface-soft);
+  border: 1px dashed var(--t-border);
+  border-radius: var(--t-radius-sm);
+  text-align: center;
+}
+.repeater-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--t-space-3);
+}
+.repeater-count {
+  font-size: var(--t-size-sm);
+  color: var(--t-muted);
+}
+@media (max-width: 640px) {
+  .repeater-row-fields {
+    grid-template-columns: 1fr;
+  }
+}
