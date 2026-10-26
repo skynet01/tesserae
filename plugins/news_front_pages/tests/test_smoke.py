@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import contextvars
 import http.client
+import importlib.util
 import io
 import os
+import sys
 import threading
 import time
+import types
 import urllib.error
 from collections.abc import Iterator
 from datetime import date
@@ -373,7 +376,8 @@ def test_payload_carries_size_and_trim(tmp_path: Path, cdn: FakeCdn) -> None:
 def test_first_render_says_fetching_then_shows_the_page(tmp_path: Path, cdn: FakeCdn) -> None:
     cdn.pages = {_url("NY_NYT", 25): PAGE}
     first = _fetch(tmp_path, paper="NY_NYT")
-    assert first == {"pending": True, "live_refresh_s": server.LIVE_REFRESH_S, "live_pending": 1}
+    assert (first["pending"], first["live_pending"]) == (True, 1)
+    assert server.HOST_FOLLOW_UPS * first["live_refresh_s"] >= server.JOB_WORST_S
     _settle(tmp_path)
     assert _fetch(tmp_path, paper="NY_NYT")["date"] == "2026-10-25"
 
@@ -387,7 +391,7 @@ def test_a_slow_download_never_holds_up_a_render(tmp_path: Path, cdn: FakeCdn) -
     second = _fetch(tmp_path, paper="NY_NYT")
     assert time.monotonic() - start < 1.0
     assert first["date"] == second["date"] == "2026-10-24"
-    assert first["live_refresh_s"] == server.LIVE_REFRESH_S
+    assert first["live_pending"] == 1
     cdn.gate.set()
     _settle(tmp_path)
     assert _fetch(tmp_path, paper="NY_NYT")["date"] == "2026-10-25"
@@ -488,18 +492,83 @@ def test_the_queue_holds_each_paper_once() -> None:
     assert len(run.queue) == server.MAX_QUEUED
 
 
+def _wait_for_active(tmp_path: Path) -> None:
+    deadline = time.monotonic() + 5
+    while server._line(tmp_path)[1] is None:
+        assert time.monotonic() < deadline, "the worker never started a job"
+        time.sleep(0.01)
+
+
 def test_the_paper_a_render_waits_for_jumps_the_queue(tmp_path: Path, cdn: FakeCdn) -> None:
     cdn.gate = threading.Event()
     _fetch(tmp_path)  # queues NY_NYT (downloading), WSJ, USAT
+    _wait_for_active(tmp_path)
     data = _fetch(tmp_path, paper="USAT")
-    assert server._line(tmp_path)[:2] == ["NY_NYT", "USAT"]
-    assert data == {"pending": True, "live_refresh_s": 2 * server.LIVE_REFRESH_S, "live_pending": 2}
+    assert server._line(tmp_path)[0][:2] == ["NY_NYT", "USAT"]
+    assert data["pending"] is True
+    assert data["live_pending"] == 2
 
 
-def test_the_refresh_hint_grows_with_the_wait() -> None:
-    assert server._wait_hint(0) == {"live_refresh_s": server.LIVE_REFRESH_S, "live_pending": 1}
-    assert server._wait_hint(3)["live_refresh_s"] == 4 * server.LIVE_REFRESH_S
-    assert server._wait_hint(100)["live_refresh_s"] == server.LIVE_REFRESH_MAX_S
+def test_the_requested_paper_gets_into_a_full_queue(tmp_path: Path, cdn: FakeCdn) -> None:
+    cdn.gate = threading.Event()
+    flood = [f"P{n}" for n in range(server.MAX_QUEUED + 5)]
+    server._enqueue(tmp_path, flood, TODAY, force=False)
+    _wait_for_active(tmp_path)
+    data = _fetch(tmp_path, paper="WSJ")
+    line = server._line(tmp_path)[0]
+    assert line[:2] == ["P0", "WSJ"]
+    assert len(line) == server.MAX_QUEUED + 1  # the running job, then a full queue
+    assert (data["pending"], data["live_pending"]) == (True, 2)
+
+
+def test_the_refresh_hint_covers_the_job_budget() -> None:
+    covers = server.HOST_FOLLOW_UPS * server._wait_hint(0, server.JOB_WORST_S)["live_refresh_s"]
+    assert covers >= server.JOB_WORST_S
+    assert server._wait_hint(0, 1.0)["live_refresh_s"] == server.LIVE_REFRESH_S
+    later = server._wait_hint(2, server.JOB_WORST_S)
+    assert server.HOST_FOLLOW_UPS * later["live_refresh_s"] >= 3 * server.JOB_WORST_S
+    assert later["live_pending"] == 3
+    assert server._wait_hint(100, None)["live_refresh_s"] == server.LIVE_REFRESH_MAX_S
+
+
+def test_a_download_finishing_between_queue_looks_is_rechecked(
+    tmp_path: Path, cdn: FakeCdn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever the queue looked like when fetch() checked it is what the
+    answer rests on: here the download lands right after that look."""
+    cdn.gate = threading.Event()
+    cdn.pages = {_url("WSJ", 25): PAGE}
+    real = server._line
+
+    def look_then_finish(data_dir: Path) -> tuple[list[str], float | None]:
+        seen = real(data_dir)
+        assert cdn.gate is not None
+        cdn.gate.set()
+        _settle(data_dir)
+        return seen
+
+    monkeypatch.setattr(server, "_line", look_then_finish)
+    data = _fetch(tmp_path, paper="WSJ")
+    assert "error" not in data
+    assert data.get("date") == "2026-10-25" or data.get("pending") is True
+
+
+def test_a_reload_ignores_runs_kept_from_an_older_revision(
+    tmp_path: Path, cdn: FakeCdn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retained registry from before holds a live run of an older class,
+    without ``add()``/``line()``; the reloaded module must not drive it."""
+    holder = sys.modules[f"_tesserae_runtime.{server.PLUGIN_ID}"]
+    stale = types.SimpleNamespace(alive=lambda: True, queue=[], active=None)
+    monkeypatch.setitem(holder.__dict__, "runs", {str(tmp_path): stale})
+    spec = importlib.util.spec_from_file_location("news_front_pages_reloaded", server.__file__)
+    assert spec is not None and spec.loader is not None
+    reloaded = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, reloaded)
+    spec.loader.exec_module(reloaded)
+    reloaded._enqueue(tmp_path, ["NY_NYT"], TODAY, force=False)
+    assert reloaded._join_worker(tmp_path, 10)
+    assert _url("NY_NYT", 25) in cdn.calls
 
 
 def test_downloads_run_in_the_render_context(tmp_path: Path, cdn: FakeCdn) -> None:

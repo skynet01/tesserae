@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
 import html
 import http.client
 import io
@@ -123,8 +124,13 @@ LIVE_REFRESH_MAX_S = 120
 # One job per paper is all the queue ever needs; this only bounds a flood of
 # pinned codes.
 MAX_QUEUED = 32
-# All of one job's requests (today, yesterday, the day before) together.
+# All of one job's requests (today, yesterday, the day before) together; a
+# request in flight can overrun it by one socket timeout.
 JOB_BUDGET_S = 90.0
+JOB_WORST_S = JOB_BUDGET_S + HTTP_TIMEOUT_S
+# The host follows a push up at most this many times in a row
+# (FOLLOWUP_LIMIT in app/push.py); the hint is spread so they cover the wait.
+HOST_FOLLOW_UPS = 8
 
 LOOKBACK_DAYS = 3  # today, yesterday, the day before
 RECHECK_S = 30 * 60  # how often to look again for an edition not out yet
@@ -539,6 +545,7 @@ class _Run:
     data_dir: Path
     queue: list[_Job] = field(default_factory=list)
     active: _Job | None = None
+    active_since: float = 0.0  # on _clock
     done: bool = False
     thread: threading.Thread | None = None
 
@@ -565,14 +572,21 @@ class _Run:
                 self.queue.insert(0 if first else index, job)
                 return
         if len(self.queue) >= MAX_QUEUED:
-            return  # a later render queues it again
+            if not first:
+                return  # a later render queues it again
+            self.queue.pop()  # the job that would run last makes room
         if first:
             self.queue.insert(0, job)
         else:
             self.queue.append(job)
 
 
-_RUNS: dict[str, _Run] = _shared("runs", dict)
+# Keyed by this file's revision: a reload after an edit gets a fresh registry
+# rather than live runs of an older ``_Run`` it may not be able to drive. An
+# older revision's worker finishes its own queue and exits; writes from both
+# go through the one shared state lock.
+_REVISION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:12]
+_RUNS: dict[str, _Run] = _shared(f"runs.{_REVISION}", dict)
 
 
 def _enqueue(
@@ -601,11 +615,15 @@ def _enqueue(
             run.thread.start()
 
 
-def _line(data_dir: Path) -> list[str]:
-    """Codes queued or being downloaded, in the order they'll be done."""
+def _line(data_dir: Path) -> tuple[list[str], float | None]:
+    """Codes queued or being downloaded, in the order they'll be done, and
+    the running job's remaining budget (None when none is running yet)."""
     with _RUNS_LOCK:
         run = _RUNS.get(str(data_dir))
-        return run.line() if run is not None and run.alive() else []
+        if run is None or not run.alive():
+            return [], None
+        left = None if run.active is None else JOB_WORST_S - (_clock() - run.active_since)
+        return run.line(), left
 
 
 def _join_worker(data_dir: Path, timeout: float) -> bool:
@@ -644,6 +662,7 @@ def _work(run: _Run) -> None:
                     break
                 job = run.queue.pop(0)
                 run.active = job
+                run.active_since = _clock()
                 waiting = len(run.queue)
             _report(job, waiting)
             _refresh(run.data_dir, job)
@@ -733,12 +752,18 @@ def _missing_error(codes: list[str], state: dict[str, Any], pinned: str | None) 
     return {"error": f"No {which} in the last {LOOKBACK_DAYS} days."}
 
 
-def _wait_hint(position: int) -> dict[str, Any]:
+def _wait_hint(position: int, active_left: float | None) -> dict[str, Any]:
     """Refresh hints for a render waiting on the job at ``position`` in the
-    worker's line (0 = downloading now). The host follows a push up a limited
-    number of times, so the wait grows with the jobs ahead instead of
-    spending those follow-ups on a fixed short interval."""
-    seconds = min(LIVE_REFRESH_MAX_S, LIVE_REFRESH_S * (position + 1))
+    worker's line (0 = first; the running job when ``active_left`` is set).
+    The host follows a push up only ``HOST_FOLLOW_UPS`` times, so the hint is
+    the worst-case wait (the running job's remaining budget plus a full
+    budget per job before ours) spread over them, never under
+    ``LIVE_REFRESH_S`` nor over the host's ceiling."""
+    if active_left is None:
+        worst = (position + 1) * JOB_WORST_S
+    else:
+        worst = max(0.0, active_left) + position * JOB_WORST_S
+    seconds = min(LIVE_REFRESH_MAX_S, max(LIVE_REFRESH_S, math.ceil(worst / HOST_FOLLOW_UPS)))
     return {"live_refresh_s": seconds, "live_pending": position + 1}
 
 
@@ -834,17 +859,17 @@ def fetch(
         return _fallback(key, now)
     if picked.due:
         _enqueue(data_dir, picked.due, today, force=force, first=picked.wanted)
-        line = _line(data_dir)
-        if any(code not in line for code in picked.due):
-            # A download finished between queueing it and now: look again,
-            # rather than answer from the snapshot taken before it landed.
-            picked = select() or picked
-    line = _line(data_dir)
+    # One look at the queue decides the answer. A job this render queued that
+    # is already off it finished after the pages were read: read them again,
+    # rather than answer from the snapshot taken before it landed.
+    line, active_left = _line(data_dir)
+    if any(code not in line for code in picked.due):
+        picked = select() or picked
 
     if picked.chosen is None:
         waiting = [line.index(code) for code in candidates if code in line]
         if waiting:
-            return {"pending": True, **_wait_hint(min(waiting))}
+            return {"pending": True, **_wait_hint(min(waiting), active_left)}
         return _missing_error(candidates, picked.state, pinned)
 
     code, page = picked.chosen
@@ -860,7 +885,7 @@ def fetch(
     _LAST_CLAIMED[key] = (now, payload)
     if code in line:
         # Only the shown paper's download changes this frame.
-        return {**payload, **_wait_hint(line.index(code))}
+        return {**payload, **_wait_hint(line.index(code), active_left)}
     return payload
 
 
