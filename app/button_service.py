@@ -402,6 +402,177 @@ class ButtonService:
         self._emit_button(device_id, button, result)
         return result
 
+    def following_deck(self, device_id: str) -> Deck | None:
+        """The lineup a display is following right now.
+
+        The one its nav record points at while that lineup still binds the
+        display: the scheduler writes the record on every timer advance,
+        and button / touch navigation and going live write it too, so it
+        names the lineup whose page is on the glass. Otherwise the first
+        enabled lineup bound to it (what :meth:`_bound_deck` picks). Same
+        rule as ``HomeAssistantDiscovery._lineup_for_device``, so HA's
+        Next / Previous step the lineup its Lineup select shows. None
+        without deck wiring, or when nothing binds the display."""
+        if self._decks is None or self._deck_nav is None:
+            return None
+        try:
+            decks = self._decks.all()
+        except Exception:
+            log.exception("following deck: deck store read failed for %s", device_id)
+            return None
+        try:
+            rec = self._deck_nav.get(device_id)
+        except Exception:
+            rec = None
+        nav_deck_id = rec.get("deck_id") if isinstance(rec, dict) else None
+        if isinstance(nav_deck_id, str) and nav_deck_id:
+            for deck in decks:
+                if deck.id == nav_deck_id and device_id in deck.device_ids:
+                    return deck
+        for deck in decks:
+            if deck.enabled and device_id in deck.device_ids:
+                return deck
+        return None
+
+    def step(
+        self, *, device_id: str, forward: bool, source: str = "home_assistant"
+    ) -> ButtonHandleResult:
+        """Move one display a page forward or back on behalf of something
+        other than the panel (Home Assistant's per-display Next / Previous).
+
+        The same machinery as a physical ``right`` / ``left`` press under
+        the default button map, minus what only makes sense for a press on
+        the glass:
+
+        * When the display follows a lineup (:meth:`following_deck`), it
+          moves within THAT lineup, not the first one bound, so a display
+          on several time-slot lineups steps the one it is showing. The
+          page's graph link for the button wins, else the next / previous
+          page in lineup order, wrapping; the warmed frame is promoted or
+          the page rendered, and the nav position recorded, exactly as
+          :meth:`_deck_navigate` does for a press (no hold: a timer lineup
+          moves on at its next step boundary). From a recorded position
+          the lineup no longer contains, it steps from the entry page. A
+          one-page lineup has nowhere to go: a no-op, rather than falling
+          through to some other lineup's rotation.
+        * With no lineup, ``rotate_next`` / ``rotate_prev`` runs on the
+          display's rotation (one targeting it directly or through its
+          dashboards' bindings) and holds the way a button press does. No
+          rotation either: a no-op.
+        * The button map isn't consulted (a ``right`` remapped to a webhook
+          still steps), the step isn't deduplicated, it leaves the panel's
+          dedup fingerprint alone, and it emits no input event: it isn't
+          physical input.
+
+        Pushes reach this display only, ignore quiet hours and still run
+        while automation is paused, like every user-initiated action. A
+        manually pushed page doesn't change the lineup position, so a step
+        from one goes to the page after the one the lineup was on. Every
+        outcome, no-ops included, writes a History row under ``source``."""
+        button = "right" if forward else "left"
+        label = "next" if forward else "previous"
+        now = self._clock()
+        state = self._state.get(device_id) or DeviceRotationState(device_id=device_id)
+        deck = self.following_deck(device_id)
+        if deck is not None:
+            current = self._deck_current_page(deck, device_id)
+            if deck.page(current) is None:
+                current = deck.resolved_entry_page_id
+            target = self._deck_link_target(deck, current, button)
+            if target is None:
+                return self._step_noop(
+                    device_id,
+                    source=source,
+                    label=label,
+                    reason=f"lineup {deck.id!r} has no page to step to from {current!r}",
+                    deck_id=deck.id,
+                )
+            log.info(
+                "%s step: device=%s %s in lineup %s: %s -> %s",
+                source,
+                device_id,
+                label,
+                deck.id,
+                current,
+                target,
+            )
+            return self._deck_navigate(
+                device_id=device_id,
+                deck=deck,
+                target_page=target,
+                trigger_label=button,
+                event_id=None,
+                state=state,
+                now=now,
+                origin_extra={"button": label, "deck_id": deck.id},
+                source=source,
+                record_press=False,
+            )
+        rotation = self._resolve_rotation(device_id)
+        if rotation is None:
+            return self._step_noop(
+                device_id,
+                source=source,
+                label=label,
+                reason="the display follows no lineup or rotation",
+            )
+        current_step_index, manual = self._effective_step_index(rotation, state)
+        ctx = ActionContext(
+            device_id=device_id,
+            current_step_index=current_step_index,
+            rotation_step_count=len(rotation.steps),
+            rotation_id=rotation.id,
+            **self._page_refs(),
+        )
+        return self._dispatch_spec(
+            device_id=device_id,
+            spec="rotate_next" if forward else "rotate_prev",
+            ctx=ctx,
+            rotation=rotation,
+            state=state,
+            now=now,
+            current_step_index=current_step_index,
+            manual=manual,
+            trigger_label=button,
+            event_id=None,
+            origin=source,
+            origin_extra={"button": label},
+            record_press=False,
+        )
+
+    def _step_noop(
+        self,
+        device_id: str,
+        *,
+        source: str,
+        label: str,
+        reason: str,
+        deck_id: str | None = None,
+    ) -> ButtonHandleResult:
+        """A :meth:`step` with nothing to step: no push, no state change,
+        one ``noop`` History row saying why."""
+        log.info("%s step: device=%s %s is a no-op: %s", source, device_id, label, reason)
+        result = ButtonHandleResult(
+            device_id=device_id,
+            dedup=False,
+            unmapped=False,
+            action_spec=None,
+            action_description=f"nothing to step: {reason}",
+            rotation_id=None,
+            step_index=0,
+            step_page_id=None,
+            step_count=0,
+            manual_override=False,
+            override_until=None,
+            pushed_page_id=None,
+            push_result=None,
+        )
+        extra: dict[str, object] = {"button": label}
+        if deck_id is not None:
+            extra["deck_id"] = deck_id
+        self._emit_history_row(result=result, origin=source, origin_extra=extra, status="noop")
+        return result
+
     def _handle_button(
         self,
         *,
@@ -565,7 +736,15 @@ class ButtonService:
         deck = self._bound_deck(device_id)
         if deck is None:
             return None
-        current = self._deck_current_page(deck, device_id)
+        target = self._deck_link_target(deck, self._deck_current_page(deck, device_id), button)
+        return (deck, target) if target is not None else None
+
+    @staticmethod
+    def _deck_link_target(deck: Deck, current: str, button: str) -> str | None:
+        """Where ``button`` goes from ``current`` in ``deck``: the page's
+        graph link for it, else (``left`` / ``right`` only) the previous /
+        next page in deck order, wrapping. None when neither applies (a
+        one-page deck, a page not in the deck, a non-nav button)."""
         target = deck.resolve_button(current, button)
         if target is None and button in ("left", "right"):
             from app.deck_sync import default_neighbours
@@ -573,7 +752,7 @@ class ButtonService:
             neighbours = default_neighbours(deck, current)
             if neighbours is not None:
                 target = neighbours[0] if button == "left" else neighbours[1]
-        return (deck, target) if target is not None else None
+        return target
 
     def _panel_dims(self, device_id: str) -> tuple[int, int] | None:
         """The device's (width, height) in the frame's pixel space, used to
@@ -663,10 +842,14 @@ class ButtonService:
         state: DeviceRotationState,
         now: datetime,
         origin_extra: dict[str, Any],
+        source: str = "deck",
+        record_press: bool = True,
     ) -> ButtonHandleResult:
         """Move the device to ``target_page`` within ``deck``: promote the
         pre-warmed frame when there is one (instant), else render on the fly.
-        Records nav position + dedup state either way."""
+        Records nav position + dedup state either way. ``source`` labels the
+        push and the history row; ``record_press=False`` (a remote step, see
+        :meth:`step`) leaves the panel's dedup fingerprint untouched."""
         pusher = self._push_getter()
         push_result: PushResult | None = None
         pushed_page_id: str | None = None
@@ -680,21 +863,22 @@ class ButtonService:
                     target_page,
                     device_ids={device_id},
                     respect_quiet_hours=False,
-                    source="deck",
+                    source=source,
                 )
         failed = push_result is not None and push_result.status == "failed"
         if self._deck_nav is not None:
             self._deck_nav.set(device_id, deck.id, target_page)
         # Dedup bookkeeping so a retry of the same event doesn't double-navigate.
-        self._state.upsert(
-            state.model_copy(
-                update={
-                    "last_button": trigger_label,
-                    "last_button_event_id": event_id,
-                    "last_button_at": now,
-                }
+        if record_press:
+            self._state.upsert(
+                state.model_copy(
+                    update={
+                        "last_button": trigger_label,
+                        "last_button_event_id": event_id,
+                        "last_button_at": now,
+                    }
+                )
             )
-        )
         result = ButtonHandleResult(
             device_id=device_id,
             dedup=False,
@@ -712,7 +896,7 @@ class ButtonService:
         )
         self._emit_history_row(
             result=result,
-            origin="deck",
+            origin=source,
             origin_extra=origin_extra,
             status="failed" if failed else "dispatched",
         )
@@ -1834,13 +2018,27 @@ class ButtonService:
         event_id: int | None,
         origin: str,
         origin_extra: dict[str, object],
+        record_press: bool = True,
     ) -> ButtonHandleResult:
         """Shared dispatch tail for button presses and touch strokes:
         run the action, persist rotation state, push the resolved page
         so the same wake's frame reflects the new state, fire webhooks
         async, and emit the history row. ``origin`` is the event-log
-        source (``button`` / ``touch``); ``origin_extra`` carries the
-        origin-specific fields for the history row and webhook payload."""
+        source (``button`` / ``touch``, or ``home_assistant`` for a
+        remote :meth:`step`); ``origin_extra`` carries the
+        origin-specific fields for the history row and webhook payload.
+        ``record_press=False`` keeps the panel's dedup fingerprint
+        (``last_button*``) as it was, for actions that didn't come from
+        the panel."""
+        press_fields: dict[str, Any] = (
+            {
+                "last_button": trigger_label,
+                "last_button_event_id": event_id,
+                "last_button_at": now,
+            }
+            if record_press
+            else {}
+        )
         try:
             result: ActionResult = dispatch(spec, ctx)
         except ButtonActionError as exc:
@@ -1852,14 +2050,8 @@ class ButtonService:
                 spec,
                 exc,
             )
-            new_state = state.model_copy(
-                update={
-                    "last_button": trigger_label,
-                    "last_button_event_id": event_id,
-                    "last_button_at": now,
-                }
-            )
-            self._state.upsert(new_state)
+            if press_fields:
+                self._state.upsert(state.model_copy(update=press_fields))
             step_page_id = (
                 rotation.steps[current_step_index].page_id if rotation is not None else None
             )
@@ -1908,9 +2100,7 @@ class ButtonService:
                 "rotation_id": rotation.id if rotation is not None else None,
                 "step_index": result.new_step_index if rotation is not None else state.step_index,
                 "override_until": override_until,
-                "last_button": trigger_label,
-                "last_button_event_id": event_id,
-                "last_button_at": now,
+                **press_fields,
             }
         )
         self._state.upsert(new_state)
