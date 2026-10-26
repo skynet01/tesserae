@@ -180,6 +180,13 @@ class FakeSettings:
     def patch_section(self, name: str, values: dict[str, Any]) -> None:
         self.get_section(name).update(values)
 
+    def update_for_namespace(
+        self, namespace: str, item_id: str, values: dict[str, Any], fields: list[dict[str, Any]]
+    ) -> None:
+        names = {f["name"] for f in fields}
+        item = self.sections.setdefault(namespace, {}).setdefault(item_id, {})
+        item.update({k: v for k, v in values.items() if k in names})
+
 
 class FakeDevice:
     def __init__(
@@ -1389,3 +1396,146 @@ def test_a_history_resend_repaints_the_frame_once(harness: Harness) -> None:
         assert sign.wait_for(lambda s: len(s.images()) == 3)
     finally:
         sign.close()
+
+
+# -- unknown signs: binding, discovery, bounded state ----------------------------
+
+
+def _other_uuid(n: int) -> str:
+    return f"{n:08x}-0000-4000-8000-000000000000"
+
+
+def test_a_blank_device_binds_only_within_its_arming_window(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    old = time.time() - visionect.AUTO_BIND_WINDOW_S - 60
+    os.utime(h.device.path, (old, old))  # added over an hour ago
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert _wait(lambda: h.app.config["DISCOVERY_CACHE"].get(visionect.discovery_id(UUID)))
+            assert h.settings.sections["devices"]["lobby"]["uuid"] == ""  # not bound
+            assert not h.svc.auto_bind_open(h.device)  # type: ignore[arg-type]
+            # Clearing a device's UUID re-opens its window (seen on attach).
+            h.settings.sections["devices"]["lobby"]["uuid"] = _other_uuid(1)
+            h.svc.attach(h.svc._ctx)  # type: ignore[arg-type]
+            h.settings.sections["devices"]["lobby"]["uuid"] = ""
+            h.svc.attach(h.svc._ctx)  # type: ignore[arg-type]  # and the waiting sign binds
+            assert _wait(lambda: h.settings.sections["devices"]["lobby"]["uuid"] == UUID)
+            assert h.app.config["DISCOVERY_CACHE"].get(visionect.discovery_id(UUID)) is None
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_discovery_ids_are_long_and_never_merge_two_signs(tmp_path: Path) -> None:
+    from app.device_service import DEVICE_ID_RE
+
+    entry_id = visionect.discovery_id(UUID)
+    assert DEVICE_ID_RE.match(entry_id) and len(entry_id) == len("visionect_") + 20
+    assert entry_id != visionect.discovery_id(_other_uuid(1))
+    # An entry under this id from another sign is replaced, not merged into.
+    h = Harness(tmp_path, uuid=_other_uuid(2))
+    cache = h.app.config["DISCOVERY_CACHE"]
+    cache.record(entry_id, json.dumps({"uuid": _other_uuid(3), "mac": "aa:bb"}).encode())
+    h.svc._signs[UUID] = visionect._Sign(uuid=UUID)
+    h.svc._announce_unknown(UUID, StatusPacket(records=STATUS_TAGS, sentinel=0))
+    parsed = cache.get(entry_id).parsed
+    assert parsed["uuid"] == UUID and "mac" not in parsed
+
+
+def test_unknown_signs_are_capped_and_forgotten_when_they_leave(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(visionect, "MAX_UNKNOWN_SIGNS", 2)
+    h = Harness(tmp_path, uuid=_other_uuid(99))  # no device free to bind
+    try:
+        assert h.svc.start()
+        signs = [FakeSign(h.svc.port, uuid=_other_uuid(n)) for n in range(3)]
+        try:
+            for sign in signs[:2]:
+                sign.status()
+            assert _wait(lambda: len(h.svc._signs) == 2)
+            signs[2].status()
+            assert signs[2].dropped(timeout=5)  # one unknown sign too many
+            assert len(h.svc._signs) == 2
+        finally:
+            for sign in signs:
+                sign.close()
+        time.sleep(0.3)
+        h.svc._call_soon(h.svc._rescan)
+        assert _wait(lambda: not h.svc._signs)
+        assert h.svc.sign_view(_other_uuid(0)) is None
+        assert visionect.uuid_bytes(_other_uuid(0)) not in h.svc._store
+        assert visionect.uuid_bytes(_other_uuid(0)) not in h.svc._server.stats.last_seen
+        # Their discovered entries stay, so a sleeping sign can still be registered.
+        assert h.app.config["DISCOVERY_CACHE"].get(visionect.discovery_id(_other_uuid(0)))
+    finally:
+        h.svc.stop()
+
+
+def test_discovered_signs_are_capped(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(visionect, "MAX_DISCOVERED", 2)
+    h = Harness(tmp_path, uuid=_other_uuid(99))
+    try:
+        assert h.svc.start()
+        for n in range(3):
+            sign = FakeSign(h.svc.port, uuid=_other_uuid(n))
+            sign.status()
+            assert _wait(
+                lambda n=n: h.app.config["DISCOVERY_CACHE"].get(
+                    visionect.discovery_id(_other_uuid(n))
+                )
+            )
+            sign.close()
+        cache = h.app.config["DISCOVERY_CACHE"]
+        listed = [n for n in range(3) if cache.get(visionect.discovery_id(_other_uuid(n)))]
+        assert listed == [1, 2]
+    finally:
+        h.svc.stop()
+
+
+def test_a_status_flood_records_one_heartbeat_at_a_time_latest_wins(
+    tmp_path: Path, monkeypatch
+) -> None:
+    recorded: list[int] = []
+
+    def _slow_record(_app: Any, _device: Any, heartbeat: dict[str, Any]) -> None:
+        time.sleep(0.3)
+        recorded.append(int(heartbeat["battery_pct"]))
+
+    monkeypatch.setattr(visionect, "_record_heartbeat", _slow_record)
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            for pct in range(10, 60):
+                sign.status(with_tag(10, pct))
+            assert _wait(lambda: recorded and recorded[-1] == 59, timeout=10)
+            time.sleep(0.5)
+            assert len(recorded) <= 3  # not one executor job per packet
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_binding_keeps_device_settings_saved_meanwhile(tmp_path: Path) -> None:
+    """_bind used to copy the device's settings, set the uuid and write the
+    copy back, losing anything a request saved in between."""
+
+    class _RacingSettings(FakeSettings):
+        def get_section(self, name: str) -> dict[str, Any]:
+            section = json.loads(json.dumps(super().get_section(name)))  # a copy, like the store
+            if name == "devices":  # a request saves picture quality right after the read
+                super().get_section("devices")["lobby"]["dither"] = "floyd"
+            return section
+
+    h = Harness(tmp_path)
+    h.settings.__class__ = _RacingSettings
+    assert h.svc._bind(UUID) is h.device
+    stored = FakeSettings.get_section(h.settings, "devices")["lobby"]
+    assert stored == {"uuid": UUID, "dither": "floyd"}

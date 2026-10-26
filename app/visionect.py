@@ -99,6 +99,16 @@ PROBE_TIMEOUT_S = 20.0
 # at most RENDER_HOLD_MAX_S.
 RENDER_HOLD_POLL_S = 5.0
 RENDER_HOLD_MAX_S = 600.0
+# A blank device binds the first unknown sign that connects only within this
+# long of being added (its instance file written) or having its UUID cleared;
+# after that an unknown sign is listed as discovered instead. Anything on the
+# LAN can claim to be a sign, so a blank device doesn't stay up for grabs.
+AUTO_BIND_WINDOW_S = 60 * 60.0
+# Unbound UUIDs tracked at once (more connections are dropped), discovered
+# entries kept, and UUIDs remembered as already warned about.
+MAX_UNKNOWN_SIGNS = 16
+MAX_DISCOVERED = 8
+MAX_WARNED_UNBOUND = 64
 # pyvisionect.imaging.constants Encoding.FOUR_BIT and Dithering.NONE. The
 # renderer has already dithered onto the 16-grey ramp, and NONE keeps n*17
 # levels exact.
@@ -124,8 +134,9 @@ def uuid_bytes(uuid: str) -> bytes:
 
 
 def discovery_id(uuid: str) -> str:
-    """Short, stable device id for an unregistered sign (fits DEVICE_ID_RE)."""
-    return DISCOVERY_PREFIX + hashlib.blake2s(uuid.encode("ascii"), digest_size=3).hexdigest()
+    """Stable device id for an unregistered sign: 80 bits of the UUID's hash,
+    so two signs don't collide, and 30 characters, inside DEVICE_ID_RE."""
+    return DISCOVERY_PREFIX + hashlib.blake2s(uuid.encode("ascii"), digest_size=10).hexdigest()
 
 
 def status_heartbeat(fields: dict[str, Any], *, uuid: str, connect_reason: str) -> dict[str, Any]:
@@ -260,6 +271,8 @@ class _Sign:
     conformed: bool = False  # panel conformance tried this run
     asleep_until: float = 0.0
     remote: str = ""  # the connection's peer address
+    pending_status: tuple[Any, Any] | None = None  # (device, StatusPacket) to record
+    status_task: asyncio.Task[None] | None = None  # records pending_status, latest wins
     connected_at: float = 0.0
     last_seen: float = 0.0
     last_error: str = ""
@@ -300,7 +313,12 @@ class VisionectService:
         # Per run, replaced by start(). Touched on the loop thread only.
         self._signs: dict[str, _Sign] = {}
         self._tasks: set[asyncio.Task[None]] = set()
-        self._warned_unbound: set[str] = set()
+        self._warned_unbound: dict[str, None] = {}  # insertion-ordered, capped
+        self._discovered: dict[str, None] = {}  # discovery ids we listed, oldest first
+        # Auto-bind arming: when each blank device was seen to become blank
+        # (wall clock), and the blank set at the last attach.
+        self._blank_since: dict[str, float] = {}
+        self._blank_ids: set[str] | None = None
         self._retry_timer: threading.Timer | None = None
         # Read by Flask request threads; written on the loop thread.
         self._snapshot_lock = threading.Lock()
@@ -319,7 +337,39 @@ class VisionectService:
         sign waits gets its frame without waiting for the next check-in."""
         self._ctx = ctx
         self._ctx_gen += 1
+        try:
+            self._note_blank_devices(ctx)
+        except Exception:
+            logger.exception("visionect: checking for blank devices failed")
         self._call_soon(self._rescan)
+
+    def _note_blank_devices(self, ctx: _Context) -> None:
+        """Arm auto-bind for a device whose UUID was just cleared (or that
+        just appeared blank). Not on the first attach: a restart doesn't
+        re-open the window; a new device's file time arms it instead."""
+        section = ctx.settings.get_section("devices") or {}
+        blank = set()
+        for device in visionect_devices(ctx.devices):
+            cfg = section.get(device.id) if isinstance(section, dict) else None
+            if not normalise_uuid(cfg.get("uuid") if isinstance(cfg, dict) else None):
+                blank.add(device.id)
+        if self._blank_ids is not None:
+            now = time.time()
+            for device_id in blank - self._blank_ids:
+                self._blank_since[device_id] = now
+        for device_id in list(self._blank_since):
+            if device_id not in blank:
+                del self._blank_since[device_id]
+        self._blank_ids = blank
+
+    def auto_bind_open(self, device: Device) -> bool:
+        """Whether this blank device still binds the next unknown sign:
+        within AUTO_BIND_WINDOW_S of its instance file being written (it was
+        added, or saved) or of its UUID being cleared."""
+        since = self._blank_since.get(device.id, 0.0)
+        with contextlib.suppress(OSError):
+            since = max(since, device.path.stat().st_mtime)
+        return time.time() - since < AUTO_BIND_WINDOW_S
 
     def start(self, timeout: float = 5.0) -> bool:
         """Bind the listener on a daemon thread. Returns whether it is up."""
@@ -340,7 +390,8 @@ class VisionectService:
             self._ready = ready
             self._signs = {}
             self._tasks = set()
-            self._warned_unbound = set()
+            self._warned_unbound = {}
+            self._discovered = {}
             with self._snapshot_lock:
                 self._snapshot = {}
             thread = threading.Thread(
@@ -461,12 +512,10 @@ class VisionectService:
                 snapshot.clear()
 
     async def _serve(self, ready: threading.Event) -> None:
-        from pyvisionect.session import DeviceStateStore
-
-        from app.visionect_listener import GuardedServer
+        from app.visionect_listener import GuardedServer, PrunableStore
 
         stop_event = asyncio.Event()
-        store = DeviceStateStore()
+        store = PrunableStore()
         server = GuardedServer(
             on_events=self._on_events, store=store, host=self.host, port=self.port
         )
@@ -552,22 +601,24 @@ class VisionectService:
 
     def _bind(self, uuid: str) -> Device | None:
         """Bind a sign we don't know to the first visionect device (by id)
-        with no UUID. Persisted so the binding survives a restart; a device
-        registered from the discovered banner already carries its UUID."""
+        with no UUID whose auto-bind window is open. Persisted so the binding
+        survives a restart; a device registered from the discovered banner
+        already carries its UUID."""
         ctx = self._ctx
         if ctx is None:
             return None
         blank = [
             d
             for d in sorted(self._visionect_devices(), key=lambda d: d.id)
-            if not self.device_uuid(d.id)
+            if not self.device_uuid(d.id) and self.auto_bind_open(d)
         ]
         if not blank:
             return None
         chosen = blank[0]
-        cfg = self._device_cfg(chosen.id)
-        cfg["uuid"] = uuid
-        ctx.settings.patch_section("devices", {chosen.id: cfg})
+        # Only the uuid key, merged under the settings store's lock: the rest
+        # of the device's settings may be saved from a request meanwhile.
+        ctx.settings.update_for_namespace("devices", chosen.id, {"uuid": uuid}, [{"name": "uuid"}])
+        self._blank_since.pop(chosen.id, None)
         self._forget_discovery(uuid)
         logger.info("visionect: bound sign %s to device %s", uuid, chosen.id)
         return chosen
@@ -593,7 +644,17 @@ class VisionectService:
         }
         if beat.get("fw_version"):
             payload["fw_version"] = beat["fw_version"]
-        cache.record(discovery_id(uuid), json.dumps(payload).encode("utf-8"))
+        entry_id = discovery_id(uuid)
+        previous = cache.get(entry_id)
+        if previous is not None and previous.parsed.get("uuid") != uuid:
+            cache.forget(entry_id)  # another sign's entry: don't merge into it
+        cache.record(entry_id, json.dumps(payload).encode("utf-8"))
+        self._discovered.pop(entry_id, None)
+        self._discovered[entry_id] = None
+        while len(self._discovered) > MAX_DISCOVERED:
+            oldest = next(iter(self._discovered))
+            del self._discovered[oldest]
+            cache.forget(oldest)
 
     def _model_for(self, canvas: tuple[int, int]) -> str:
         """The catalog model whose native size is the sign's, when exactly
@@ -615,6 +676,7 @@ class VisionectService:
     def _forget_discovery(self, uuid: str) -> None:
         ctx = self._ctx
         cache = ctx.app.config.get("DISCOVERY_CACHE") if ctx is not None else None
+        self._discovered.pop(discovery_id(uuid), None)
         if cache is not None:
             cache.forget(discovery_id(uuid))
 
@@ -663,11 +725,33 @@ class VisionectService:
         for uuid, sign in list(self._signs.items()):
             if sign.conn is not None and not self._alive(sign):
                 self._disconnected(sign)
-            if sign.conn is not None and (
-                self._device_for_uuid(uuid) is not None or self._bind(uuid) is not None
-            ):
+            bound = self._device_for_uuid(uuid) is not None
+            if sign.conn is None and not bound:
+                self._forget_sign(uuid)  # an unbound sign that left: keep nothing
+                continue
+            if sign.conn is not None and (bound or self._bind(uuid) is not None):
                 self._schedule(uuid)
             self._publish(sign)
+
+    def _forget_sign(self, uuid: str) -> None:
+        """Drop all per-UUID state for a sign. Its discovered entry stays (a
+        sleeping sign must stay listed to be registered); those are capped."""
+        sign = self._signs.pop(uuid, None)
+        if sign is not None and sign.retry_handle is not None:
+            sign.retry_handle.cancel()
+        with self._snapshot_lock:
+            self._snapshot.pop(uuid, None)
+        key = uuid_bytes(uuid)
+        discard = getattr(self._store, "discard", None)
+        if callable(discard):
+            discard(key)
+        stats = getattr(self._server, "stats", None)
+        last_seen = getattr(stats, "last_seen", None)
+        if isinstance(last_seen, dict):
+            last_seen.pop(key, None)
+
+    def _unknown_signs(self) -> int:
+        return sum(1 for uuid in self._signs if self._device_for_uuid(uuid) is None)
 
     def _schedule(self, uuid: str, *, delay: float = 0.0) -> None:
         sign = self._signs.get(uuid)
@@ -1028,7 +1112,7 @@ class VisionectService:
             self._check_glass(sign, event.status)
             device = self._device_for_uuid(uuid)
             if device is not None:
-                self._spawn(self._record_status(device, uuid, event.status))
+                self._queue_status(sign, device, event.status)
             self._publish(sign)
             return uuid
         inflight = sign.inflight
@@ -1098,6 +1182,11 @@ class VisionectService:
             self._refuse(sign, writer, remote)
             return ""
         if sign is None:
+            device = device or self._bind(uuid)
+            if device is None and self._unknown_signs() >= MAX_UNKNOWN_SIGNS:
+                abort(writer)
+                logger.debug("visionect: dropped unknown sign %s: too many unknown signs", uuid)
+                return ""
             sign = self._sign(uuid)
         old = sign.writer if sign.conn is not conn else None
         sign.conn, sign.writer, sign.remote = conn, writer, remote
@@ -1119,7 +1208,9 @@ class VisionectService:
         if device is None:
             self._announce_unknown(uuid, status)
             if uuid not in self._warned_unbound:
-                self._warned_unbound.add(uuid)
+                self._warned_unbound[uuid] = None
+                while len(self._warned_unbound) > MAX_WARNED_UNBOUND:
+                    del self._warned_unbound[next(iter(self._warned_unbound))]
                 logger.warning(
                     "visionect: sign %s connected but no Visionect device is free; "
                     "it is listed under Settings -> Devices to register",
@@ -1214,6 +1305,23 @@ class VisionectService:
         task = asyncio.get_running_loop().create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _queue_status(self, sign: _Sign, device: Device, status: Any) -> None:
+        """Record a status as heartbeat telemetry, one at a time per sign and
+        latest wins, so a flood of status packets queues at most one
+        executor job per sign rather than one per packet."""
+        sign.pending_status = (device, status)
+        if sign.status_task is None or sign.status_task.done():
+            task = asyncio.get_running_loop().create_task(self._drain_statuses(sign))
+            sign.status_task = task
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def _drain_statuses(self, sign: _Sign) -> None:
+        while sign.pending_status is not None:
+            device, status = sign.pending_status
+            sign.pending_status = None
+            await self._record_status(device, sign.uuid, status)
 
     async def _record_status(self, device: Device, uuid: str, status: Any) -> None:
         ctx = self._ctx

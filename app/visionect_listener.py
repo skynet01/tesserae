@@ -45,6 +45,7 @@ from typing import Any
 
 from pyvisionect.io import VisionectServer
 from pyvisionect.io.tcp import looks_like_client_hello
+from pyvisionect.session import DeviceStateStore
 from pyvisionect.wire import (
     BLOCK_HEADER_SIZE,
     PROTOCOL_HEADER_SIZE,
@@ -257,3 +258,13 @@ class GuardedServer(VisionectServer):
             # socket so the read loop ends and does that cleanup itself.
             logger.debug("visionect: timer task for %s ended: %s", peer_ip(writer), exc)
             abort(writer)
+
+
+class PrunableStore(DeviceStateStore):
+    """``DeviceStateStore`` that can forget a UUID. 0.1.1 has no way to, so
+    a stream of made-up UUIDs would grow it without bound."""
+
+    def discard(self, device_id: bytes) -> None:
+        states = getattr(self, "_states", None)
+        if isinstance(states, dict):
+            states.pop(device_id, None)
