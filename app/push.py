@@ -275,6 +275,12 @@ PushStatus = Literal[
     "sent", "busy", "failed", "not_found", "quiet", "held", "superseded", "no_change", "unbound"
 ]
 
+# Outcomes where the frame reached (or was already on) the panel. Anything
+# else (failed, superseded, not_found, quiet, held, busy, unbound) left the
+# panel where it was, so a caller that records "the panel is now on page X"
+# (lineup navigation) must only do so for these.
+DELIVERED_STATUSES: frozenset[str] = frozenset({"sent", "no_change"})
+
 # Max bytes we'll pull from a remote image URL (Send-page Image URL tab).
 # Larger downloads are rejected before going through Pillow.
 _MAX_REMOTE_IMAGE_BYTES: int = 16 * 1024 * 1024
@@ -1724,6 +1730,7 @@ class PushManager:
         force_publish: bool = False,
         followup: int = 0,
         settle: bool = True,
+        exclude_device_ids: set[str] | None = None,
     ) -> PushResult:
         """Render a saved Page through the composer and publish.
 
@@ -1748,7 +1755,13 @@ class PushManager:
         ``settle`` (default ``True``): wait for the page's widgets to finish
         what they are painting before the page is rendered and sent, up to
         ``SETTLE_MAX_S``; see :meth:`settle_page`. Follow-ups and warms
-        never wait."""
+        never wait.
+
+        ``exclude_device_ids`` (optional): devices to leave out of the
+        fan-out, after binding and quiet-hours resolution. The scheduler
+        passes the displays on a per-display automation hold. When nothing
+        is left the push returns ``status="held"`` without rendering or
+        writing a History row (the caller retries on its own cadence)."""
         waited: tuple[float, int] = (0.0, 0)
         if settle and followup == 0 and source not in ("follow-up", "deck_warm", "album_warm"):
             waited = self.settle_page(page_id)
@@ -1784,6 +1797,7 @@ class PushManager:
                     force_publish=force_publish,
                     followup=followup,
                     waited=waited,
+                    exclude_device_ids=exclude_device_ids,
                 )
             finally:
                 self._lock.release()
@@ -2393,6 +2407,7 @@ class PushManager:
         stamp_into: dict[str, dict[str, Any]] | None = None,
         followup: int = 0,
         waited: tuple[float, int] = (0.0, 0),
+        exclude_device_ids: set[str] | None = None,
     ) -> PushResult:
         started = time.monotonic()
         refresh_wanted = 0
@@ -2440,6 +2455,26 @@ class PushManager:
                 # and return, not a failure (the user intent is
                 # respected) but not a successful push either.
                 return self._log_quiet_skip(page_id, source=source)
+        if exclude_device_ids:
+            narrowed = [
+                (panel, [d for d in dids if d not in exclude_device_ids]) for panel, dids in groups
+            ]
+            # A group that only had held displays goes; the legacy virtual
+            # group (no devices) has nothing to hold and stays.
+            kept = [
+                (panel, dids)
+                for (panel, dids), (_p, before) in zip(narrowed, groups, strict=True)
+                if dids or not before
+            ]
+            if not kept:
+                return PushResult(
+                    status="held", page_id=page_id, error="every target display is on hold"
+                )
+            if kept != groups:
+                groups = kept
+                # Follow-ups re-send to ``device_ids``; keep them off the
+                # held displays too.
+                device_ids = {d for _panel, dids in groups for d in dids}
 
         all_renderers: list[RendererResult] = []
         group_results: list[PushResult] = []

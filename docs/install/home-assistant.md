@@ -119,9 +119,14 @@ to the hub via `via_device`):
   binds the display to it and makes it live there; *(none)* unbinds
   it from every lineup. Goes with the lineup controls when those are
   switched off.
-- **number** *Hold* (minutes). Set it to hold the page currently on the
-  glass against the rotation for that long; 0 clears the hold. Counts
-  down as the hold runs.
+- **number** *Hold* (minutes), a pause for this display only: for that
+  long nothing automated reaches it (lineup steps, daily and interval
+  lineups, rotations, schedules, page refreshes, returns to a lineup's
+  home page), the same things the hub's *Automation* switch pauses for
+  every display. Manual sends, *Next* / *Previous* and the Play / Fire
+  now buttons still go through. Setting it replaces any hold already
+  there; 0 ends it. When it ends, the display goes straight back to its
+  lineup's current page. Counts down as the hold runs.
 - **switch** *Quiet hours override*, the per-display quiet-hours
   override. Turning it on without stored times copies the app-level
   window.
@@ -148,11 +153,12 @@ to the hub via `via_device`):
     - After a manually sent dashboard, *Next* goes to the page after the
       one the lineup was on.
     - They still work while *Automation* is off, during quiet hours, and
-      while a *Hold* is running (on a lineup the hold stays as it was),
-      like other manual sends. If the page fails to render, the display
-      stays where it was and the error shows on *Last error*. A remapped
-      panel button doesn't change them, and they don't fire the *Input*
-      event.
+      while a *Hold* is running (the hold stays as it was), like other
+      manual sends. If the page doesn't reach the display (it fails to
+      render, a newer send for the display wins, the dashboard is gone),
+      the display stays where it was and the reason shows on *Last
+      error*. A remapped panel button doesn't change them, and they don't
+      fire the *Input* event.
 - **event** *Input*, fires for physical buttons (`button`) and touch
   gestures (`tap`, `swipe`, `slide`) with the button name, gesture,
   action, slider value and the page landed on as attributes. Use it as

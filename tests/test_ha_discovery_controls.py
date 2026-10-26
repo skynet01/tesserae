@@ -385,12 +385,18 @@ def test_hold_number_sets_and_clears_override(tmp_path: Path) -> None:
     assert _payload_for(client, "tesserae/ha/dev/lounge/state/hold") == b"0"
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/hold", b"90")
     state = rot_state.get("lounge")
-    assert state is not None and state.override_until is not None
-    remaining = (state.override_until - datetime.now(UTC)).total_seconds()
+    # A per-display automation hold, not a rotation-scoped override.
+    assert state is not None and state.automation_hold_until is not None
+    assert state.override_until is None
+    remaining = (state.automation_hold_until - datetime.now(UTC)).total_seconds()
     assert 88 * 60 < remaining <= 90 * 60
     assert _payload_for(client, "tesserae/ha/dev/lounge/state/hold") in (b"89", b"90")
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/hold", b"0")
-    assert rot_state.get("lounge").override_until is None
+    # Ended now (left lapsed, so the scheduler sees it end and catches up).
+    state = rot_state.get("lounge")
+    assert state.automation_hold_until is not None
+    assert state.automation_hold_until <= datetime.now(UTC)
+    assert state.override_until is None
     assert _payload_for(client, "tesserae/ha/dev/lounge/state/hold") == b"0"
 
 

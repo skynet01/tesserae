@@ -22,11 +22,30 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   off removes those entities from HA when you save; the Active dashboard
   and per-display Dashboard pickers stay.
 
+### Changed
+
+- Home Assistant's per-display *Hold* number pauses that display: while it
+  runs, nothing automated reaches it (lineup steps, daily and interval
+  lineups, rotations, schedules, page refreshes, returns to a lineup's
+  home page), while manual sends and Next / Previous still go. When it
+  ends, or is set to 0, the display goes straight back to its lineup's
+  current page. Until now it only held a rotation the panel had been
+  paged away from by a button, so lineups kept advancing through it.
+
 ### Fixed
 
 - Home Assistant's per-display Input event (physical buttons and touch)
   works after a restart; until now it only appeared after the next
   settings save.
+- A display's lineup position follows daily and interval lineups too, so a
+  button press or Next after one of them fires steps that lineup rather
+  than the one that showed before it.
+- A page that doesn't reach the display (a failed render, a newer send
+  that took its place, a deleted dashboard) no longer moves the display's
+  lineup position, whether it came from a button, a lineup advance or
+  Home Assistant, and a button press, a lineup advance and Home
+  Assistant's Next or Previous on the same display wait for each other,
+  so the position always names the page on the glass.
 - Removing a display or a lineup no longer takes Home Assistant entities
   from another one whose id starts the same way (deleting `kitchen` used to
   remove `kitchen_2`'s entities too, its battery and signal sensors until

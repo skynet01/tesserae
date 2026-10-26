@@ -40,11 +40,12 @@ from pydantic import ValidationError
 
 from app import background_loops
 from app.plugin_loader import PluginRegistry
-from app.push import PushManager, PushResult
+from app.push import DELIVERED_STATUSES, PushManager, PushResult
 from app.scheduled_refresh import ScheduledPlacement, scheduled_placements
 from app.scheduler_conditions import ConditionEvaluator
 from app.state.deck_migration import deck_to_schedule
 from app.state.deck_model import Deck
+from app.state.deck_nav_store import navigation_locked
 from app.state.deck_store import DeckStore
 from app.state.event_log import EventLog
 from app.state.rotation_model import Rotation, RotationStep
@@ -79,6 +80,16 @@ class RotationSource(Protocol):
 # Returns the active tz or None for host-local. Resolved on every tick so
 # a settings change applies without restarting the scheduler thread.
 TimezoneProvider = Callable[[], tzinfo | None]
+
+
+def _hold_active(until: object, now: datetime) -> bool:
+    """Whether a stored hold timestamp is still in the future. A naive
+    value (hand-edited state) is read as UTC; anything else isn't a hold."""
+    if not isinstance(until, datetime):
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=UTC)
+    return now < until
 
 
 def _local(now: datetime, tz: tzinfo | None) -> datetime:
@@ -737,6 +748,9 @@ class Scheduler:
         # this behaves like a quiet-hours window with no end time.
         if self.is_paused():
             return
+        # Per-display holds (Home Assistant's Hold number) that ran out:
+        # clear them and put the display back into its lineup this tick.
+        self._release_lapsed_device_holds(now)
         # v0.48: refresh the HA state cache once per tick so each
         # condition evaluation across schedules + rotation steps reads
         # consistent state. Best-effort; HA unreachable returns False
@@ -805,6 +819,94 @@ class Scheduler:
         # rule in its sync manifest and handles it offline.
         self._maybe_return_decks_home(now)
 
+    # -- per-display automation holds ------------------------------------
+
+    def _device_hold_ids(self, now: datetime) -> set[str]:
+        """Displays on a per-display automation hold right now (Home
+        Assistant's Hold number, ``DeviceRotationState.automation_hold_until``
+        in the future). The per-display counterpart of the global pause:
+        every automated delivery leaves them out (lineup advances, daily /
+        interval fires, rotations, schedules, page refreshes, home returns,
+        rejoins), while manual sends, Play / Fire now and Next / Previous
+        don't come through these paths and still go."""
+        store = self._rotation_state_store
+        if store is None:
+            return set()
+        try:
+            states = store.all()
+        except Exception:
+            logger.exception("device holds: state store read failed")
+            return set()
+        return {
+            str(s.device_id)
+            for s in states.values()
+            if _hold_active(getattr(s, "automation_hold_until", None), now)
+        }
+
+    def _release_lapsed_device_holds(self, now: datetime) -> None:
+        """Clear holds that ran out (or were set to zero) and bring each
+        display back: every cycle record reaching it forgets its last fire,
+        so this tick's fire pass delivers the current step (a lineup only
+        repaints the display that was held; other panels already on the
+        step are skipped), the same catch-up a global resume gets."""
+        store = self._rotation_state_store
+        if store is None:
+            return
+        try:
+            states = store.all()
+        except Exception:
+            return
+        for state in states.values():
+            until = getattr(state, "automation_hold_until", None)
+            if not isinstance(until, datetime) or _hold_active(until, now):
+                continue
+            try:
+                current = store.get(state.device_id)
+                if current is None or current.automation_hold_until != until:
+                    continue  # a new Hold landed meanwhile; leave it
+                store.upsert(current.model_copy(update={"automation_hold_until": None}))
+            except Exception:
+                logger.exception("device holds: clearing %s failed", state.device_id)
+                continue
+            self._resume_cycles_for(str(state.device_id))
+            logger.info("display hold over: device=%s back to its schedule", state.device_id)
+
+    def _resume_cycles_for(self, device_id: str) -> None:
+        """Make every cycle record that reaches ``device_id`` due again,
+        including the display's own lineup memory, so the next fire pass
+        repaints it with the current step whatever it shows now (a page
+        sent by hand during the hold included)."""
+        for rotation in self._cycle_records():
+            if not self._cycle_reaches(rotation, device_id):
+                continue
+            with self._lock:
+                self._rotation_last_step.pop(rotation.id, None)
+                self._rotation_last_pushed_at.pop(rotation.id, None)
+                self._rotation_last_window_start.pop(rotation.id, None)
+                key = f"{rotation.id}:{device_id}"
+                self._deck_last_advance.pop(key, None)
+                self._deck_last_advance_at.pop(key, None)
+                self._deck_last_advance_window.pop(key, None)
+
+    def _cycle_reaches(self, rotation: Rotation, device_id: str) -> bool:
+        """Whether a cycle record delivers to ``device_id``: a bound
+        lineup's displays, else the rotation's own device list, else its
+        pages' bindings (how an unbound rotation reaches panels)."""
+        deck = self._deck_store.get(rotation.id) if self._deck_store is not None else None
+        if deck is not None and deck.device_ids:
+            return device_id in deck.device_ids
+        if rotation.device_ids:
+            return device_id in rotation.device_ids
+        if self._device_ids_for_page is None:
+            return False
+        try:
+            return any(
+                device_id in (self._device_ids_for_page(step.page_id) or [])
+                for step in rotation.steps
+            )
+        except Exception:
+            return False
+
     def _maybe_rejoin_rotations(self, now: datetime) -> None:
         """Bring manually-paged-away devices back into their rotation.
 
@@ -836,7 +938,10 @@ class Scheduler:
         if not lapsed:
             return
         rotations = {r.id: r for r in self._cycle_records()}
+        on_hold = self._device_hold_ids(now)
         for state in lapsed:
+            if state.device_id in on_hold:
+                continue  # rejoins once the display's own hold is over
             rotation = rotations.get(state.rotation_id or "")
             if rotation is None or not rotation.enabled or not rotation.steps:
                 # Rotation gone or off: just drop the stale hold.
@@ -1015,8 +1120,11 @@ class Scheduler:
         if not due:
             return
         showing = self._devices_showing_pages(now)
+        on_hold = self._device_hold_ids(now)
         for page in due:
-            devices = showing.get(page.id) or set()
+            # Displays on hold are left out; with nobody else showing the
+            # page it stays due and refreshes once the hold is over.
+            devices = (showing.get(page.id) or set()) - on_hold
             if not devices:
                 continue
             result = self._push_factory().push(
@@ -1071,9 +1179,15 @@ class Scheduler:
         pusher = self._push_factory()
         completed = set(affected)
         deferred: set[str] = set()
+        on_hold = self._device_hold_ids(now)
         for page_id in sorted(affected):
-            devices = showing.get(page_id) or set()
+            showing_now = showing.get(page_id) or set()
+            devices = showing_now - on_hold
             if not devices:
+                if showing_now:
+                    # Only held displays show it: not done, retry after.
+                    completed.discard(page_id)
+                    deferred.add(page_id)
                 continue
             retry_key = (source, page_id)
             if failure_backoff_seconds > 0:
@@ -1261,61 +1375,71 @@ class Scheduler:
         nav record never had a manual position and are left alone."""
         if self._deck_store is None or self._deck_nav_store is None:
             return
+        on_hold = self._device_hold_ids(now)
         for deck in self._deck_store.all():
             if not deck.enabled or deck.home_timeout_minutes <= 0 or not deck.device_ids:
                 continue
-            home = deck.resolved_home_page_id
-            timeout_s = deck.home_timeout_minutes * 60
             for device_id in deck.device_ids:
-                try:
-                    rec = self._deck_nav_store.get(device_id)
-                except Exception:
-                    continue
-                if rec is None or rec.get("deck_id") != deck.id:
-                    continue
-                if rec.get("page_id") == home:
-                    continue
-                updated_at = rec.get("updated_at")
-                if not isinstance(updated_at, (int, float)):
-                    continue
-                if now.timestamp() - float(updated_at) < timeout_s:
-                    continue
-                pusher = self._push_factory()
-                # Timer-driven, not user-initiated: respect quiet hours
-                # on BOTH paths. The push fallback gates itself, but the
-                # promote fast path would silently repaint a sleeping
-                # panel, so check before touching the live slot; the
-                # return simply lands after the window ends.
-                quiet_check = getattr(pusher, "device_in_quiet_hours", None)
-                if callable(quiet_check) and quiet_check(device_id):
-                    continue
-                promoter = getattr(pusher, "promote_deck_page", None)
-                promoted = callable(promoter) and promoter(device_id, home)
-                if not promoted:
-                    result = pusher.push(
-                        home,
-                        device_ids={device_id},
-                        respect_quiet_hours=True,
-                        source="deck",
-                    )
-                    if result.status == "failed":
-                        continue  # retry next tick; nav untouched
-                self._deck_nav_store.set(device_id, deck.id, home)
-                logger.info(
-                    "deck home return: device=%s deck=%s -> %s (%s)",
-                    device_id,
-                    deck.id,
-                    home,
-                    "promoted" if promoted else "pushed",
-                )
-                if self._event_log is not None:
-                    self._event_log.record(
-                        type="deck",
-                        source="deck",
-                        target=deck.id,
-                        status="sent",
-                        extra={"home_return_device": device_id, "page_id": home},
-                    )
+                if device_id in on_hold:
+                    continue  # returns home once the display's hold is over
+                # Read the position, deliver and record under the display's
+                # navigation lock, so a button press or Home Assistant's
+                # Next / Previous can't interleave with the return.
+                with navigation_locked(self._deck_nav_store, [device_id]):
+                    self._return_device_home(deck, device_id, now)
+
+    def _return_device_home(self, deck: Deck, device_id: str, now: datetime) -> None:
+        """One display's home return (see :meth:`_maybe_return_decks_home`);
+        the caller holds its navigation lock."""
+        if self._deck_nav_store is None:
+            return
+        home = deck.resolved_home_page_id
+        try:
+            rec = self._deck_nav_store.get(device_id)
+        except Exception:
+            return
+        if rec is None or rec.get("deck_id") != deck.id or rec.get("page_id") == home:
+            return
+        updated_at = rec.get("updated_at")
+        if not isinstance(updated_at, (int, float)):
+            return
+        if now.timestamp() - float(updated_at) < deck.home_timeout_minutes * 60:
+            return
+        pusher = self._push_factory()
+        # Timer-driven, not user-initiated: respect quiet hours on BOTH
+        # paths. The push fallback gates itself, but the promote fast path
+        # would silently repaint a sleeping panel, so check before touching
+        # the live slot; the return simply lands after the window ends.
+        quiet_check = getattr(pusher, "device_in_quiet_hours", None)
+        if callable(quiet_check) and quiet_check(device_id):
+            return
+        promoter = getattr(pusher, "promote_deck_page", None)
+        promoted = callable(promoter) and promoter(device_id, home)
+        if not promoted:
+            result = pusher.push(
+                home,
+                device_ids={device_id},
+                respect_quiet_hours=True,
+                source="deck",
+            )
+            if result.status not in DELIVERED_STATUSES:
+                return  # the panel didn't move: retry next tick, nav untouched
+        self._deck_nav_store.set(device_id, deck.id, home)
+        logger.info(
+            "deck home return: device=%s deck=%s -> %s (%s)",
+            device_id,
+            deck.id,
+            home,
+            "promoted" if promoted else "pushed",
+        )
+        if self._event_log is not None:
+            self._event_log.record(
+                type="deck",
+                source="deck",
+                target=deck.id,
+                status="sent",
+                extra={"home_return_device": device_id, "page_id": home},
+            )
 
     def _fire_cycle(self, rotation: Rotation, step_index: int, now: datetime) -> None:
         """Fire one due cycle record (#167 decommission). A cycle backed by a
@@ -1350,8 +1474,15 @@ class Scheduler:
         if state is None:
             return  # window closed between find and fire; next tick recovers
         held = self._held_device_ids(rotation.id, now)
+        on_hold = self._device_hold_ids(now) & set(deck.device_ids)
         fired = self._fire_deck_advance(
-            deck, rotation, rotation.steps[step_index].page_id, state, now, held=held
+            deck,
+            rotation,
+            rotation.steps[step_index].page_id,
+            state,
+            now,
+            held=held,
+            on_hold=on_hold,
         )
         with self._lock:
             # Arm the same transition / min-hold gates rotations use so the
@@ -1362,7 +1493,9 @@ class Scheduler:
             if fired:
                 self._rotation_last_status[rotation.id] = "sent"
                 self._rotation_last_reason[rotation.id] = None
-            elif held and all(device_id in held for device_id in deck.device_ids):
+            elif (held or on_hold) and all(
+                device_id in held or device_id in on_hold for device_id in deck.device_ids
+            ):
                 # Every panel is mid-hold, so the lineup card should say
                 # "held" rather than keep showing the last successful send.
                 self._rotation_last_status[rotation.id] = "held"
@@ -1381,7 +1514,14 @@ class Scheduler:
             and deck.device_ids
         ):
             device_filter = set(deck.device_ids)
-        self._fire(schedule, now, respect_quiet_hours=True, device_ids=device_filter)
+        self._fire(
+            schedule,
+            now,
+            respect_quiet_hours=True,
+            device_ids=device_filter,
+            respect_device_holds=True,
+            nav_deck=deck if device_filter is not None else None,
+        )
 
     def _fire_deck_advance(
         self,
@@ -1392,15 +1532,26 @@ class Scheduler:
         now: datetime,
         *,
         held: set[str] | None = None,
+        on_hold: set[str] | None = None,
     ) -> bool:
         """Advance one bound timer deck's panels to the target page. Pushes
         only at a step transition (or a new dwell window, for a keep-fresh
         single page), so a manual tap in ``both`` mode holds until the next
         boundary, matching rotation behaviour. ``held`` panels (manual hold
-        still active) are skipped; the rejoin pass returns them. Returns
-        whether any panel took the frame."""
+        still active) are skipped; the rejoin pass returns them. ``on_hold``
+        panels (a per-display automation hold) are skipped too, quietly,
+        since the tick comes round every 30 s; the hold's release brings
+        them back. Returns whether any panel took the frame."""
         fired_any = False
         for device_id in deck.device_ids:
+            if on_hold and device_id in on_hold:
+                logger.debug(
+                    "deck timer advance skipped: device=%s deck=%s -> %s (display on hold)",
+                    device_id,
+                    deck.id,
+                    target,
+                )
+                continue
             if held and device_id in held:
                 # A button / touch page-away still inside its hold. Say so:
                 # the tick records the window as handled either way, and a
@@ -1435,90 +1586,105 @@ class Scheduler:
             if rot.smart_sync and self._smart_sync_should_wait(target, rot.smart_sync_lead_s, now):
                 self._log_deck_skip(device_id, deck.id, target, "smart-sync wait")
                 continue
-            pusher = self._push_factory()
-            quiet_check = getattr(pusher, "device_in_quiet_hours", None)
-            if callable(quiet_check) and quiet_check(device_id):
-                self._log_deck_skip(device_id, deck.id, target, "quiet hours")
-                continue
-            promoter = getattr(pusher, "promote_deck_page", None)
-            promoted = (
-                callable(promoter)
-                and not self._warm_frame_is_stale(pusher, deck, device_id, target, now)
-                and promoter(device_id, target)
+            with navigation_locked(self._deck_nav_store, [device_id]):
+                # Delivery and the nav record happen together under the
+                # display's navigation lock, so a button press or Home
+                # Assistant's Next / Previous can't land in between.
+                if self._advance_device(deck, target, state, now, device_id, key):
+                    fired_any = True
+        return fired_any
+
+    def _advance_device(
+        self, deck: Deck, target: str, state: StepState, now: datetime, device_id: str, key: str
+    ) -> bool:
+        """Deliver one lineup advance to one display and record it (see
+        :meth:`_fire_deck_advance`); the caller holds its navigation lock.
+        True when the panel took the frame."""
+        pusher = self._push_factory()
+        quiet_check = getattr(pusher, "device_in_quiet_hours", None)
+        if callable(quiet_check) and quiet_check(device_id):
+            self._log_deck_skip(device_id, deck.id, target, "quiet hours")
+            return False
+        promoter = getattr(pusher, "promote_deck_page", None)
+        promoted = (
+            callable(promoter)
+            and not self._warm_frame_is_stale(pusher, deck, device_id, target, now)
+            and promoter(device_id, target)
+        )
+        if not promoted:
+            result = pusher.push(
+                target, device_ids={device_id}, respect_quiet_hours=True, source="deck"
             )
-            if not promoted:
-                result = pusher.push(
-                    target, device_ids={device_id}, respect_quiet_hours=True, source="deck"
+            if result.status not in DELIVERED_STATUSES:
+                # Retry next tick; don't record the transition (or the nav
+                # position: the panel is still on its previous page).
+                # Surface it though: a page that fails every time its
+                # window comes round leaves the panel holding the previous
+                # one, which reads as "the deck skips that dashboard" rather
+                # than "that dashboard won't render" (#167).
+                reason = result.error or f"push {result.status}"
+                logger.warning(
+                    "deck timer advance failed: device=%s deck=%s -> %s (%s)",
+                    device_id,
+                    deck.id,
+                    target,
+                    reason,
                 )
-                if result.status == "failed":
-                    # Retry next tick; don't record the transition. Surface
-                    # it though: a page that fails every time its window
-                    # comes round leaves the panel holding the previous one,
-                    # which reads as "the deck skips that dashboard" rather
-                    # than "that dashboard won't render" (#167).
-                    logger.warning(
-                        "deck timer advance failed: device=%s deck=%s -> %s (%s)",
-                        device_id,
-                        deck.id,
-                        target,
-                        result.error or "push failed",
-                    )
-                    if self._event_log is not None:
-                        self._event_log.record(
-                            type="deck",
-                            source="deck",
-                            target=deck.id,
-                            status="failed",
-                            extra={
-                                "timer_advance_device": device_id,
-                                "page_id": target,
-                                "error": result.error or "push failed",
-                            },
-                        )
-                    continue
-            self._deck_nav_store.set(device_id, deck.id, target)
-            fired_any = True
-            with self._lock:
-                self._deck_last_advance[key] = target
-                self._deck_last_advance_at[key] = now.timestamp()
-                self._deck_last_advance_window[key] = state.step_started_at.timestamp()
-            logger.info(
-                "deck timer advance: device=%s deck=%s -> %s (%s)",
-                device_id,
-                deck.id,
-                target,
-                "promoted" if promoted else "pushed",
-            )
-            if self._event_log is not None:
-                if promoted:
-                    # A cache-hit promote changes what the panel shows without
-                    # touching the push pipeline, so nothing else writes a
-                    # History (``type="push"``) row for it. Record one here,
-                    # otherwise History lists the background warms nobody sees
-                    # while the flip the person actually watched is invisible.
-                    render_for = getattr(pusher, "deck_render_for", None)
-                    info = render_for(device_id, target) if callable(render_for) else None
-                    comp = (info or {}).get("composition_digest")
+                if self._event_log is not None:
                     self._event_log.record(
-                        type="push",
+                        type="deck",
                         source="deck",
-                        target=target,
-                        status="sent",
-                        digest=str(comp) if comp else None,
+                        target=deck.id,
+                        status="failed" if result.status == "failed" else str(result.status),
                         extra={
-                            "device_ids": [device_id],
-                            "promoted": True,
-                            "deck_id": deck.id,
+                            "timer_advance_device": device_id,
+                            "page_id": target,
+                            "error": reason,
                         },
                     )
+                return False
+        self._deck_nav_store.set(device_id, deck.id, target)
+        with self._lock:
+            self._deck_last_advance[key] = target
+            self._deck_last_advance_at[key] = now.timestamp()
+            self._deck_last_advance_window[key] = state.step_started_at.timestamp()
+        logger.info(
+            "deck timer advance: device=%s deck=%s -> %s (%s)",
+            device_id,
+            deck.id,
+            target,
+            "promoted" if promoted else "pushed",
+        )
+        if self._event_log is not None:
+            if promoted:
+                # A cache-hit promote changes what the panel shows without
+                # touching the push pipeline, so nothing else writes a
+                # History (``type="push"``) row for it. Record one here,
+                # otherwise History lists the background warms nobody sees
+                # while the flip the person actually watched is invisible.
+                render_for = getattr(pusher, "deck_render_for", None)
+                info = render_for(device_id, target) if callable(render_for) else None
+                comp = (info or {}).get("composition_digest")
                 self._event_log.record(
-                    type="deck",
+                    type="push",
                     source="deck",
-                    target=deck.id,
+                    target=target,
                     status="sent",
-                    extra={"timer_advance_device": device_id, "page_id": target},
+                    digest=str(comp) if comp else None,
+                    extra={
+                        "device_ids": [device_id],
+                        "promoted": True,
+                        "deck_id": deck.id,
+                    },
                 )
-        return fired_any
+            self._event_log.record(
+                type="deck",
+                source="deck",
+                target=deck.id,
+                status="sent",
+                extra={"timer_advance_device": device_id, "page_id": target},
+            )
+        return True
 
     @staticmethod
     def _log_deck_skip(device_id: str, deck_id: str, target: str, reason: str) -> None:
@@ -2180,10 +2346,14 @@ class Scheduler:
         # Play / Fire-now buttons) skips the exclusion entirely: an
         # explicit user click supersedes a button/touch page-away.
         held = self._held_device_ids(rotation.id, now)
+        # Displays on a per-display automation hold sit out every automated
+        # fire too; Play / Fire now (``bypass_holds``) still reaches them.
+        on_hold = set() if bypass_holds else self._device_hold_ids(now)
+        excluded = held | on_hold
         device_filter: set[str] | None = None
-        if held and not bypass_holds and self._device_ids_for_page is not None:
+        if excluded and not bypass_holds and self._device_ids_for_page is not None:
             bound = set(self._device_ids_for_page(step.page_id) or [])
-            targets = bound - held
+            targets = bound - excluded
             if bound and not targets:
                 # Every bound panel is mid-hold: nothing to paint now.
                 result = PushResult(
@@ -2207,11 +2377,25 @@ class Scheduler:
                 source="rotation",
             )
         else:
+            # Without a page->devices resolver the push manager drops the
+            # held displays itself (only passed when there are any, so
+            # duck-typed test push managers keep working).
+            extra: dict[str, Any] = {"exclude_device_ids": on_hold} if on_hold else {}
             result = self._push_factory().push(
                 step.page_id,
                 respect_quiet_hours=respect_quiet_hours,
                 source="rotation",
+                **extra,
             )
+        if result.status == "held":
+            # Every target is on hold: handled for this step, like the
+            # all-held branch above; the hold's release re-fires it.
+            with self._lock:
+                self._rotation_last_step[rotation.id] = step_index
+                self._rotation_last_pushed_at[rotation.id] = now.timestamp()
+                self._rotation_last_status[rotation.id] = "held"
+                self._rotation_last_reason[rotation.id] = "all devices manually held"
+            return result
         if bypass_holds and held and result.status in ("sent", "no_change"):
             self._clear_holds(rotation.id, held, step.page_id, step_index)
         # Same status semantics as _fire: a quiet result still counts
@@ -2329,6 +2513,43 @@ class Scheduler:
             for sid in enabled_ids:
                 self._first_seen.setdefault(sid, now.timestamp())
 
+    def _page_devices(self, page_id: str) -> set[str]:
+        """The displays a page is bound to, or empty when unknown."""
+        if self._device_ids_for_page is None:
+            return set()
+        try:
+            return set(self._device_ids_for_page(page_id) or [])
+        except Exception:
+            return set()
+
+    def _record_trigger_nav(
+        self, deck: Deck, page_id: str, result: PushResult, candidates: set[str]
+    ) -> None:
+        """After a daily / interval lineup fire, record the lineup and page
+        as each display's nav position, but only for the displays the frame
+        actually reached, and only for a page of the lineup (a conditions
+        fallback page outside it leaves the record alone)."""
+        if self._deck_nav_store is None or page_id not in deck.page_ids:
+            return
+        if result.status not in DELIVERED_STATUSES:
+            return
+        reached: set[str] = set()
+        renderers = getattr(result, "renderers", None)
+        for row in renderers if isinstance(renderers, list) else []:
+            renderer_id = str(getattr(row, "renderer_id", ""))
+            if getattr(row, "error", None) is None and "__" in renderer_id:
+                reached.add(renderer_id.split("__", 1)[1])
+        if not reached:
+            # No per-display rows to go by: every candidate the quiet-hours
+            # filter would have let through.
+            quiet = getattr(self._push_factory(), "device_in_quiet_hours", None)
+            reached = {d for d in candidates if not (callable(quiet) and quiet(d) is True)}
+        for device_id in sorted(reached & candidates):
+            try:
+                self._deck_nav_store.set(device_id, deck.id, page_id)
+            except Exception:
+                logger.exception("trigger lineup nav: recording %s failed", device_id)
+
     def _fire(
         self,
         schedule: Schedule,
@@ -2337,7 +2558,33 @@ class Scheduler:
         respect_quiet_hours: bool = False,
         bypass_conditions: bool = False,
         device_ids: set[str] | None = None,
+        respect_device_holds: bool = False,
+        nav_deck: Deck | None = None,
     ) -> PushResult:
+        # Per-display automation holds (tick-driven fires only): leave the
+        # held displays out. When every target is held the fire doesn't
+        # count, no render and no History row, so the record stays due and
+        # lands as soon as the hold is over, as after a global resume.
+        exclude: set[str] = set()
+        if respect_device_holds:
+            on_hold = self._device_hold_ids(now)
+            if on_hold:
+                targets = (
+                    set(device_ids)
+                    if device_ids is not None
+                    else self._page_devices(schedule.page_id)
+                )
+                if targets and targets <= on_hold:
+                    with self._lock:
+                        self._last_status[schedule.id] = "held"
+                        self._last_reason[schedule.id] = "every display is on hold"
+                    return PushResult(
+                        status="held", page_id=schedule.page_id, error="every display is on hold"
+                    )
+                if device_ids is not None:
+                    device_ids = device_ids - on_hold
+                else:
+                    exclude = on_hold
         # Conditional-schedule gate (v0.48). Evaluated before the push
         # so a held schedule incurs zero rendering cost. ``fire_now``
         # passes ``bypass_conditions=True`` because manual intent
@@ -2389,7 +2636,24 @@ class Scheduler:
         # otherwise keeps duck-typed push managers (tests) compatible.
         if device_ids is not None:
             push_kwargs["device_ids"] = device_ids
-        result = self._push_factory().push(target_page, **push_kwargs)
+        if exclude:
+            push_kwargs["exclude_device_ids"] = exclude
+        # A bound trigger lineup's fire is a lineup advance: deliver and
+        # record the nav position under the displays' navigation locks, the
+        # same as a cycle lineup's step, so Next / Previous step from what
+        # this fire put on the glass.
+        nav_targets = sorted(device_ids) if nav_deck is not None and device_ids else []
+        with navigation_locked(self._deck_nav_store, nav_targets):
+            result = self._push_factory().push(target_page, **push_kwargs)
+            if nav_targets and nav_deck is not None:
+                self._record_trigger_nav(nav_deck, target_page, result, set(nav_targets))
+        if result.status == "held":
+            # The push manager found only held displays (no resolver to
+            # tell up front): same as the preflight above.
+            with self._lock:
+                self._last_status[schedule.id] = "held"
+                self._last_reason[schedule.id] = "every display is on hold"
+            return result
         # Successful fires bump last_fired so the daily / interval gates
         # work; a failed push doesn't update it (the next tick can retry).
         # A ``quiet`` result also bumps it, every device was in quiet

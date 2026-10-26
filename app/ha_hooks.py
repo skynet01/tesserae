@@ -24,6 +24,7 @@ from typing import Any
 from flask import Flask
 
 from app.ha_discovery import HaHooks
+from app.push import DELIVERED_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -398,10 +399,13 @@ def _step_device(app: Flask, device_id: str, delta: int) -> str | None:
     if device is None or device.kind_of is None:
         return f"Unknown device {device_id!r}."
     result = step(device_id=device_id, forward=delta > 0, source="home_assistant")
+    error = getattr(result, "error", None)
     push = getattr(result, "push_result", None)
-    if push is not None and push.status == "failed":
-        return f"{device.display_name}: {push.error or 'push failed'}"
-    return None
+    if not error and push is not None and push.status not in DELIVERED_STATUSES:
+        # Anything but sent / no_change left the panel where it was:
+        # failed, superseded by a newer push, page gone, ...
+        error = push.error or f"push {push.status}"
+    return f"{device.display_name}: {error}" if error else None
 
 
 def build_ha_hooks(app: Flask) -> HaHooks:

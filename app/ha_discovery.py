@@ -33,8 +33,9 @@ via ``via_device``):
   ``Next change`` (the next projected visible update).
 * **select** ``Dashboard`` (push one bound dashboard to *only* this
   display) and **select** ``Lineup`` (which lineup the display follows).
-* **number** ``Hold`` (minutes to hold the current page against the
-  rotation) and, when the kind carries one, ``Wake interval``.
+* **number** ``Hold`` (minutes this display sits out every automated
+  delivery, a per-display Automation pause) and, when the kind carries
+  one, ``Wake interval``.
 * **switch** ``Quiet hours override`` and **binary_sensors** ``In quiet
   hours``, ``Online``, ``Low battery``.
 * **button** ``Refresh now``, **buttons** ``Next`` / ``Previous`` (step
@@ -76,7 +77,8 @@ from typing import Any
 
 from app import background_loops
 from app.device_loader import DeviceRegistry
-from app.push import PushManager, PushResult
+from app.push import DELIVERED_STATUSES, PushManager, PushResult
+from app.state.deck_nav_store import navigation_locked
 from app.state.page_store import PageStore
 from app.transport import MqttTransport
 
@@ -187,7 +189,7 @@ class HaHooks:
     * ``settings_store``: ``get_section`` / ``patch_section``, for the
       automation pause + quiet-hours toggles.
     * ``scheduler``: ``upcoming_for_device`` (Next change sensor).
-    * ``rotation_state_store``: per-display ``override_until`` (Hold).
+    * ``rotation_state_store``: per-display ``automation_hold_until`` (Hold).
     * ``telemetry``: ``get(device_id).predicted_next_wake_at``.
     * ``button_service``: ``add_listener`` / ``remove_listener`` for the
       input ``event`` entity.
@@ -1415,18 +1417,27 @@ class HomeAssistantDiscovery:
                         with contextlib.suppress(Exception):
                             warm(page.page_id, device_id)
             entry = getattr(deck, "resolved_entry_page_id", None) or deck.pages[0].page_id
-            pusher.push(
-                entry,
-                device_ids=set(device_ids),
-                respect_quiet_hours=False,
-                force_publish=True,
-                source="home_assistant",
-            )
             nav = self._hooks.deck_nav_store
-            if nav is not None:
-                for device_id in device_ids:
-                    with contextlib.suppress(Exception):
-                        nav.set(device_id, deck.id, entry)
+            # Deliver and record together under the displays' navigation
+            # locks; record only when the entry page reached them.
+            with navigation_locked(nav, device_ids):
+                result = pusher.push(
+                    entry,
+                    device_ids=set(device_ids),
+                    respect_quiet_hours=False,
+                    force_publish=True,
+                    source="home_assistant",
+                )
+                if nav is not None and result.status in DELIVERED_STATUSES:
+                    for device_id in device_ids:
+                        with contextlib.suppress(Exception):
+                            nav.set(device_id, deck.id, entry)
+                elif result.status not in DELIVERED_STATUSES:
+                    self._publish_str(
+                        STATE_TOPIC_LAST_ERROR,
+                        (result.error or f"push {result.status}")[:240],
+                        retain=True,
+                    )
         except Exception:
             self._publish_str(STATE_TOPIC_BUSY, "0", retain=True)
             raise
@@ -1445,30 +1456,37 @@ class HomeAssistantDiscovery:
         nav = self._hooks.deck_nav_store
         pusher = self._push_manager
         for device_id in deck.device_ids:
-            rec = None
-            if nav is not None:
-                with contextlib.suppress(Exception):
-                    rec = nav.get(device_id)
-            current = rec.get("page_id") if rec and rec.get("deck_id") == deck.id else None
-            try:
-                idx = order.index(current) if current is not None else (-delta if delta > 0 else 0)
-            except ValueError:
-                idx = 0
-            target = order[(idx + delta) % len(order)]
-            promoter = getattr(pusher, "promote_deck_page", None)
-            promoted = bool(callable(promoter) and promoter(device_id, target))
-            if not promoted:
-                result = pusher.push(
-                    target,
-                    device_ids={device_id},
-                    respect_quiet_hours=False,
-                    source="home_assistant",
-                )
-                if result.status == "failed":
-                    continue
-            if nav is not None:
-                with contextlib.suppress(Exception):
-                    nav.set(device_id, deck.id, target)
+            # Read, deliver and record under the display's navigation lock.
+            with navigation_locked(nav, [device_id]):
+                rec = None
+                if nav is not None:
+                    with contextlib.suppress(Exception):
+                        rec = nav.get(device_id)
+                current = rec.get("page_id") if rec and rec.get("deck_id") == deck.id else None
+                try:
+                    idx = (
+                        order.index(current)
+                        if current is not None
+                        else (-delta if delta > 0 else 0)
+                    )
+                except ValueError:
+                    idx = 0
+                target = order[(idx + delta) % len(order)]
+                promoter = getattr(pusher, "promote_deck_page", None)
+                promoted = bool(callable(promoter) and promoter(device_id, target))
+                if not promoted:
+                    result = pusher.push(
+                        target,
+                        device_ids={device_id},
+                        respect_quiet_hours=False,
+                        source="home_assistant",
+                    )
+                    if result.status not in DELIVERED_STATUSES:
+                        # The panel didn't move: leave its position alone.
+                        continue
+                if nav is not None:
+                    with contextlib.suppress(Exception):
+                        nav.set(device_id, deck.id, target)
             device = self._device(device_id)
             if device is not None:
                 self._publish_device_runtime(device)
@@ -1570,20 +1588,33 @@ class HomeAssistantDiscovery:
         self._lineup_go_live(deck, {device_id})
 
     def _set_device_hold(self, device: Any, text: str) -> None:
-        """Hold number: N minutes holds the current page against the
-        rotation (``override_until``); 0 clears the hold."""
+        """Hold number: a per-display Automation pause. N minutes keeps every
+        automated delivery off this display (lineup steps, daily / interval
+        fires, rotations, schedules, page refreshes, home returns) until
+        then; manual sends and Next / Previous still go through. It replaces
+        any hold already there, a button press's included. 0 ends it now:
+        the scheduler's next tick puts the display back into its lineup."""
         store = self._hooks.rotation_state_store
         if store is None:
             return
         try:
             minutes = max(0, min(int(float(text)), HOLD_MAX_MINUTES))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return
         from app.state.device_rotation_state_model import DeviceRotationState
 
+        now = datetime.now(UTC)
         state = store.get(device.id) or DeviceRotationState(device_id=device.id)
-        until = datetime.now(UTC) + timedelta(minutes=minutes) if minutes > 0 else None
-        store.upsert(state.model_copy(update={"override_until": until}))
+        store.upsert(
+            state.model_copy(
+                update={
+                    # A lapsed (not cleared) value on 0, so the scheduler
+                    # sees the hold end and catches the display up.
+                    "automation_hold_until": now + timedelta(minutes=minutes),
+                    "override_until": None,
+                }
+            )
+        )
         logger.info("HA discovery: hold %r for %d min", device.id, minutes)
         self._publish_device_runtime(device)
 
@@ -1753,14 +1784,18 @@ class HomeAssistantDiscovery:
             )
 
         if self._hooks.rotation_state_store is not None:
+            # The display's own hold, or a button press's (whichever runs
+            # longer): what setting the number would replace.
             remaining = 0
             with contextlib.suppress(Exception):
                 state = self._hooks.rotation_state_store.get(device_id)
-                until = getattr(state, "override_until", None) if state is not None else None
-                if isinstance(until, datetime):
-                    if until.tzinfo is None:
-                        until = until.replace(tzinfo=UTC)
-                    remaining = max(0, int((until - now).total_seconds() // 60))
+                for field in ("automation_hold_until", "override_until"):
+                    until = getattr(state, field, None) if state is not None else None
+                    if isinstance(until, datetime):
+                        if until.tzinfo is None:
+                            until = until.replace(tzinfo=UTC)
+                        left = max(0, int((until - now).total_seconds() // 60))
+                        remaining = max(remaining, left)
             self._publish_str(_dev_state(device_id, "hold"), str(remaining), retain=True)
 
         if self._hooks.settings_store is not None:
