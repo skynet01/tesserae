@@ -308,8 +308,8 @@
           <strong>Tesserae replaces the Visionect server.</strong> The sign dials the address in
           its flash on TCP {{ visionect_listener.port if visionect_listener else 11113 }}: run
           Tesserae on the old Visionect server's address, or set the address over the sign's USB
-          console. Leave the UUID blank and the first unknown sign that connects is bound to this
-          device; the sign reports its own screen size. The protocol has no authentication, so
+          console. Leave the UUID blank and the first unknown sign that connects within the hour is
+          bound to this device; the sign reports its own screen size. The protocol has no authentication, so
           keep the port on your LAN.
         </p>
       </div>
@@ -333,7 +333,7 @@
                       help='Lowercase, no spaces.') }}
         {{ text_input('add-vx-name', 'name', 'Display name', value='', placeholder='Hallway sign') }}
         {{ text_input('add-vx-uuid', 'uuid', 'Sign UUID', value='', placeholder='36002000-1247-3830-3933-303600000000',
-                      help="Optional. On the sign's label or in the old Visionect server's device list. Blank binds the first unknown sign that connects.") }}
+                      help="Optional. On the sign's label or in the old Visionect server's device list. Blank binds the first unknown sign that connects within the hour.") }}
         {{ select_field('add-vx-orientation', 'panel_orientation', 'Rotation', value='',
                         blank_label='Model default',
                         options=[{'value':'landscape','label':'0°'},

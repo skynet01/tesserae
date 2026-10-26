@@ -6,7 +6,7 @@ Visionect's e-paper signs (the 32" Place & Play, Joan, the 13" boards) are thin 
     A Place & Play 32 (HardwareNameID 8, firmware 6.17.4168) has drawn frames pushed over this protocol by pyvisionect. Joan 6, Joan 13, the 13" Place & Play and the 9.7" boards use the same protocol and are in the catalog, but haven't been tried on hardware yet.
 
 !!! warning "No authentication"
-    The protocol has none: anything that can reach port 11113 can claim to be any sign. Keep 11113 on your LAN and don't forward it from the internet.
+    The protocol has none: anything that can reach port 11113 can claim to be any sign. Keep 11113 on your LAN and don't forward it from the internet. Tesserae limits the damage: while a sign is connected, a second connection claiming its UUID from another address is refused (and shown on the device page), oversized or over-compressed frames are dropped, and so are connections that don't identify within 20 seconds.
 
 ## 01 — Point the sign at Tesserae
 
@@ -25,7 +25,7 @@ Tesserae must be reachable on 11113:
 
 Either way works:
 
-- **Settings → Devices → Add device → Visionect.** Pick the model, give it an id and a name, and leave **Sign UUID** blank to bind the first unknown sign that connects. You can also paste the UUID from the sign's label or the old VSS device list.
+- **Settings → Devices → Add device → Visionect.** Pick the model, give it an id and a name, and leave **Sign UUID** blank to bind the first unknown sign that connects within the next hour. You can also paste the UUID from the sign's label or the old VSS device list. A blank device stops binding signs automatically an hour after you add it (or clear its UUID), so it isn't left open to anything else on the network; a sign that connects later shows up as discovered instead, with its UUID.
 - **Let the sign announce itself.** Once one Visionect device exists, Tesserae is listening. Any other sign that connects shows up in the **discovered devices** banner on the Devices page. **Register** creates the device bound to that sign, with the model preselected when its screen size identifies it.
 
 The sign reports its own screen size when it connects, and Tesserae adopts it. A Joan 6 renders at 1024×758 and the 32" at 1440×2560, whichever model you picked. **Rotation** works as for any other device. On the 32", if the image arrives upside down, pick 270°.

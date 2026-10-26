@@ -28,8 +28,8 @@ that task skipped the removal of the connection and the socket's close.
 
 Both hooks override private methods (``_handle_client``, the asyncio accept
 callback, and ``_run_timers``); ``tests/test_visionect.py`` pins their
-signatures so a pyvisionect upgrade that moves them fails loudly. The
-upstream asks are in ``notes/pyvisionect-upstream-issues.md``.
+signatures so a pyvisionect upgrade that moves them fails loudly. All of this
+belongs upstream in pyvisionect; it lives here until it is there.
 
 Plaintext only: Tesserae never gives the server an ``ssl_context``. A TLS
 ClientHello is handed to the library untouched, which closes it and logs that

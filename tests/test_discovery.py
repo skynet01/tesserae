@@ -477,3 +477,42 @@ def test_one_sign_uuid_binds_one_device(app: Flask) -> None:
     assert "already bound to device &#39;hall_sign&#39;" in resp.get_data(as_text=True)
     section = app.config["SETTINGS_STORE"].get_section("devices")
     assert not (section.get("spare_sign") or {}).get("uuid")
+
+
+def test_visionect_device_band_says_whether_auto_bind_is_open_and_shows_refusals(
+    app: Flask, monkeypatch
+) -> None:
+    import time as _time
+    from types import SimpleNamespace
+
+    from app import visionect
+    from app.settings import index_routes
+
+    client = app.test_client()
+    _sign_in(client)
+    client.post("/settings/devices/add", data={"kind": "visionect", "id": "hall", "name": "Hall"})
+    device = app.config["DEVICE_REGISTRY"].get("hall")
+    state = {"uuid": "", "open": True, "view": {}}
+    fake = SimpleNamespace(
+        running=True,
+        port=11113,
+        start_error=None,
+        device_uuid=lambda _d: state["uuid"],
+        auto_bind_open=lambda _d: state["open"],
+        sign_view=lambda _u: state["view"],
+    )
+    monkeypatch.setattr(visionect, "service", lambda: fake)
+    with app.test_request_context():
+        assert "within an hour" in index_routes._visionect_setup(device)["body"]
+        state["open"] = False
+        assert "listed under discovered devices" in index_routes._visionect_setup(device)["body"]
+        state["uuid"] = "aabbccdd-0000-1111-2222-333344445555"
+        state["view"] = {
+            "connected": True,
+            "remote": "10.0.0.5",
+            "in_sync": True,
+            "refused": {"remote": "10.0.0.66", "at": _time.time()},
+        }
+        band = index_routes._visionect_setup(device)
+    assert "from 10.0.0.66 claimed this sign's UUID and was refused" in band["body"]
+    assert band["ok"] is False

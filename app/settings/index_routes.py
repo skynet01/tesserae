@@ -1945,16 +1945,32 @@ def _visionect_setup(device: Device) -> dict[str, Any] | None:
         }
     uuid = svc.device_uuid(device.id)
     if not uuid:
-        return {
-            "ok": True,
-            "title": "Waiting for a sign",
-            "body": (
+        if svc.auto_bind_open(device):
+            body = (
                 f"Listening on TCP {port}. Point the sign at this server; the first unknown "
-                "sign that connects is bound to this device."
-            ),
-            "link": _VISIONECT_DOCS,
-        }
+                "sign that connects within an hour of adding this device is bound to it."
+            )
+        else:
+            body = (
+                f"Listening on TCP {port}. Unknown signs are only bound automatically within "
+                "an hour of adding a device or clearing its UUID, so one that connects now is "
+                "listed under discovered devices. Paste its UUID here to bind it."
+            )
+        return {"ok": True, "title": "Waiting for a sign", "body": body, "link": _VISIONECT_DOCS}
     view = svc.sign_view(uuid) or {}
+    refused = view.get("refused") or {}
+    refused_note = ""
+    refused_at = refused.get("at")
+    if isinstance(refused_at, (int, float)) and time.time() - refused_at < 24 * 3600:
+        from datetime import datetime
+
+        from app.tz_resolve import app_timezone
+
+        when = datetime.fromtimestamp(refused_at, tz=app_timezone()).strftime("%H:%M")
+        refused_note = (
+            f" At {when} a connection from {refused.get('remote') or 'another address'} "
+            "claimed this sign's UUID and was refused."
+        )
     if view.get("connected"):
         where = f" from {view['remote']}" if view.get("remote") else ""
         if view.get("sending"):
@@ -1967,7 +1983,13 @@ def _visionect_setup(device: Device) -> dict[str, Any] | None:
         body = f"Sign {uuid} is connected{where}. {state}"
         if problem:
             body += f" Last problem: {problem}"
-        return {"ok": not problem, "title": "Sign connected", "body": body, "link": _VISIONECT_DOCS}
+        body += refused_note
+        return {
+            "ok": not problem and not refused_note,
+            "title": "Sign connected",
+            "body": body,
+            "link": _VISIONECT_DOCS,
+        }
     asleep = view.get("asleep_until")
     if isinstance(asleep, (int, float)) and asleep > time.time():
         from datetime import datetime
