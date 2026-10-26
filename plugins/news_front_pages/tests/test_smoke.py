@@ -20,7 +20,7 @@ import time
 import types
 import urllib.error
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -1576,3 +1576,105 @@ def test_choices_fall_back_when_freedom_forum_is_down(app: Flask) -> None:
 
 def test_choices_ignores_other_names() -> None:
     assert server.choices("other") == []
+
+
+# ----- the worker's log, on the admin page -------------------------------------
+
+
+def _log(tmp_path: Path) -> list[str]:
+    return [f"{e['code']} {e['text']}" for e in _state(tmp_path).get("log", [])]
+
+
+def test_the_log_says_what_each_download_got(tmp_path: Path, cdn: FakeCdn) -> None:
+    cdn.pages = {_url("WSJ", 24): PAGE}
+    _fetch_settled(tmp_path, paper="WSJ")
+    assert _log(tmp_path) == [
+        "WSJ 2026-10-25: not out yet",
+        f"WSJ 2026-10-24: JPG, 700×1342 px, {server._kb(len(PAGE))} in 0.0 s"
+        " (no PDF drawing here: pypdfium2 isn't installed)",
+    ]
+
+
+def test_the_log_records_an_outage_and_the_page_kept(tmp_path: Path, cdn: FakeCdn) -> None:
+    _seed(tmp_path, "NY_NYT_20261024.jpg")
+    cdn.down = True
+    _fetch_settled(tmp_path, paper="NY_NYT")
+    assert _log(tmp_path) == [
+        "NY_NYT 2026-10-25: Freedom Forum unreachable (connection refused)",
+        "NY_NYT keeping the 2026-10-24 page",
+    ]
+    cdn.down = False
+    _fetch_settled(tmp_path, paper="USAT", fresh=True)
+    assert _log(tmp_path)[2:] == [
+        "USAT 2026-10-25: not out yet",
+        "USAT 2026-10-24: not out yet",
+        "USAT 2026-10-23: not out yet",
+        "USAT no page in the last 3 days",
+    ]
+
+
+@needs_pdfium
+def test_the_log_tells_the_jpeg_from_the_pdf_and_follows_the_retries(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    pdf.pages = {_url("WSJ", 25): PAGE}  # the PDF isn't out yet
+    _fetch_settled(tmp_path, paper="WSJ")
+    first = _log(tmp_path)
+    assert first[0].startswith("WSJ 2026-10-25: JPG, 700×1342 px, ")
+    assert first[0].endswith(" (PDF not out yet)")
+    assert first[1:] == ["WSJ 2026-10-25: PDF asked for again in 30 min"]
+    pdf.pages[_pdf_url("WSJ", 25)] = _pdf()
+    clocks.wall += server.PDF_RETRY_S + 1
+    _fetch_settled(tmp_path, paper="WSJ")
+    later = _log(tmp_path)[2:]
+    assert later[0] == "WSJ 2026-10-25: saved from the JPG, asking for the PDF again (try 2 of 6)"
+    assert re.fullmatch(
+        r"WSJ 2026-10-25: redrawn from the PDF, 1440×\d+ px, \d+ KB in \d+\.\d s", later[1]
+    )
+    assert len(later) == 2
+
+
+def test_the_log_keeps_only_the_newest_lines() -> None:
+    state: dict[str, Any] = {"log": [{"junk": True}, "x"]}
+    for i in range(server.LOG_LINES + 5):
+        server._append_log(state, "WSJ", [(float(i), f"line {i}")])
+    assert len(state["log"]) == server.LOG_LINES
+    assert state["log"][0] == {"at": 5.0, "code": "WSJ", "text": "line 5"}
+    assert state["log"][-1]["text"] == f"line {server.LOG_LINES + 4}"
+
+
+def test_the_downloads_card_sums_up_the_state_and_lists_the_log(tmp_path: Path) -> None:
+    at = datetime(2026, 10, 25, 14, 3, 12, tzinfo=UTC).timestamp()
+    server._write_json(
+        tmp_path / "state.json",
+        {
+            "log": [
+                {"at": at, "code": "WSJ", "text": "2026-10-25: PDF, 1440×2794 px, 812 KB in 4.2 s"},
+                {"at": at + 2, "code": "AZ_ADS", "text": "no page in the last 3 days"},
+                {"at": "soon", "code": "WSJ", "text": "a hand-edited line"},
+            ],
+            "pdf_retry": {
+                "USAT": {"day": "2026-10-25", "tries": 2, "after": at + 3600},
+                "NY_NYT": {"day": "2026-10-25", "tries": server.PDF_MAX_TRIES, "after": at},
+                "LAT": "junk",
+            },
+            "failed": {"AZ_ADS": "missing"},
+        },
+    )
+    view = server.downloads_view(tmp_path, UTC)
+    assert view["status"] == [
+        "Last activity Oct 25, 14:03.",
+        "Waiting to ask for the PDF again: USAT (try 3 of 6, after 15:03).",
+        "Out of PDF tries, keeping the JPG: NY_NYT.",
+        "No page yet for AZ_ADS (none in the last 3 days).",
+    ]
+    assert view["log"] == [
+        "Oct 25 14:03:12  WSJ     2026-10-25: PDF, 1440×2794 px, 812 KB in 4.2 s",
+        "Oct 25 14:03:14  AZ_ADS  no page in the last 3 days",
+    ]
+    empty = server.downloads_view(tmp_path / "none", UTC)
+    assert empty == {
+        "status": ["Nothing downloaded yet: a render that needs a page asks for it."],
+        "log": [],
+    }
+

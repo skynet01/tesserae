@@ -99,7 +99,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import ModuleType
@@ -723,6 +723,21 @@ def _unlink_if_same(path: Path, identity: tuple[int, int, int] | None) -> bool:
 # ----- downloading (worker thread only) --------------------------------------
 
 
+def _short(err: object) -> str:
+    """An error as one short line for the log: what Freedom Forum or the
+    network said. Nothing here carries a secret (the widget has none)."""
+    text = " ".join(str(err).split()) or type(err).__name__
+    return text if len(text) <= 120 else text[:119] + "\u2026"
+
+
+def _kb(size: int) -> str:
+    return (
+        f"{size / 1024 / 1024:.1f} MB"
+        if size >= 1024 * 1024
+        else f"{max(1, round(size / 1024))} KB"
+    )
+
+
 def _edition_today() -> date:
     return datetime.now(_EDITION_TZ).date()
 
@@ -884,7 +899,21 @@ def rasterise_pdf(
     return done.stdout
 
 
-def _pdf_edition(code: str, day: date, deadline: float, *, quiet: bool) -> bytes | None:
+@dataclass
+class Trace:
+    """What one ``download_edition`` call did, for the worker's log: where
+    the page it returned came from, and why the PDF or the JPEG wasn't used
+    when it wasn't."""
+
+    source: str = ""  # "PDF" or "JPG"
+    pdf: str = ""
+    jpg: str = ""
+    no_rasteriser: bool = False  # pypdfium2 missing: the JPEG is all there is
+
+
+def _pdf_edition(
+    code: str, day: date, deadline: float, *, quiet: bool, trace: Trace
+) -> bytes | None:
     """The ``code`` front page for ``day`` drawn from its PDF, or None when
     there's no PDF or it can't be drawn. With ``quiet`` a CDN failure is a
     None too, and the JPEG fallback after it decides whether Freedom Forum
@@ -894,28 +923,43 @@ def _pdf_edition(code: str, day: date, deadline: float, *, quiet: bool) -> bytes
             PDF_URL.format(day=day.day, code=code), deadline, MAX_PDF_BYTES, "application/pdf"
         )
     except CdnUnreachable as err:
+        trace.pdf = f"unreachable ({_short(err)})"
         if not quiet:
             raise
         logger.info("%s: %s PDF for %s unavailable (%s)", PLUGIN_ID, code, day, err)
         return None
     if got is None:
+        trace.pdf = "not out yet"
         return None
     body, last_modified = got
     if len(body) > MAX_PDF_BYTES or _slot_is_stale(last_modified, day):
+        trace.pdf = "refused (too big, or last month's file)"
         logger.info("%s: %s PDF for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
         return None
     if not body.startswith(b"%PDF"):
+        trace.pdf = "not a PDF"
         logger.info("%s: %s PDF for %s is not a PDF", PLUGIN_ID, code, day)
         return None
     left = deadline - _clock()
     if left < RASTER_MIN_S:
+        trace.pdf = "no time left to draw it"
         logger.info("%s: no time left to draw the %s PDF for %s", PLUGIN_ID, code, day)
         return None
-    return rasterise_pdf(body, timeout=left)
+    page = rasterise_pdf(body, timeout=left)
+    if page is None:
+        trace.pdf = f"didn't draw ({_kb(len(body))})"
+    else:
+        trace.source = "PDF"
+    return page
 
 
 def download_edition(
-    code: str, day: date, deadline: float | None = None, *, pdf_only: bool = False
+    code: str,
+    day: date,
+    deadline: float | None = None,
+    *,
+    pdf_only: bool = False,
+    trace: Trace | None = None,
 ) -> bytes | None:
     """The ``code`` front page for ``day``, validated, or None when that
     edition isn't there. The PDF comes first, drawn at panel width; the
@@ -923,17 +967,24 @@ def download_edition(
     ``pdf_only``. The two share one ``DOWNLOAD_BUDGET_S`` window (and
     ``deadline``, on ``_clock``), of which the PDF, download and drawing
     together, leaves ``JPEG_RESERVE_S`` for the JPEG. Raises
-    :class:`CdnUnreachable` when the CDN fails or the time runs out."""
+    :class:`CdnUnreachable` when the CDN fails or the time runs out.
+    ``trace``, when given, is filled in for the worker's log."""
+    trace = trace if trace is not None else Trace()
     deadline = min(deadline if deadline is not None else math.inf, _clock() + DOWNLOAD_BUDGET_S)
     if deadline <= _clock():
         raise CdnUnreachable("out of time")
-    if pdf_only:
-        return _pdf_edition(code, day, deadline, quiet=False) if rasteriser_available() else None
-    pdf_deadline = deadline - JPEG_RESERVE_S
-    if rasteriser_available() and pdf_deadline > _clock():
-        sharp = _pdf_edition(code, day, pdf_deadline, quiet=True)
+    if not rasteriser_available():
+        trace.no_rasteriser = True
+        if pdf_only:
+            return None
+    elif pdf_only:
+        return _pdf_edition(code, day, deadline, quiet=False, trace=trace)
+    elif deadline - JPEG_RESERVE_S > _clock():
+        sharp = _pdf_edition(code, day, deadline - JPEG_RESERVE_S, quiet=True, trace=trace)
         if sharp is not None:
             return sharp
+    else:
+        trace.pdf = "skipped, no time left"
     got = _get(
         PAGE_URL.format(day=day.day, code=code),
         deadline,
@@ -941,14 +992,18 @@ def download_edition(
         "image/jpeg,image/*;q=0.8",
     )
     if got is None:
+        trace.jpg = "not out yet"
         return None
     body, last_modified = got
     if len(body) > MAX_IMAGE_BYTES or _slot_is_stale(last_modified, day):
+        trace.jpg = "refused (too big, or last month's file)"
         logger.info("%s: %s for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
         return None
     if page_size(body) is None:
+        trace.jpg = "not an image"
         logger.info("%s: %s for %s is not an image", PLUGIN_ID, code, day)
         return None
+    trace.source = "JPG"
     return body
 
 
@@ -1263,8 +1318,9 @@ def _work(run: _Run) -> None:
             _refresh(run.data_dir, job)
             with _RUNS_LOCK:
                 run.active = None
-    except Exception:
+    except Exception as err:
         logger.exception("%s: the download worker stopped", PLUGIN_ID)
+        _log_stop(run.data_dir, err)
     finally:
         with _RUNS_LOCK:
             run.active = None
@@ -1278,7 +1334,8 @@ def _refresh(data_dir: Path, job: _Job) -> None:
     """One job: look at the state again (the render that queued it read it
     before earlier jobs landed), download outside the lock, save under it.
     Today's page already saved as the blurry JPEG fallback is redrawn from
-    the PDF when that may now work (``_wants_sharper``)."""
+    the PDF when that may now work (``_wants_sharper``). What it asked for
+    and got goes to the log the admin page shows (``state["log"]``)."""
     pages = data_dir / PAGES_DIR
     state_path = data_dir / STATE_FILE
     with _LOCK:
@@ -1294,29 +1351,44 @@ def _refresh(data_dir: Path, job: _Job) -> None:
     )
     if current and not sharpen:
         return
+    notes: list[tuple[float, str]] = []
+
+    def note(text: str) -> None:
+        notes.append((_wall(), text))
+
+    if sharpen and have is not None:
+        tries = _pdf_retry(state, job.code, have.day)[0]
+        which = f"try {tries + 1} of {PDF_MAX_TRIES}" if tries < PDF_MAX_TRIES else "a refresh"
+        note(f"{have.day}: saved from the JPG, asking for the PDF again ({which})")
     saved: tuple[date, bytes] | None = None
+    saved_how: tuple[Trace, float] | None = None
     failure = "missing"
     deadline = _clock() + JOB_BUDGET_S
     for back in range(LOOKBACK_DAYS):
         day = job.today - timedelta(days=back)
         if have is not None and (day < have.day or (day == have.day and not sharpen)):
             break  # nothing older can beat an edition already kept
+        trace = Trace()
+        started = _clock()
         try:
-            body = download_edition(job.code, day, deadline, pdf_only=sharpen)
+            body = download_edition(job.code, day, deadline, pdf_only=sharpen, trace=trace)
         except Exception as err:  # CdnUnreachable, or the host refusing the egress
             logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
+            note(f"{day}: Freedom Forum unreachable ({_short(err)})")
             failure = "unreachable"
             break
         if body is not None:
             saved = (day, body)
+            saved_how = (trace, max(0.0, _clock() - started))
             break
+        note(f"{day}: {_not_found(trace, pdf_only=sharpen)}")
+    size = page_size(saved[1]) if saved is not None else None
     # The edition left on its JPEG by this job, whose PDF is asked for again
     # later: a JPEG saved in its place, or a redraw that came to nothing
     # (no PDF yet, one that didn't draw, an outage).
     blurry_day: date | None = None
     sharp_day: date | None = None
     if saved is not None and rasteriser_available():
-        size = page_size(saved[1])
         if size is not None and size[0] < SHARP_MIN_WIDTH_PX:
             blurry_day = saved[0]
         else:
@@ -1330,9 +1402,17 @@ def _refresh(data_dir: Path, job: _Job) -> None:
                 _write_atomic(edition_path(pages, job.code, saved[0]), saved[1])
             except OSError as err:
                 logger.warning("%s: could not save %s: %s", PLUGIN_ID, job.code, err)
+                note(f"{saved[0]}: downloaded, but couldn't be saved ({_short(err)})")
                 saved = None
+                blurry_day = sharp_day = None
             else:
                 prune(pages, job.today, now)
+                note(f"{saved[0]}: {_saved_line(saved[1], size, saved_how, redraw=sharpen)}")
+        if saved is None and not sharpen:
+            if have is not None:
+                note(f"keeping the {have.day} page")
+            elif failure == "missing":
+                note(f"no page in the last {LOOKBACK_DAYS} days")
         state = _read_json(state_path)
         state["checked"] = {
             code: when
@@ -1356,11 +1436,89 @@ def _refresh(data_dir: Path, job: _Job) -> None:
             tries = _pdf_retry(state, job.code, blurry_day)[0] + 1
             wait = min(PDF_RETRY_S * 2 ** min(tries - 1, 16), PDF_RETRY_MAX_S)
             retry[job.code] = {"day": blurry_day.isoformat(), "tries": tries, "after": now + wait}
+            if tries < PDF_MAX_TRIES:
+                note(f"{blurry_day}: PDF asked for again in {_duration(wait)}")
+            else:
+                note(f"{blurry_day}: no more PDF tries for this edition, keeping the JPG")
         elif sharp_day is not None:
             retry.pop(job.code, None)
         state["pdf_retry"] = retry
         state.pop("jpeg_only", None)  # this file's earlier, give-up-for-the-day record
+        _append_log(state, job.code, notes)
         _write_json(state_path, state)
+
+
+# ----- the worker's log --------------------------------------------------------
+#
+# The admin page shows what the worker did, newest last: per paper, the
+# editions it asked for, where each saved page came from (the PDF drawn at
+# panel width, or the JPEG fallback), its size and how long it took, the PDF
+# retries and the failures. The lines live in state.json, at most LOG_LINES
+# of them. They hold paper codes, dates and what Freedom Forum or the network
+# answered; the widget has no secrets to leak into them.
+
+LOG_LINES = 150
+
+
+def _not_found(trace: Trace, *, pdf_only: bool) -> str:
+    if pdf_only:
+        return f"PDF {trace.pdf or 'not drawn'}"
+    if trace.pdf in ("", "not out yet") and trace.jpg == "not out yet":
+        return "not out yet"
+    parts = [f"PDF {trace.pdf}" if trace.pdf else "", f"JPG {trace.jpg}" if trace.jpg else ""]
+    return ", ".join(part for part in parts if part) or "not found"
+
+
+def _saved_line(
+    body: bytes, size: tuple[int, int] | None, how: tuple[Trace, float] | None, *, redraw: bool
+) -> str:
+    trace, took = how if how is not None else (Trace(), 0.0)
+    source = trace.source or ("PDF" if size and size[0] >= SHARP_MIN_WIDTH_PX else "JPG")
+    dims = f"{size[0]}\u00d7{size[1]} px, " if size else ""
+    line = f"{'redrawn from the PDF' if redraw else source}, {dims}{_kb(len(body))} in {took:.1f} s"
+    if source == "JPG" and trace.pdf:
+        line += f" (PDF {trace.pdf})"
+    elif source == "JPG" and trace.no_rasteriser:
+        line += " (no PDF drawing here: pypdfium2 isn't installed)"
+    return line
+
+
+def _duration(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes / 60:g} h" if minutes % 60 == 0 else f"{minutes // 60} h {minutes % 60} min"
+
+
+def _log_entries(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    return [
+        entry
+        for entry in raw
+        if isinstance(entry, dict)
+        and isinstance(entry.get("at"), (int, float))
+        and isinstance(entry.get("code"), str)
+        and isinstance(entry.get("text"), str)
+    ]
+
+
+def _append_log(state: dict[str, Any], code: str, notes: list[tuple[float, str]]) -> None:
+    """Add ``notes`` to the state's log for ``code``, keeping the newest
+    ``LOG_LINES``. Callers hold ``_LOCK``."""
+    if not notes:
+        return
+    entries = _log_entries(state.get("log"))
+    entries += [{"at": at, "code": code, "text": text} for at, text in notes]
+    state["log"] = entries[-LOG_LINES:]
+
+
+def _log_stop(data_dir: Path, err: BaseException) -> None:
+    """Note in the log that the worker stopped on an error (a bug)."""
+    with contextlib.suppress(Exception), _LOCK:
+        state = _read_json(data_dir / STATE_FILE)
+        _append_log(state, "", [(_wall(), f"The download worker stopped: {type(err).__name__}")])
+        _write_json(data_dir / STATE_FILE, state)
 
 
 # ----- widget contract: fetch ------------------------------------------------
@@ -1608,6 +1766,78 @@ def choices(name: str) -> list[dict[str, str]]:
             label += ", not in the rotation"
         rows.append({"value": code, "label": label})
     return rows
+
+
+# ----- the admin page ----------------------------------------------------------
+
+
+def _timezone() -> tzinfo | None:
+    """The app's time zone (Settings, else the host's); None is the host's."""
+    try:
+        from app.tz_resolve import app_timezone
+
+        return app_timezone()
+    except Exception:
+        return None
+
+
+def downloads_view(data_dir: Path, tz: tzinfo | None) -> dict[str, Any]:
+    """The admin page's Downloads card: what the worker is doing now, the
+    PDF retries it has waiting and the papers it has no page for (one
+    sentence each), and its log, oldest line first."""
+
+    def when(ts: float, fmt: str) -> str:
+        try:
+            return datetime.fromtimestamp(ts, tz).strftime(fmt)
+        except (OverflowError, OSError, ValueError):  # a hand-edited state file
+            return "?"
+
+    state = _read_json(data_dir / STATE_FILE)
+    entries = _log_entries(state.get("log"))
+    status: list[str] = []
+    line, _ = _line(data_dir)
+    if line:
+        more = f", {len(line) - 1} more waiting" if len(line) > 1 else ""
+        status.append(f"Downloading {line[0]} now{more}.")
+    elif entries:
+        status.append(f"Last activity {when(entries[-1]['at'], '%b %d, %H:%M')}.")
+    else:
+        status.append("Nothing downloaded yet: a render that needs a page asks for it.")
+    retries, spent = [], []
+    for code, entry in sorted(_section(state, "pdf_retry").items()):
+        if not isinstance(entry, dict):
+            continue
+        tries, after = entry.get("tries"), entry.get("after")
+        if isinstance(tries, bool) or not isinstance(tries, int):
+            continue
+        if not isinstance(after, (int, float)):
+            continue
+        if tries < PDF_MAX_TRIES:
+            retries.append(
+                f"{code} (try {tries + 1} of {PDF_MAX_TRIES}, after {when(after, '%H:%M')})"
+            )
+        else:
+            spent.append(code)
+    if retries:
+        status.append(f"Waiting to ask for the PDF again: {', '.join(retries)}.")
+    if spent:
+        status.append(f"Out of PDF tries, keeping the JPG: {', '.join(spent)}.")
+    reasons = {
+        "unreachable": "Freedom Forum unreachable",
+        "missing": f"none in the last {LOOKBACK_DAYS} days",
+    }
+    failed = [
+        f"{code} ({reasons.get(str(why), str(why))})"
+        for code, why in sorted(_section(state, "failed").items())
+    ]
+    if failed:
+        status.append(f"No page yet for {', '.join(failed)}.")
+    width = max((len(e["code"]) for e in entries), default=0)
+    log = [
+        f"{when(e['at'], '%b %d %H:%M:%S')}  {e['code'] or '-':<{width}}  {e['text']}"
+        for e in entries
+    ]
+    return {"status": status, "log": log}
 
 
 # ----- page images -----------------------------------------------------------
