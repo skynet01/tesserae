@@ -3,7 +3,7 @@
 Visionect's e-paper signs (the 32" Place & Play, Joan, the 13" boards) are thin clients. The sign dials a server address stored in its flash on TCP port 11113 and draws whatever framebuffer the server pushes. Normally that server is the Visionect Software Suite (VSS), which needs a paid licence from version 7.7. Tesserae can be that server instead: it listens on 11113 and speaks the sign's protocol directly, through [pyvisionect](https://github.com/schlarpc/pyvisionect). No VSS, no Visionect account, no flashing.
 
 !!! note "Tested on one sign so far"
-    A Place & Play 32 (HardwareNameID 8, firmware 6.17.4168) has drawn frames pushed over this protocol by pyvisionect. Other models use the same protocol but haven't been tried yet.
+    A Place & Play 32 (HardwareNameID 8, firmware 6.17.4168) has drawn frames pushed over this protocol by pyvisionect. Joan 6, Joan 13, the 13" Place & Play and the 9.7" boards use the same protocol and are in the catalog, but haven't been tried on hardware yet.
 
 !!! warning "No authentication"
     The protocol has none: anything that can reach port 11113 can claim to be any sign. Keep 11113 on your LAN and don't forward it from the internet.
@@ -23,11 +23,14 @@ Tesserae must be reachable on 11113:
 
 ## 02 — Add the sign in Tesserae
 
-1. **Settings → Devices → Add device**, kind **Visionect sign**.
-2. The panel defaults to the 32" sign, 1440×2560 portrait. Choose **portrait (flipped)** if the frame hangs the other way up. A landscape dashboard is turned onto the portrait panel for you.
-3. Leave **Sign UUID** blank to bind the first unknown sign that connects, or paste the UUID from the sign's label or the old VSS device list.
+Either way works:
 
-Tesserae only opens port 11113 while at least one Visionect device exists. If the port is busy (VSS still running), the log says so.
+- **Settings → Devices → Add device → Visionect.** Pick the model, give it an id and a name, and leave **Sign UUID** blank to bind the first unknown sign that connects. You can also paste the UUID from the sign's label or the old VSS device list.
+- **Let the sign announce itself.** Once one Visionect device exists, Tesserae is listening. Any other sign that connects shows up in the **discovered devices** banner on the Devices page. **Register** creates the device bound to that sign, with the model preselected when its screen size identifies it.
+
+The sign reports its own screen size when it connects, and Tesserae adopts it. A Joan 6 renders at 1024×758 and the 32" at 1440×2560, whichever model you picked. **Rotation** works as for any other device. On the 32", if the image arrives upside down, pick 270°.
+
+The device page shows whether Tesserae is listening and what the sign is doing: connected and showing the latest frame, asleep until a given time, or not connected yet. Tesserae only opens the port while at least one Visionect device exists. If the port is busy (VSS still running), the device page and the Add device tab say so, and Tesserae retries every half minute.
 
 ## 03 — Bind a dashboard
 

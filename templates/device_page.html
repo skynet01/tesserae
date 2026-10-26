@@ -150,6 +150,15 @@
         </div>
         {% endif %}
 
+        {# VISIONECT LISTENER + SIGN STATE #}
+        {% if section.visionect_setup %}
+        {% set vs = section.visionect_setup %}
+        <div class="{% if vs.ok %}dx-hint-band{% else %}dx-warn-band{% endif %}" style="margin-top: 14px;">
+          <i class="ph {% if vs.ok %}ph-info{% else %}ph-warning{% endif %}" aria-hidden="true"></i>
+          <p><strong>{{ vs.title }}</strong><br>{{ vs.body }} <a href="{{ vs.link.url }}" target="_blank" rel="noopener noreferrer">{{ vs.link.label }}</a>.</p>
+        </div>
+        {% endif %}
+
         {% if section.status.parsed %}
         <details class="dx-advanced-diag">
           <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Advanced diagnostics</span></summary>

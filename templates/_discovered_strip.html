@@ -40,7 +40,7 @@
     <div class="dx-disc-row-meta">
       <code class="dx-disc-row-id">{{ d.id }}</code>
       <span class="dx-disc-row-facts">
-        {% if d.parsed.transport == 'rest' %}REST{% else %}MQTT{% endif %}
+        {% if d.parsed.transport == 'rest' %}REST{% elif d.parsed.transport == 'visionect' %}Visionect{% else %}MQTT{% endif %}
         · kind {{ d.kind or 'unknown' }}
         {% if d.parsed.mac %} · MAC <code>{{ d.parsed.mac }}</code>{% endif %}
         {% if d.parsed.topic %} · topic <code>{{ d.parsed.topic }}</code>{% endif %}

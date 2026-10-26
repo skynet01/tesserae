@@ -2719,6 +2719,8 @@ form[data-dirty] .dx-inline-save { display: none; }
 }
 .dx-segmented {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   background: var(--t-surface-sunk);
   border: 1px solid var(--t-border);
   border-radius: 9px;

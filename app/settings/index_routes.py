@@ -20,7 +20,7 @@ from flask import current_app, flash, redirect, render_template, request, sessio
 from werkzeug.wrappers import Response
 
 from app import backup as _backup_mod
-from app import device_service, device_timetable, palette_profiles, test_patterns
+from app import device_service, device_timetable, palette_profiles, test_patterns, visionect
 from app import firmware_check as firmware_check_module
 from app import install_id as install_id_module
 from app import updater as _updater_mod
@@ -245,6 +245,10 @@ def settings_area(area: str) -> str | Response:
         broker_configured = False
         kind_default_rows = []
 
+    visionect_kinds, visionect_listener = (
+        _visionect_add_context() if area == "devices" else ([], None)
+    )
+
     return render_template(
         "settings.html",
         sections=sections,
@@ -258,6 +262,8 @@ def settings_area(area: str) -> str | Response:
         discovered_rest=discovered_rest,
         discovered_mqtt=discovered_mqtt,
         discovered_sig=discovered_sig,
+        visionect_kinds=visionect_kinds,
+        visionect_listener=visionect_listener,
         default_transport=default_transport,
         broker_configured=broker_configured,
         # Drives the OpenDisplay transport branch: HA add-on gets the
@@ -1147,6 +1153,9 @@ def _build_device_section(store: Any, device: Device) -> dict[str, Any] | None:
         # the HA add-on and points at the integration (HA path) or
         # the bridge (standalone). None for non-OpenDisplay kinds.
         "opendisplay_setup": _opendisplay_setup(device),
+        # Visionect status band: listener up or port busy, and what the
+        # bound sign is doing. None for other kinds.
+        "visionect_setup": _visionect_setup(device),
         # The Display-name field reads ``device_name`` (raw) for
         # the input's value, separately from ``title`` (which gets
         # a "Device: " prefix for the card heading). Instance-only;
@@ -1834,11 +1843,12 @@ def _transport_badge(device: Device) -> str:
     so the header still reads cleanly when the card is collapsed, and
     "HA" for push devices (OpenDisplay-via-HA) delivered through a Home
     Assistant service call rather than a broker. Visionect signs are push
-    devices too, but over their own TCP protocol, not through HA."""
+    devices too, over their own TCP protocol rather than through HA, so
+    they read "TCP" (the kind column names them)."""
     if device.transport == "rest":
         return "REST"
     if device.transport == "push":
-        return "Visionect" if device.kind_of == "visionect" else "HA"
+        return "TCP" if visionect.is_visionect_device(device) else "HA"
     if device.transport == "relay":
         # Before the access-token branch: relay devices carry a device token
         # too, but it authenticates against the relay, not this server.
@@ -1888,6 +1898,100 @@ def _rotation_options(panel: dict[str, Any] | None) -> list[dict[str, str]]:
         {"value": value, "label": f"{degrees}°"}
         for value, degrees in zip(order, (0, 90, 180, 270), strict=True)
     ]
+
+
+_VISIONECT_DOCS = {
+    "label": "Visionect quickstart",
+    "url": "https://docs.tesserae.ink/quickstart/visionect/",
+}
+
+
+def _visionect_add_context() -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Model choices and listener state for the Add device card's
+    Visionect tab: the folder kind plus every catalog SKU on its protocol."""
+    kinds = sorted(
+        (d for d in device_kinds() if visionect.is_visionect_device(d) and not d.kind_of),
+        key=lambda d: (d.id != visionect.KIND, str(d.name).casefold()),
+    )
+    options = [{"value": d.id, "label": str(d.name)} for d in kinds]
+    svc = visionect.service()
+    listener = {
+        "running": bool(svc is not None and svc.running),
+        "port": svc.port if svc is not None else visionect.configured_port(settings_store()),
+        "error": svc.start_error if svc is not None and not svc.running else None,
+    }
+    return options, listener
+
+
+def _visionect_setup(device: Device) -> dict[str, Any] | None:
+    """Status band for a Visionect sign's card: whether Tesserae is
+    listening for signs, and what the bound sign is doing. None for every
+    other kind."""
+    if not device.kind_of or not visionect.is_visionect_device(device):
+        return None
+    svc = visionect.service()
+    port = svc.port if svc is not None else visionect.configured_port(settings_store())
+    if svc is None or not svc.running:
+        reason = f" ({svc.start_error})" if svc is not None and svc.start_error else ""
+        return {
+            "ok": False,
+            "title": f"Not listening on port {port}",
+            "body": (
+                f"Tesserae couldn't open TCP {port} for Visionect signs{reason}. If the old "
+                "Visionect server still runs on this host, stop it; Tesserae retries every "
+                "half minute."
+            ),
+            "link": _VISIONECT_DOCS,
+        }
+    uuid = svc.device_uuid(device.id)
+    if not uuid:
+        return {
+            "ok": True,
+            "title": "Waiting for a sign",
+            "body": (
+                f"Listening on TCP {port}. Point the sign at this server; the first unknown "
+                "sign that connects is bound to this device."
+            ),
+            "link": _VISIONECT_DOCS,
+        }
+    view = svc.sign_view(uuid) or {}
+    if view.get("connected"):
+        where = f" from {view['remote']}" if view.get("remote") else ""
+        if view.get("sending"):
+            state = "Sending the latest frame."
+        elif view.get("in_sync"):
+            state = "It shows the latest frame."
+        else:
+            state = "Waiting for a frame to send."
+        problem = view.get("last_error") or ""
+        body = f"Sign {uuid} is connected{where}. {state}"
+        if problem:
+            body += f" Last problem: the sign {problem}; Tesserae retries shortly."
+        return {"ok": not problem, "title": "Sign connected", "body": body, "link": _VISIONECT_DOCS}
+    asleep = view.get("asleep_until")
+    if isinstance(asleep, (int, float)) and asleep > time.time():
+        from datetime import datetime
+
+        from app.tz_resolve import app_timezone
+
+        until = datetime.fromtimestamp(asleep, tz=app_timezone()).strftime("%H:%M")
+        return {
+            "ok": True,
+            "title": "Sign asleep",
+            "body": (
+                f"Quiet hours: sign {uuid} sleeps until about {until} and gets the latest "
+                "frame when it wakes."
+            ),
+            "link": _VISIONECT_DOCS,
+        }
+    return {
+        "ok": True,
+        "title": "Sign not connected",
+        "body": (
+            f"Listening on TCP {port} for sign {uuid}. New frames wait until it next checks in."
+        ),
+        "link": _VISIONECT_DOCS,
+    }
 
 
 def _opendisplay_setup(device: Device) -> dict[str, Any] | None:

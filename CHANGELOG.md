@@ -9,14 +9,24 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 ### Added
 
 - Visionect e-paper signs, driven directly with no Visionect Software Suite.
-  A new **Visionect sign** device kind, plus a catalog entry for the Place &
-  Play 32", makes Tesserae listen on TCP 11113, where the sign dials in. It
-  pushes each frame as 16 greys over the sign's own protocol, through the
-  `pyvisionect` library. The first unknown sign to connect binds to a device
-  with a blank UUID. Battery, signal, temperature and firmware reach the
-  device card and Home Assistant. Quiet hours with sleep-through send the sign
-  to deep sleep until the window ends. The listener only runs while a
-  Visionect device exists, and `TESSERAE_VISIONECT_PORT` moves it off 11113.
+  Tesserae listens on TCP 11113, where the sign dials in, and pushes each
+  frame as 16 greys over the sign's own protocol through the `pyvisionect`
+  library.
+  - **Adding a sign:** Add device has a new Visionect tab. Leave the UUID blank
+    and the first unknown sign that connects is bound. Any other sign shows up
+    in the discovered devices banner, ready to register.
+  - **Models:** the catalog has the Place & Play 32" and 13", Joan 6 and 13,
+    and the 9.7" boards. Each sign reports its own screen size on connect, and
+    the device adopts it.
+  - **Delivery:** one frame is in flight at a time and is tracked by the sign's
+    ACK. Refusals are retried. Quiet hours with sleep-through send the sign to
+    deep sleep only after the latest frame has landed.
+  - **Status:** the device page shows whether Tesserae is listening and what
+    the sign is doing. Battery, signal, temperature and firmware reach the
+    device card and Home Assistant.
+  - **Port:** the listener runs while a Visionect device exists.
+    `TESSERAE_VISIONECT_PORT` moves it off 11113.
+
   See the Visionect quickstart.
 
 ## [0.479.0], 2026-10-26

@@ -67,3 +67,32 @@ def test_parse_status_tolerates_garbage(visionect) -> None:
 )
 def test_validate_config_checks_the_uuid(visionect, uuid: str, ok: bool) -> None:
     assert visionect.validate_config({"uuid": uuid})[0] is ok
+
+
+def test_catalog_models_load_on_the_visionect_protocol(tmp_path) -> None:
+    from app import visionect as visionect_app
+    from app.hardware_catalog import apply_to_registry, discover_hardware
+
+    registry = discover(
+        REPO_ROOT / "devices",
+        schema_path=REPO_ROOT / "schema" / "device.schema.json",
+        data_root=tmp_path,
+    )
+    entries, errors = discover_hardware(
+        REPO_ROOT / "hardware", schema_path=REPO_ROOT / "schema" / "hardware.schema.json"
+    )
+    assert errors == []
+    apply_to_registry(registry, entries, data_root=tmp_path)
+    sizes = {
+        "visionect_place_and_play_32": (1440, 2560),
+        "visionect_place_and_play_13": (1600, 1200),
+        "visionect_joan_6": (1024, 758),
+        "visionect_joan_13": (1600, 1200),
+        "visionect_v_tablet_9_7": (1200, 825),
+    }
+    for kind_id, (w, h) in sizes.items():
+        kind = registry.get(kind_id)
+        assert kind is not None, kind_id
+        assert visionect_app.is_visionect_device(kind), kind_id
+        assert kind.manifest["transport"] == "push", kind_id
+        assert (kind.panel["native_w"], kind.panel["native_h"]) == (w, h), kind_id

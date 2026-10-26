@@ -12,6 +12,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# Marks the protocol for app.visionect: hardware-catalog SKUs (Joan 6, ...)
+# share this module, so it identifies every Visionect device without a
+# registry lookup.
+PROTOCOL = "visionect"
+
 _NUMERIC = ("battery_pct", "battery_mv", "rssi", "temperature_c", "uptime_s")
 
 
