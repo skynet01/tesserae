@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import socket
 import threading
 import time
@@ -75,9 +76,16 @@ def device_frame(uuid: str, packet_type: int, payload: bytes, packet_id: int) ->
     )
 
 
-def status_frame(uuid: str = UUID, packet_id: int = 1) -> bytes:
-    payload = StatusPacket(records=STATUS_TAGS, sentinel=0xDEADBEEF).encode()
+def status_frame(
+    uuid: str = UUID, packet_id: int = 1, tags: list[tuple[int, int]] | None = None
+) -> bytes:
+    payload = StatusPacket(records=tags or STATUS_TAGS, sentinel=0xDEADBEEF).encode()
     return device_frame(uuid, PacketType.STATUS, payload, packet_id)
+
+
+def with_tag(tag: int, value: int) -> list[tuple[int, int]]:
+    """STATUS_TAGS with one tag's value replaced."""
+    return [(t, value if t == tag else v) for t, v in STATUS_TAGS]
 
 
 def free_port() -> int:
@@ -89,16 +97,40 @@ def free_port() -> int:
 class FakeSign:
     """A sign over a real socket: send status / ACK / NACK, collect frames."""
 
-    def __init__(self, port: int, uuid: str = UUID) -> None:
+    def __init__(self, port: int, uuid: str = UUID, *, rcvbuf: int | None = None) -> None:
         self.uuid = uuid
-        self.sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if rcvbuf is not None:  # a sign that stops reading fills this up
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        self.sock.settimeout(5)
+        self.sock.connect(("127.0.0.1", port))
         self.decoder = FrameDecoder(Direction.SERVER_TO_DEVICE)
         self.frames: list[Any] = []
         self.next_id = 1
 
-    def status(self) -> None:
-        self.sock.sendall(status_frame(self.uuid, self.next_id))
+    @property
+    def port(self) -> int:
+        return int(self.sock.getsockname()[1])
+
+    def status(self, tags: list[tuple[int, int]] | None = None) -> None:
+        self.sock.sendall(status_frame(self.uuid, self.next_id, tags))
         self.next_id += 1
+
+    def dropped(self, timeout: float = 5.0) -> bool:
+        """Whether the server closes this connection within ``timeout``."""
+        self.sock.settimeout(0.2)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                chunk = self.sock.recv(1 << 20)
+            except TimeoutError:
+                continue
+            except (ConnectionResetError, BrokenPipeError):
+                return True
+            if not chunk:
+                return True
+            self.frames.extend(self.decoder.feed(chunk))
+        return False
 
     def ack(self, packet_id: int) -> None:
         self.sock.sendall(
@@ -200,9 +232,12 @@ class Harness:
             )
         )
 
-    def render(self, digest: str, shade: int = 0) -> None:
-        img = Image.new("L", (1440, 2560), 255)
-        img.paste(shade, (0, 0, 1440, 400))
+    def render(self, digest: str, shade: int = 0, *, noisy: bool = False) -> None:
+        if noisy:  # incompressible, so the frame really is ~1.8 MB on the wire
+            img = Image.frombytes("L", (1440, 2560), os.urandom(1440 * 2560))
+        else:
+            img = Image.new("L", (1440, 2560), 255)
+            img.paste(shade, (0, 0, 1440, 400))
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         (self.renders / f"{digest}.png").write_bytes(buf.getvalue())
@@ -944,3 +979,210 @@ def test_a_timer_task_write_error_does_not_escape() -> None:
 
     asyncio.run(_run())  # returns instead of raising ConnectionResetError
     assert aborted == [True]
+
+
+# -- delivery: deadlines, stuck writes, whose connection it is -----------------
+
+
+def _fake_addresses(monkeypatch, by_port: dict[int, str]) -> None:
+    """Make connections from these local ports look like they come from
+    these addresses (every test connection is 127.0.0.1)."""
+    real = visionect_listener.peer_ip
+
+    def _peer_ip(writer: Any) -> str:
+        peer = writer.get_extra_info("peername") if writer is not None else None
+        if isinstance(peer, tuple) and len(peer) > 1 and peer[1] in by_port:
+            return by_port[peer[1]]
+        return real(writer)
+
+    monkeypatch.setattr(visionect_listener, "peer_ip", _peer_ip)
+
+
+def _wait(pred: Callable[[], bool], timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.05)
+    return pred()
+
+
+def test_an_unacked_frame_expires_and_the_latest_is_sent_on_redial(
+    harness: Harness, monkeypatch
+) -> None:
+    """A lost ACK used to block every later frame, the sleep and the glass
+    check until the sign re-dialed, which a plugged-in sign may not do for
+    days."""
+    monkeypatch.setattr(visionect, "IMAGE_ACK_TIMEOUT_S", 0.5)
+    harness.render("frame-a")
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        harness.render("frame-b", shade=128)
+        harness.push()  # waits behind the unanswered frame A
+        assert sign.dropped(timeout=5), "the connection outlived the ACK deadline"
+    finally:
+        sign.close()
+    assert "never confirmed the frame" in (harness.svc.sign_view(UUID) or {}).get("last_error", "")
+    again = FakeSign(harness.svc.port)
+    try:
+        again.status()
+        assert again.wait_for(lambda s: len(s.images()) == 1)
+        again.ack(again.images()[0].id)
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("in_sync") is True)
+    finally:
+        again.close()
+    sign_state = harness.svc._signs[UUID]
+    assert sign_state.shown_digest == "frame-b"
+
+
+def test_an_unacked_sleep_expires(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(visionect, "SLEEP_ACK_TIMEOUT_S", 0.5)
+    h = Harness(tmp_path, app_settings=_window_around_now(sleep=True))
+    try:
+        assert h.svc.start()  # no render: straight to the sleep step
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.commands()) == 1)
+            assert sign.dropped(timeout=5)
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_a_write_that_never_drains_is_dropped(harness: Harness, monkeypatch) -> None:
+    monkeypatch.setattr(visionect, "WRITE_TIMEOUT_S", 0.5)
+    harness.render("frame-a", noisy=True)
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port, rcvbuf=4096)
+    try:
+        sign.status()  # and then never reads the 1.8 MB frame
+        assert _wait(
+            lambda: (
+                "stopped taking data" in (harness.svc.sign_view(UUID) or {}).get("last_error", "")
+            )
+        )
+        assert not (harness.svc.sign_view(UUID) or {}).get("connected")
+    finally:
+        sign.close()
+
+
+def test_a_redial_supersedes_a_connection_stuck_in_a_write(harness: Harness) -> None:
+    """Sol's blocked-writer probe: the pass writing to a half-open socket held
+    the sign's lock, so the sign's new connection was never served."""
+    harness.render("frame-a", noisy=True)
+    assert harness.svc.start()
+    stuck = FakeSign(harness.svc.port, rcvbuf=4096)
+    try:
+        stuck.status()  # the frame's write to this socket blocks
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("sending") is True)
+        time.sleep(0.3)
+        fresh = FakeSign(harness.svc.port)
+        try:
+            fresh.status()
+            assert fresh.wait_for(lambda s: len(s.images()) == 1, timeout=10)
+            assert stuck.dropped(timeout=5)
+        finally:
+            fresh.close()
+    finally:
+        stuck.close()
+
+
+def test_another_address_cannot_take_over_a_bound_sign(tmp_path: Path, monkeypatch) -> None:
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        h.render("frame-a")
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        intruder: FakeSign | None = None
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.images()) == 1)
+            sign.ack(sign.images()[0].id)
+            intruder = FakeSign(h.svc.port)
+            _fake_addresses(monkeypatch, {sign.port: "10.0.0.5", intruder.port: "10.0.0.66"})
+            # (The sign's address was read before the patch; set it to match.)
+            h.svc._signs[UUID].remote = "10.0.0.5"
+            # Claims the sign's UUID, with a Joan 6's DisplayType.
+            intruder.status(with_tag(8, 0x6))
+            assert intruder.dropped(timeout=5)
+            view = h.svc.sign_view(UUID) or {}
+            assert (view.get("refused") or {}).get("remote") == "10.0.0.66"
+            assert view.get("connected") and view.get("remote") == "10.0.0.5"
+            # The panel isn't conformed to the intruder's geometry, and the
+            # next frame still goes to the sign.
+            h.render("frame-b", shade=128)
+            h.push()
+            assert sign.wait_for(lambda s: len(s.images()) == 2)
+            assert (h.device.panel["native_w"], h.device.panel["native_h"]) == (1440, 2560)
+            assert intruder.images() == []
+        finally:
+            sign.close()
+            if intruder is not None:
+                intruder.close()
+    finally:
+        h.svc.stop()
+
+
+def test_a_silent_old_connection_is_probed_so_a_moved_sign_gets_back_in(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(visionect, "PROBE_QUIET_S", 0.0)
+    monkeypatch.setattr(visionect, "PROBE_TIMEOUT_S", 0.5)
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        assert h.svc.start()
+        old = FakeSign(h.svc.port)  # half-open: never answers again
+        old.status()
+        assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("connected") is True)
+        moved = FakeSign(h.svc.port)
+        _fake_addresses(monkeypatch, {old.port: "10.0.0.5", moved.port: "10.0.0.77"})
+        h.svc._signs[UUID].remote = "10.0.0.5"
+        moved.status()
+        assert moved.dropped(timeout=5)  # refused while the old one may live
+        assert old.wait_for(lambda s: len(s.commands()) == 1)  # asked for a status
+        assert old.dropped(timeout=5)  # no answer: dropped
+        back = FakeSign(h.svc.port)
+        _fake_addresses(monkeypatch, {back.port: "10.0.0.77"})
+        back.status()
+        assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("remote") == "10.0.0.77")
+        assert not back.dropped(timeout=0.5)
+        for s in (old, moved, back):
+            s.close()
+    finally:
+        h.svc.stop()
+
+
+def test_a_redial_from_the_same_address_replaces_the_old_connection(harness: Harness) -> None:
+    assert harness.svc.start()
+    first = FakeSign(harness.svc.port)
+    second: FakeSign | None = None
+    try:
+        first.status()
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("connected") is True)
+        second = FakeSign(harness.svc.port)
+        second.status()
+        assert first.dropped(timeout=5)
+        assert not second.dropped(timeout=0.5)
+    finally:
+        first.close()
+        if second is not None:
+            second.close()
+
+
+def test_a_closing_socket_reads_as_disconnected() -> None:
+    """pyvisionect can leave a dead connection registered; its closing
+    transport is what tells."""
+    svc = visionect.VisionectService()
+    sign = visionect._Sign(uuid=UUID)
+    sign.conn = SimpleNamespace(closed=False)
+    sign.writer = SimpleNamespace(transport=SimpleNamespace(is_closing=lambda: True))
+    assert not svc._alive(sign)
+    svc._publish(sign)
+    assert (svc.sign_view(UUID) or {}).get("connected") is False
+    sign.writer = SimpleNamespace(transport=SimpleNamespace(is_closing=lambda: False))
+    assert svc._alive(sign)

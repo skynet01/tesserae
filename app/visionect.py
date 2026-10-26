@@ -75,6 +75,22 @@ CRC_CONVERGE_S = 40 * 60.0
 # end so the sign wakes to the day's first frame.
 MAX_SLEEP_MINUTES = 6 * 24 * 60
 SLEEP_MARGIN_MINUTES = 2
+# A frame or sleep command the sign never answers, counted from when its
+# write finished (a full 32" frame, 1.8 MB, has taken 12 s to ACK over
+# wifi). Then the connection is dropped, so the sign re-dials and gets the
+# latest state, instead of everything waiting for an ACK that was lost.
+IMAGE_ACK_TIMEOUT_S = 120.0
+SLEEP_ACK_TIMEOUT_S = 60.0
+# The longest a write may block: a half-open socket blocks drain() for as
+# long as TCP keeps retrying.
+WRITE_TIMEOUT_S = 90.0
+# A second connection claiming a bound sign's UUID from another address is
+# refused while the sign's own connection is alive. If that connection has
+# been quiet for PROBE_QUIET_S it is asked for a status, and dropped if none
+# comes back within PROBE_TIMEOUT_S, so a sign that really moved address
+# (DHCP) gets back in at its next re-dial.
+PROBE_QUIET_S = 30.0
+PROBE_TIMEOUT_S = 20.0
 # pyvisionect.imaging.constants Encoding.FOUR_BIT and Dithering.NONE. The
 # renderer has already dithered onto the 16-grey ramp, and NONE keeps n*17
 # levels exact.
@@ -165,30 +181,62 @@ class _Context:
 
 
 @dataclass
+class _Inflight:
+    """A frame or sleep command written to one connection, awaiting its ACK."""
+
+    kind: str  # "image" or "sleep"
+    packet_id: int
+    conn: Any  # the DeviceConnection it went out on
+    writer: Any
+    digest: str = ""
+    checksum: int = 0
+    minutes: int = 0
+    deadline: float = math.inf  # monotonic; set once the write has finished
+
+
+@dataclass
 class _Sign:
     """Loop-thread state for one sign UUID."""
 
     uuid: str
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     dirty: bool = False
+    # The one connection Tesserae talks to for this UUID, which isn't always
+    # the library's latest: a same-UUID connection from another address is
+    # refused while this one lives. Events from any other connection are
+    # ignored, and geometry and CRC come from this connection's status only.
+    conn: Any = None  # pyvisionect DeviceConnection
+    writer: Any = None  # its asyncio StreamWriter
+    status: Any = None  # its last StatusPacket
+    heard_at: float = 0.0  # monotonic; its last status or ACK
+    probe_at: float = 0.0  # monotonic; a status request sent to check it lives
+    refused: dict[str, Any] | None = None  # the last same-UUID connection refused
     frame: Any = None  # EncodedFrame for frame_digest
     frame_digest: str = ""
     shown_digest: str = ""  # acked by the sign during this run
     shown_checksum: int | None = None  # its state checksum (status tag 9)
     shown_at: float = 0.0  # wall clock of that ACK
     crc_corrected: bool = False  # one corrective resend per mismatch
-    image_inflight: tuple[int, str, int] | None = None  # (packet id, digest, checksum)
-    sleep_inflight: tuple[int, int] | None = None  # (packet id, minutes)
+    inflight: _Inflight | None = None  # at most one frame or sleep at a time
     retry_at: float = 0.0  # monotonic; after a refused frame
     sleep_retry_at: float = 0.0  # monotonic; after a refused sleep
     retry_handle: asyncio.TimerHandle | None = None
+    retry_when: float = 0.0  # loop time retry_handle fires
     repaint_until: float = 0.0  # monotonic; a size change is repainting
     conformed: bool = False  # panel conformance tried this run
     asleep_until: float = 0.0
-    remote: str = ""
+    remote: str = ""  # the connection's peer address
     connected_at: float = 0.0
     last_seen: float = 0.0
     last_error: str = ""
+
+
+def sign_panel(status: Any) -> Any:
+    """pyvisionect panel geometry for a sign's status (its DisplayType)."""
+    from pyvisionect.devices.panels import panel_for
+
+    display_type = getattr(status, "display_type", None)
+    return panel_for(display_type if display_type is not None else -1)
 
 
 class VisionectService:
@@ -408,10 +456,12 @@ class VisionectService:
         no close_clients()/abort_clients(), so wait_closed() would wait for
         it forever: abort the transports ourselves first."""
         writers = getattr(server, "_writers", None)
+        owned = [sign.writer for sign in list(self._signs.values()) if sign.writer is not None]
         if isinstance(writers, dict):
-            for writer in list(writers.values()):
-                with contextlib.suppress(Exception):
-                    writer.transport.abort()
+            owned.extend(writers.values())
+        for writer in owned:
+            with contextlib.suppress(Exception):
+                writer.transport.abort()
         with contextlib.suppress(Exception):
             await asyncio.wait_for(server.close(abort=True), timeout=3.0)
         current = asyncio.current_task()
@@ -494,8 +544,7 @@ class VisionectService:
         cache = ctx.app.config.get("DISCOVERY_CACHE") if ctx is not None else None
         if cache is None:
             return
-        state = self._store.get(uuid_bytes(uuid)) if self._store is not None else None
-        width, height = (canvas_size(state.panel) if state is not None else None) or (1440, 2560)
+        width, height = canvas_size(sign_panel(status)) or (1440, 2560)
         beat = status_heartbeat(
             status.fields(), uuid=uuid, connect_reason=str(status.connect_reason_name)
         )
@@ -544,38 +593,76 @@ class VisionectService:
             self._signs[uuid] = sign
         return sign
 
+    @staticmethod
+    def _alive(sign: _Sign) -> bool:
+        """Whether the sign's connection can still carry a frame. A socket
+        the library is closing, or one it forgot to remove, counts as gone."""
+        from app.visionect_listener import is_closing
+
+        conn, writer = sign.conn, sign.writer
+        return (
+            conn is not None
+            and writer is not None
+            and not getattr(conn, "closed", False)
+            and not is_closing(writer)
+        )
+
+    def _disconnected(self, sign: _Sign) -> None:
+        """Forget the sign's connection; nothing is in flight on a dead one."""
+        sign.conn = sign.writer = None
+        sign.inflight = None
+        sign.probe_at = 0.0
+
+    def _drop(self, sign: _Sign) -> None:
+        """Close the sign's connection; it re-dials."""
+        from app.visionect_listener import abort
+
+        abort(sign.writer)
+        self._disconnected(sign)
+
     def _rescan(self) -> None:
-        """Re-run every connected sign, binding any that still need a device."""
+        """Re-run every connected sign, binding any that still need a device,
+        and notice connections that went away (the library raises no event
+        for that)."""
         if self._server is None:
             return
-        live = list(self._server.connections)
-        for device_key in live:
-            uuid = normalise_uuid(device_key.hex())
-            if not uuid:
-                continue
-            if self._device_for_uuid(uuid) is None and self._bind(uuid) is None:
-                continue
-            self._schedule(uuid)
-        # A sign that dropped its socket raises no event; refresh its card.
-        gone = {normalise_uuid(k.hex()) for k in live}
         for uuid, sign in list(self._signs.items()):
-            if uuid not in gone:
-                self._publish(sign)
+            if sign.conn is not None and not self._alive(sign):
+                self._disconnected(sign)
+            if sign.conn is not None and (
+                self._device_for_uuid(uuid) is not None or self._bind(uuid) is not None
+            ):
+                self._schedule(uuid)
+            self._publish(sign)
 
     def _schedule(self, uuid: str, *, delay: float = 0.0) -> None:
-        sign = self._sign(uuid)
+        sign = self._signs.get(uuid)
+        if sign is None:
+            return
+        loop = asyncio.get_running_loop()
         if delay > 0:
+            # One timer per sign, the earliest asked for: the pass it runs
+            # re-arms whatever is due next.
+            when = loop.time() + delay
             if sign.retry_handle is not None:
+                if sign.retry_when <= when:
+                    return
                 sign.retry_handle.cancel()
-            loop = asyncio.get_running_loop()
-            sign.retry_handle = loop.call_later(delay, self._schedule, uuid)
+            sign.retry_handle = loop.call_at(when, self._retry_due, uuid)
+            sign.retry_when = when
             return
         if sign.lock.locked():
             sign.dirty = True
             return
-        task = asyncio.get_running_loop().create_task(self._reconcile(sign))
+        task = loop.create_task(self._reconcile(sign))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _retry_due(self, uuid: str) -> None:
+        sign = self._signs.get(uuid)
+        if sign is not None:
+            sign.retry_handle = None
+        self._schedule(uuid)
 
     async def _reconcile(self, sign: _Sign) -> None:
         """One pass at a time per sign; a request during a pass re-runs it."""
@@ -590,20 +677,57 @@ class VisionectService:
                 if not sign.dirty:
                     return
 
+    def _expire(self, sign: _Sign) -> None:
+        """Give up on an ACK or a liveness probe that is overdue."""
+        now = time.monotonic()
+        inflight = sign.inflight
+        if inflight is not None and now >= inflight.deadline:
+            sign.inflight = None
+            what = "frame" if inflight.kind == "image" else "sleep command"
+            sign.last_error = f"never confirmed the {what}; reconnecting"
+            logger.warning(
+                "visionect: sign %s never acked the %s; dropping the connection so it "
+                "re-dials and gets the latest state",
+                sign.uuid,
+                what,
+            )
+            if inflight.conn is sign.conn:
+                self._drop(sign)
+        if sign.probe_at and now >= sign.probe_at + PROBE_TIMEOUT_S:
+            probed, sign.probe_at = sign.probe_at, 0.0
+            if sign.conn is not None and sign.heard_at < probed:
+                logger.warning(
+                    "visionect: sign %s's connection from %s didn't answer a status request; "
+                    "dropping it",
+                    sign.uuid,
+                    sign.remote or "?",
+                )
+                self._drop(sign)
+        # Come back when the next of them is due.
+        due = [math.inf]
+        if sign.inflight is not None:
+            due.append(sign.inflight.deadline)
+        if sign.probe_at:
+            due.append(sign.probe_at + PROBE_TIMEOUT_S)
+        soonest = min(due)
+        if soonest < math.inf:
+            self._schedule(sign.uuid, delay=max(0.05, soonest - now + 0.05))
+
     async def _reconcile_once(self, sign: _Sign) -> None:
         ctx, gen = self._ctx, self._ctx_gen
         device = self._device_for_uuid(sign.uuid)
-        if ctx is None or device is None or self._store is None or self._server is None:
+        if ctx is None or device is None or self._server is None:
             return
-        device_key = uuid_bytes(sign.uuid)
-        state = self._store.get(device_key)
         loop = asyncio.get_running_loop()
+        self._expire(sign)
+        status = sign.status  # from the sign's own connection only
+        panel = sign_panel(status) if status is not None else None
 
         # 0. The sign's own DisplayType is the truth about its buffer (a
         #    Joan 6 is 1024x758, the 32" is 4 x 1440x640): conform the
         #    device's native size to it and re-render before sending.
-        if state.last_status is not None and not sign.conformed:
-            canvas = canvas_size(state.panel)
+        if status is not None and not sign.conformed:
+            canvas = canvas_size(panel)
             if canvas is not None and native_size(device) != canvas:
                 sign.conformed = True  # once per run: never a repaint loop
                 changed = await loop.run_in_executor(
@@ -632,33 +756,33 @@ class VisionectService:
 
         # 1. Have the latest frame encoded. Geometry comes from the sign's
         #    own DisplayType, so wait for its first status.
-        if latest and digest and digest != sign.frame_digest and state.last_status is not None:
+        if latest and digest and digest != sign.frame_digest and status is not None:
             path = artifact_path(ctx.renders_dir, latest)
             if path is None or not path.exists():
                 sign.last_error = "render missing on disk"
                 logger.warning("visionect %s: render %s missing on disk", device.id, path)
                 return
-            frame = await loop.run_in_executor(None, _encode, path, state.panel)
+            frame = await loop.run_in_executor(None, _encode, path, panel)
             current = ctx.latest_render_fn(device.id) or {}
             if (
                 self._ctx_gen != gen
                 or str(current.get("digest") or "") != digest
                 or self._device_for_uuid(sign.uuid) is not device
+                or sign.status is not status
             ):
                 sign.dirty = True  # superseded while encoding; start over
                 return
             sign.frame, sign.frame_digest = frame, digest
             sign.repaint_until = 0.0
             sign.last_error = ""
-            reported = state.last_status.display_state_crc
-            if not sign.shown_digest and reported == frame.state_checksum:
+            if not sign.shown_digest and status.display_state_crc == frame.state_checksum:
                 # Before our first ACK this run (a restart) the sign's CRC is
                 # the best evidence: it already shows this frame.
                 sign.shown_digest = digest
 
-        conn = self._server.connection_for(device_key)
-        if conn is None or sign.image_inflight is not None or sign.sleep_inflight is not None:
+        if not self._alive(sign) or sign.inflight is not None:
             return
+        conn, writer = sign.conn, sign.writer
 
         # 2. Send the frame the sign hasn't acked, one at a time.
         if sign.frame is not None and sign.frame_digest != sign.shown_digest:
@@ -666,15 +790,23 @@ class VisionectService:
             if wait > 0:
                 self._schedule(sign.uuid, delay=wait)
                 return
-            packet_id = int(conn.send_image(sign.frame))
-            sign.image_inflight = (packet_id, sign.frame_digest, int(sign.frame.state_checksum))
+            inflight = _Inflight(
+                kind="image",
+                packet_id=int(conn.send_image(sign.frame)),
+                conn=conn,
+                writer=writer,
+                digest=sign.frame_digest,
+                checksum=int(sign.frame.state_checksum),
+            )
+            sign.inflight = inflight
+            self._publish(sign)  # "sending" while the write is under way
             logger.info(
                 "visionect %s: sending frame %s to sign %s",
                 device.id,
                 sign.frame_digest[:12],
                 sign.uuid,
             )
-            await self._flush(device_key)
+            await self._send(sign, inflight, IMAGE_ACK_TIMEOUT_S)
             return  # the ACK re-runs us; sleep must wait for it
 
         # 3. Only with the latest frame on the glass: quiet-hours sleep, once
@@ -689,16 +821,57 @@ class VisionectService:
             return
         minutes = self._sleep_minutes(device)
         if minutes is not None:
-            packet_id = int(conn.sleep(minutes))
-            sign.sleep_inflight = (packet_id, minutes)
+            inflight = _Inflight(
+                kind="sleep",
+                packet_id=int(conn.sleep(minutes)),
+                conn=conn,
+                writer=writer,
+                minutes=minutes,
+            )
+            sign.inflight = inflight
             logger.info("visionect: quiet hours, sign %s sleeps for %d min", sign.uuid, minutes)
-            await self._flush(device_key)
+            await self._send(sign, inflight, SLEEP_ACK_TIMEOUT_S)
 
-    async def _flush(self, device_key: bytes) -> None:
-        if self._server is None:
+    async def _send(self, sign: _Sign, inflight: _Inflight, ack_timeout: float) -> None:
+        """Put what ``inflight`` queued on the wire, then start its ACK clock."""
+        ok = await self._write(inflight.conn, inflight.writer)
+        if sign.inflight is not inflight:
+            return  # answered, or the sign reconnected, during the write
+        if not ok:
+            sign.inflight = None
+            sign.last_error = "stopped taking data; reconnecting"
+            if inflight.conn is sign.conn:
+                self._drop(sign)
             return
-        with contextlib.suppress(KeyError, ConnectionError, OSError):
-            await self._server.flush(device_key)
+        inflight.deadline = time.monotonic() + ack_timeout
+        self._schedule(sign.uuid, delay=ack_timeout + 0.05)
+
+    async def _write(self, conn: Any, writer: Any) -> bool:
+        """Write what ``conn`` has queued to ``writer``, waiting at most
+        WRITE_TIMEOUT_S for it to drain. False when it couldn't: the socket
+        is dead or stuck, and a stuck one has been dropped."""
+        from app.visionect_listener import abort, peer_ip
+
+        data = conn.drain()
+        if not data:
+            return True
+        try:
+            writer.write(data)
+            await asyncio.wait_for(writer.drain(), WRITE_TIMEOUT_S)
+        except TimeoutError:
+            logger.warning(
+                "visionect: a write to %s blocked for %.0fs; dropping the connection",
+                peer_ip(writer) or "?",
+                WRITE_TIMEOUT_S,
+            )
+            abort(writer)
+            return False
+        except (ConnectionError, OSError, RuntimeError):
+            return False
+        stats = getattr(self._server, "stats", None)
+        if stats is not None:
+            stats.bytes_out += len(data)
+        return True
 
     def _sleep_minutes(self, device: Device) -> int | None:
         """Minutes until this device's quiet window ends, when it is inside a
@@ -745,31 +918,16 @@ class VisionectService:
         uuid = normalise_uuid(event.uuid or (conn.device_id.hex() if conn.device_id else ""))
         if not uuid:
             return ""
-        sign = self._sign(uuid)
-        now = time.monotonic()
         if isinstance(event, DeviceConnected):
-            self._mark_identified(uuid)
-            # A new connection: whatever was in flight on the old one is lost.
-            sign.image_inflight = None
-            sign.sleep_inflight = None
-            sign.asleep_until = 0.0
-            sign.connected_at = time.time()
-            sign.remote = self._peer(uuid)
-            device = self._device_for_uuid(uuid) or self._bind(uuid)
-            self._check_glass(sign, event.status)
-            if device is None:
-                self._announce_unknown(uuid, event.status)
-                if uuid not in self._warned_unbound:
-                    self._warned_unbound.add(uuid)
-                    logger.warning(
-                        "visionect: sign %s connected but no Visionect device is free; "
-                        "it is listed under Settings -> Devices to register",
-                        uuid,
-                    )
-                self._publish(sign)
-                return ""
-            return uuid
+            return self._connected(conn, uuid, event.status)
+        sign = self._signs.get(uuid)
+        if sign is None or sign.conn is not conn:
+            return ""  # a superseded or refused connection: not the sign's
+        now = time.monotonic()
         if isinstance(event, StatusReceived):
+            sign.heard_at = now
+            sign.probe_at = 0.0
+            sign.status = event.status
             sign.last_seen = time.time()
             self._check_glass(sign, event.status)
             device = self._device_for_uuid(uuid)
@@ -777,36 +935,135 @@ class VisionectService:
                 self._spawn(self._record_status(device, uuid, event.status))
             self._publish(sign)
             return uuid
+        inflight = sign.inflight
+        answered = (
+            inflight is not None
+            and inflight.conn is conn
+            and inflight.packet_id == getattr(event, "packet_id", None)
+        )
         if isinstance(event, Acked):
-            if sign.image_inflight and sign.image_inflight[0] == event.packet_id:
-                sign.shown_digest = sign.image_inflight[1]
-                sign.shown_checksum = sign.image_inflight[2]
-                sign.shown_at = time.time()
-                sign.image_inflight = None
-                sign.retry_at = 0.0
-                sign.last_error = ""
-                logger.info("visionect: sign %s acked frame %s", uuid, sign.shown_digest[:12])
-            elif sign.sleep_inflight and sign.sleep_inflight[0] == event.packet_id:
-                sign.asleep_until = time.time() + sign.sleep_inflight[1] * 60
-                sign.sleep_inflight = None
+            sign.heard_at = now
+            if answered and inflight is not None:
+                sign.inflight = None
+                if inflight.kind == "image":
+                    sign.shown_digest = inflight.digest
+                    sign.shown_checksum = inflight.checksum
+                    sign.shown_at = time.time()
+                    sign.retry_at = 0.0
+                    sign.last_error = ""
+                    logger.info("visionect: sign %s acked frame %s", uuid, inflight.digest[:12])
+                else:
+                    sign.asleep_until = time.time() + inflight.minutes * 60
             return uuid
         if isinstance(event, Nacked):
-            if sign.image_inflight and sign.image_inflight[0] == event.packet_id:
-                sign.image_inflight = None
+            sign.heard_at = now
+            if answered and inflight is not None:
+                sign.inflight = None
                 delay = NACK_CHARGING_RETRY_S if event.charging else NACK_RETRY_S
-                sign.retry_at = now + delay
-                sign.last_error = (
-                    "refused a frame (charging)" if event.charging else "refused a frame"
-                )
-                level = logging.DEBUG if event.charging else logging.WARNING
-                logger.log(level, "visionect: sign %s refused a frame; retrying", uuid)
-            elif sign.sleep_inflight and sign.sleep_inflight[0] == event.packet_id:
-                # Back off like a refused frame; the duration is recomputed then.
-                sign.sleep_inflight = None
-                delay = NACK_CHARGING_RETRY_S if event.charging else NACK_RETRY_S
-                sign.sleep_retry_at = now + delay
+                if inflight.kind == "image":
+                    sign.retry_at = now + delay
+                    sign.last_error = (
+                        "refused a frame (charging)" if event.charging else "refused a frame"
+                    )
+                    level = logging.DEBUG if event.charging else logging.WARNING
+                    logger.log(level, "visionect: sign %s refused a frame; retrying", uuid)
+                else:
+                    # Back off like a refused frame; the duration is recomputed then.
+                    sign.sleep_retry_at = now + delay
             return uuid
         return ""
+
+    def _connected(self, conn: Any, uuid: str, status: Any) -> str:
+        """A connection identified as ``uuid``. Usually the sign re-dialing,
+        which supersedes its old connection; but a second connection from
+        another address while a bound sign's own connection is alive is
+        refused: the UUID is the protocol's only identity."""
+        from app.visionect_listener import abort, peer_ip
+
+        writer = self._writer_for(uuid, conn)
+        remote = peer_ip(writer)
+        sign = self._signs.get(uuid)
+        device = self._device_for_uuid(uuid)
+        if (
+            sign is not None
+            and sign.conn is not None
+            and sign.conn is not conn
+            and device is not None
+            and self._alive(sign)
+            and sign.remote
+            and remote != sign.remote
+        ):
+            self._refuse(sign, writer, remote)
+            return ""
+        if sign is None:
+            sign = self._sign(uuid)
+        old = sign.writer if sign.conn is not conn else None
+        sign.conn, sign.writer, sign.remote = conn, writer, remote
+        if old is not None and old is not writer:
+            abort(old)  # the old socket is dead or about to be; free it
+        mark = getattr(self._server, "mark_identified", None)
+        if writer is not None and callable(mark):
+            mark(writer)
+        sign.status = status
+        sign.heard_at = time.monotonic()
+        sign.probe_at = 0.0
+        # Whatever was in flight on the old connection is lost.
+        sign.inflight = None
+        sign.asleep_until = 0.0
+        sign.connected_at = time.time()
+        device = device or self._bind(uuid)
+        self._check_glass(sign, status)
+        if device is None:
+            self._announce_unknown(uuid, status)
+            if uuid not in self._warned_unbound:
+                self._warned_unbound.add(uuid)
+                logger.warning(
+                    "visionect: sign %s connected but no Visionect device is free; "
+                    "it is listed under Settings -> Devices to register",
+                    uuid,
+                )
+            self._publish(sign)
+            return ""
+        return uuid
+
+    def _writer_for(self, uuid: str, conn: Any) -> Any:
+        """The StreamWriter of ``conn``. The library registers it just
+        before dispatching DeviceConnected, so it is still the UUID's entry;
+        None if a newer connection has already replaced it."""
+        server = self._server
+        key = uuid_bytes(uuid)
+        if server is None or server.connection_for(key) is not conn:
+            return None
+        writers = getattr(server, "_writers", None)
+        return writers.get(key) if isinstance(writers, dict) else None
+
+    def _refuse(self, sign: _Sign, writer: Any, remote: str) -> None:
+        from app.visionect_listener import abort
+
+        abort(writer)
+        sign.refused = {"remote": remote, "at": time.time()}
+        logger.warning(
+            "visionect: refused a connection from %s claiming sign %s, which is connected from %s",
+            remote or "?",
+            sign.uuid,
+            sign.remote,
+        )
+        self._probe(sign)
+        self._publish(sign)
+
+    def _probe(self, sign: _Sign) -> None:
+        """Ask a quiet connection for a status, to learn whether it lives."""
+        now = time.monotonic()
+        if sign.probe_at or now - sign.heard_at < PROBE_QUIET_S or not self._alive(sign):
+            return
+        try:
+            sign.conn.request_status()
+            sign.writer.write(sign.conn.drain())
+        except Exception:
+            logger.debug("visionect: status request to %s failed", sign.uuid, exc_info=True)
+            return
+        sign.probe_at = now
+        self._schedule(sign.uuid, delay=PROBE_TIMEOUT_S + 0.05)
 
     def _check_glass(self, sign: _Sign, status: Any) -> None:
         """Re-send when the sign reports showing something other than the
@@ -815,7 +1072,8 @@ class VisionectService:
         a status late), and only one corrective resend per mismatch, so a
         sign whose CRC never matches can't cause a redraw loop."""
         reported = getattr(status, "display_state_crc", None)
-        if reported is None or sign.shown_checksum is None or sign.image_inflight:
+        sending = sign.inflight is not None and sign.inflight.kind == "image"
+        if reported is None or sign.shown_checksum is None or sending:
             return
         if reported == sign.shown_checksum:
             sign.crc_corrected = False
@@ -830,20 +1088,6 @@ class VisionectService:
             sign.shown_checksum,
         )
         sign.shown_digest = ""
-
-    def _mark_identified(self, uuid: str) -> None:
-        """Lift the listener's identify deadline for the sign's socket."""
-        writers = getattr(self._server, "_writers", None)
-        writer = writers.get(uuid_bytes(uuid)) if isinstance(writers, dict) else None
-        mark = getattr(self._server, "mark_identified", None)
-        if writer is not None and callable(mark):
-            mark(writer)
-
-    def _peer(self, uuid: str) -> str:
-        writers = getattr(self._server, "_writers", None)
-        writer = writers.get(uuid_bytes(uuid)) if isinstance(writers, dict) else None
-        peer = writer.get_extra_info("peername") if writer is not None else None
-        return str(peer[0]) if isinstance(peer, tuple) and peer else ""
 
     def _spawn(self, coro: Any) -> None:
         task = asyncio.get_running_loop().create_task(coro)
@@ -866,20 +1110,18 @@ class VisionectService:
     # -- UI snapshot (read from request threads) ---------------------------
 
     def _publish(self, sign: _Sign) -> None:
-        connected = (
-            self._server is not None
-            and self._server.connection_for(uuid_bytes(sign.uuid)) is not None
-        )
+        inflight = sign.inflight
         view = {
             "uuid": sign.uuid,
-            "connected": connected,
+            "connected": self._alive(sign),
             "remote": sign.remote,
             "connected_at": sign.connected_at or None,
             "last_seen": sign.last_seen or None,
             "in_sync": bool(sign.frame_digest) and sign.frame_digest == sign.shown_digest,
-            "sending": sign.image_inflight is not None,
+            "sending": inflight is not None and inflight.kind == "image",
             "asleep_until": sign.asleep_until or None,
             "last_error": sign.last_error,
+            "refused": dict(sign.refused) if sign.refused else None,
         }
         with self._snapshot_lock:
             self._snapshot[sign.uuid] = view
