@@ -484,8 +484,9 @@ _CSS_UNIT_LIMITS: dict[str, float] = {
 }
 _CSS_CHARS_RE = re.compile(r"^[A-Za-z0-9 \t\r\n.,:;%()+\-!/*]*$")
 _CSS_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
-_CSS_DECLARATION_RE = re.compile(r"^([A-Za-z-]+)\s*:\s*(.+?)\s*$", re.S)
-_CSS_IMPORTANT_RE = re.compile(r"\s*!\s*important\s*$", re.I)
+# Matched against a stripped chunk, so the value needs no lazy trailing
+# whitespace match (which goes quadratic on a long run of spaces).
+_CSS_DECLARATION_RE = re.compile(r"^([A-Za-z-]+)\s*:\s*(.+)$", re.S)
 _CSS_TOKEN_RE = re.compile(
     r"""
       (?P<ws>\s+)
@@ -540,11 +541,25 @@ def _css_value_ok(prop: str, value: str) -> bool:
     return depth == 0 and scale <= CSS_MAX_SCALE
 
 
+def _without_important(value: str) -> str:
+    head, bang, tail = value.rpartition("!")
+    return head.rstrip() if bang and tail.strip().lower() == "important" else value
+
+
 def sanitize_css(raw: Any) -> str:
     """``raw`` cut down to the declarations it's safe to give one paper's
     page image, re-serialised as ``prop: value; prop: value``; "" when
     nothing survives. See the notes above for what survives."""
-    if not isinstance(raw, str) or len(raw) > CSS_MAX_CHARS or not _CSS_CHARS_RE.match(raw):
+    if not isinstance(raw, str) or len(raw) > CSS_MAX_CHARS:
+        return ""
+    return _sanitize_css(raw)
+
+
+@functools.lru_cache(maxsize=256)
+def _sanitize_css(raw: str) -> str:
+    """sanitize_css for a string, remembered: every render reads every
+    paper's CSS, and it only changes when the settings do."""
+    if not _CSS_CHARS_RE.match(raw):
         return ""
     text = _CSS_COMMENT_RE.sub(" ", raw)
     if "/*" in text or "*/" in text:
@@ -555,7 +570,7 @@ def sanitize_css(raw: Any) -> str:
         if match is None:
             continue
         prop = match.group(1).lower()
-        value = _CSS_IMPORTANT_RE.sub("", match.group(2))
+        value = _without_important(match.group(2))
         if prop in _CSS_PROPERTIES and value and _css_value_ok(prop, value):
             kept.append(f"{prop}: {' '.join(value.split())}")
         if len(kept) >= CSS_MAX_DECLARATIONS:

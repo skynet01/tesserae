@@ -483,6 +483,19 @@ def test_css_declarations_outside_the_vocabulary_are_dropped(raw: str) -> None:
     assert server.sanitize_css(f"opacity: 0.9; {raw}; filter: invert(1)").startswith("opacity: 0.9")
 
 
+def test_css_with_long_whitespace_runs_is_quick() -> None:
+    start = time.monotonic()
+    for raw in (
+        "opacity:" + " " * 990 + "1",
+        "opacity: 1" + " " * 985 + "x",
+        "opacity: 1 " + "!" + " " * 980,
+        "/*" * 499,
+    ):
+        server._sanitize_css.cache_clear()
+        server.sanitize_css(raw)
+    assert time.monotonic() - start < 0.5
+
+
 def test_css_keeps_at_most_a_dozen_declarations() -> None:
     assert server.sanitize_css("opacity: 1;" * 30).count("opacity") == server.CSS_MAX_DECLARATIONS
 
@@ -1057,6 +1070,7 @@ def test_rasterise_draws_page_one_at_panel_width() -> None:
 @pytest.mark.parametrize(
     "body",
     [b"%PDF-1.4 not really", b"", _jpeg(), _pdf(100, 5000), _pdf(5000, 100)],
+    ids=["broken", "empty", "jpeg", "too-tall", "too-wide"],
 )
 def test_rasterise_refuses_what_it_cannot_draw(body: bytes) -> None:
     assert server.rasterise_pdf(body) is None
@@ -1098,6 +1112,7 @@ def test_the_pdf_comes_first(pdf: FakeCdn) -> None:
         _jpeg(),  # not a PDF
         b"%PDF-1.4 truncated",  # a PDF that won't draw
     ],
+    ids=["404", "html", "jpeg", "broken-pdf"],
 )
 def test_the_jpeg_stands_in_when_the_pdf_fails(pdf: FakeCdn, served: bytes | None) -> None:
     pdf.pages = {_url("WSJ", 25): PAGE}
