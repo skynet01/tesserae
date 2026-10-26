@@ -51,6 +51,8 @@ DEFAULT_WORDS = 70
 MAX_ATTEMPTS = 2
 RETRY_AFTER_S = 2 * 3600
 LOG_LINES = 200
+# While a paid picture waits to be collected, a run comes round this often.
+COLLECT_EVERY_S = 10 * 60
 
 
 # ----------------------------------------------------------------------
@@ -180,17 +182,39 @@ def edition(now: datetime, run_at: str) -> str:
     return day.isoformat()
 
 
-def due(data_dir: Path, run_at: str, now: datetime) -> bool:
-    """True when a settled render should start a run: there are no stories
-    yet, or today's edition has not been made (nor tried too often)."""
+def due(data_dir: Path, run_at: str, now: datetime) -> str:
+    """Why a settled render should start a run, or "" when it should not.
+    "schedule": there are no stories yet, or today's edition has not been made
+    (nor tried too often). "collect": a picture already paid for is still to
+    be collected, which does not wait for tomorrow's edition."""
     state = store.load_state(data_dir)
-    current = edition(now, run_at)
+    if _scheduled(state, data_dir, edition(now, run_at), now):
+        return "schedule"
+    if owed(data_dir, now.timestamp()) and (
+        now.timestamp() - float(state.get("collect_at") or 0) >= COLLECT_EVERY_S
+    ):
+        return "collect"
+    return ""
+
+
+def _scheduled(state: dict[str, Any], data_dir: Path, current: str, now: datetime) -> bool:
     if state.get("edition") == current and store.load_stories(data_dir):
         return False
     tries = [float(t) for t in (state.get("attempts") or {}).get(current, [])]
     if len(tries) >= MAX_ATTEMPTS:
         return False
     return not tries or now.timestamp() - max(tries) >= RETRY_AFTER_S
+
+
+def owed(data_dir: Path, now: float) -> list[str]:
+    """Sources with a kie.ai task that was paid for and not yet collected."""
+    return [
+        key
+        for key, job in store.load_jobs(data_dir).items()
+        if isinstance(job.get("kie"), dict)
+        and job["kie"].get("task_id")
+        and now - float(job["kie"].get("at") or 0) < painters.KIE_RESUME_S
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -253,7 +277,7 @@ def make_story(
         return previous, "unchanged"
     if stopped():
         return previous, "kept" if previous else "missing"
-    job = _unfinished(data_dir, source, item)
+    job = _unfinished(data_dir, source, item, log)
     if job.get("summary"):
         summary = str(job["summary"])
         log("Taking up the unfinished attempt at this story and its summary")
@@ -282,9 +306,6 @@ def make_story(
     painting = painters.paint(
         item.title, summary, cfg.paint, budget=budget(), log=log, stopped=stopped, memo=memo
     )
-    if painting is not None or not memo.record:
-        # Done with it, or nothing paid for is left to collect: start afresh next time.
-        store.save_job(data_dir, source.key, None)
     story = {
         "source_key": source.key,
         "source": source.label,
@@ -308,17 +329,35 @@ def make_story(
     return story, "made"
 
 
-def _unfinished(data_dir: Path, source: Source, item: feeds.Item) -> dict[str, Any]:
+def _unfinished(
+    data_dir: Path, source: Source, item: feeds.Item, log: Callable[[str], None]
+) -> dict[str, Any]:
     """The earlier attempt at this very story, if one was left unfinished
-    recently; anything else is forgotten."""
+    recently. Anything else is forgotten, and a paid task given up on says so:
+    only then may a new one be ordered for the story."""
     job = store.load_job(data_dir, source.key)
     if not job:
         return {}
     same = job.get("link") == item.link and job.get("title") == item.title
     if same and time.time() - float(job.get("at") or 0) < painters.KIE_RESUME_S:
         return job
+    if (job.get("kie") or {}).get("task_id"):
+        why = "is too old to collect" if same else "was for a story the feed has moved on from"
+        log(f"Giving up on the paid kie.ai task that {why}")
     store.save_job(data_dir, source.key, None)
     return {}
+
+
+def _settle(data_dir: Path, source: Source, story: dict[str, Any] | None) -> None:
+    """After the story list is saved: forget the unfinished attempt once
+    nothing in it is owed any more. That is when the story it was for is
+    saved with its picture, or when it holds no paid (or possibly paid) task."""
+    job = store.load_job(data_dir, source.key)
+    if not job:
+        return
+    painted = bool(story and story.get("image") and story.get("title") == job.get("title"))
+    if painted or not job.get("kie"):
+        store.save_job(data_dir, source.key, None)
 
 
 # ----------------------------------------------------------------------
@@ -341,6 +380,7 @@ def run_edition(
     stories as they land and a crash loses at most the one under way."""
     data_dir = Path(data_dir)
     today = datetime.now(tz).date()
+    store.keep_jobs(data_dir, {s.key for s in cfg.sources})
     before = {s.get("source_key"): s for s in store.load_stories(data_dir)}
     shown: dict[str, dict[str, Any]] = {}
     outcome = Outcome()
@@ -378,6 +418,7 @@ def run_edition(
             (shown | pending)[s.key] for s in cfg.sources if s.key in shown or s.key in pending
         ]
         store.save_stories(data_dir, ordered)
+        _settle(data_dir, source, story)
     store.prune_images(
         data_dir, {str(s.get("image")) for s in store.load_stories(data_dir) if s.get("image")}
     )
@@ -540,8 +581,10 @@ def _note_attempt(data_dir: Path, current: str, now: datetime, reason: str) -> N
     attempts = state.get("attempts") if isinstance(state.get("attempts"), dict) else {}
     # Only the current edition's attempts matter; older ones are dropped.
     tries = [float(t) for t in (attempts or {}).get(current, [])]
-    if reason != "manual":
+    if reason == "schedule":
         tries.append(now.timestamp())
+    elif reason == "collect":
+        state["collect_at"] = now.timestamp()
     state["attempts"] = {current: tries}
     store.save_state(data_dir, state)
 

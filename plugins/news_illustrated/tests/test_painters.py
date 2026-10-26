@@ -301,7 +301,10 @@ def test_kie_task_id_is_saved_before_polling_and_collected_later(fake_net: FakeN
     fake_net.on(painters.KIE_RECORD_URL, _kie_record("generating"))
     got, _log = _kie_paint(memo)
     assert got is None
-    assert saved == [None, {"task_id": "t9", "at": 5000.0}], "kept for the next run"
+    assert saved == [
+        {"unanswered": True, "at": 5000.0},  # written before the request goes out
+        {"task_id": "t9", "at": 5000.0},  # kept for the next run
+    ]
     # The next run (a restart, say) collects the same task: no second create, no second charge.
     fake_net.calls.clear()
     fake_net.routes.clear()
@@ -313,7 +316,8 @@ def test_kie_task_id_is_saved_before_polling_and_collected_later(fake_net: FakeN
     assert fake_net.to(painters.KIE_CREATE_URL) == []
     assert "taskId=t9" in fake_net.to(painters.KIE_RECORD_URL)[0].url
     assert "kie: collecting the task an earlier run paid for" in log
-    assert later.record is None and saved[-1] is None
+    # Still remembered: only saving the story that holds the picture settles it.
+    assert later.record == {"task_id": "t9", "at": 5000.0}
 
 
 def test_an_old_kie_task_is_not_collected(fake_net: FakeNet) -> None:
@@ -368,3 +372,30 @@ def test_polling_never_sleeps_past_the_budget(fake_net: FakeNet) -> None:
     budget = painters.Budget(seconds=60, clock=clock, sleep=clock.sleep)
     painters.paint("T", "S", _settings("kie"), budget=budget, log=[].append)
     assert clock.now <= budget.deadline - painters.KIE_DOWNLOAD_RESERVE_S
+
+
+def test_dying_during_the_create_still_blocks_a_second_create(fake_net: FakeNet) -> None:
+    saved: list[object] = []
+
+    def crash(call: Call) -> net.Reply:
+        del call
+        assert saved == [{"unanswered": True, "at": 100.0}], "marked before sending"
+        raise SystemExit("the server died mid-request")
+
+    fake_net.on(painters.KIE_CREATE_URL, crash)
+    memo = painters.TaskMemo(save=saved.append, clock=lambda: 100.0)
+    with pytest.raises(SystemExit):
+        _kie_paint(memo)
+    # An immediate retry (a manual Generate now) does not ask kie.ai again.
+    got, log = _kie_paint(painters.TaskMemo(saved[-1], clock=lambda: 160.0))  # type: ignore[arg-type]
+    assert got is None and len(fake_net.to(painters.KIE_CREATE_URL)) == 1
+    assert "may have been accepted" in log[-1]
+
+
+def test_a_kie_result_that_is_not_a_picture_is_not_collected_again(fake_net: FakeNet) -> None:
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    fake_net.on(painters.KIE_RECORD_URL, _kie_success())
+    fake_net.on(RESULT_URL, ok("<html>expired</html>"))
+    memo = painters.TaskMemo()
+    assert _kie_paint(memo)[0] is None
+    assert memo.record is None

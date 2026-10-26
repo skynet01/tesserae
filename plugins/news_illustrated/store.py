@@ -254,6 +254,21 @@ def pick(data_dir: Path, placement: str, count: int, *, advance: bool, now: floa
 # ----------------------------------------------------------------------
 
 
+def load_jobs(data_dir: Path) -> dict[str, dict[str, Any]]:
+    got = read_json(Path(data_dir) / JOBS, {})
+    if not isinstance(got, dict):
+        return {}
+    return {k: v for k, v in got.items() if isinstance(v, dict)}
+
+
+def keep_jobs(data_dir: Path, source_keys: set[str]) -> None:
+    """Forget unfinished attempts for sources no longer configured."""
+    jobs = load_jobs(data_dir)
+    kept = {k: v for k, v in jobs.items() if k in source_keys}
+    if kept != jobs:
+        write_json(Path(data_dir) / JOBS, kept)
+
+
 def load_job(data_dir: Path, source_key: str) -> dict[str, Any]:
     """What an earlier, unfinished attempt at this source's story left: the
     story it was for, its summary, and a paid picture task still to collect."""

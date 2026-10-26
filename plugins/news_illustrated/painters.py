@@ -182,9 +182,15 @@ def paint(
         log(f"Painting with {name}")
         try:
             raw = _CALLS[name](Attempt(settings, key, detailed, short, budget, stopped, memo, log))
+        except PaintError as err:
+            log(f"{name}: {err}")
+            continue
+        try:
             jpeg, size = to_jpeg(raw)
         except PaintError as err:
             log(f"{name}: {err}")
+            if name == "kie":
+                memo.remember(None)  # collecting that task again would give the same bytes
             continue
         log(f"{name}: {size[0]}x{size[1]} picture")
         return Painting(jpeg, name, size)
@@ -256,7 +262,8 @@ def kie(a: Attempt) -> bytes:
             a.budget.check()
             if not got.ok:
                 raise PaintError(f"download failed ({got.reason()}); tried again next run")
-            a.memo.remember(None)
+            # The task stays remembered until the story holding its picture is
+            # saved: a crash before that collects the same task again.
             return got.body
         if state == "fail":
             a.memo.remember(None)
@@ -268,8 +275,10 @@ def kie(a: Attempt) -> bytes:
 
 
 def _kie_create(a: Attempt, auth: dict[str, str]) -> str:
-    """Ask kie.ai for a picture; the task id, remembered before anything else."""
-    a.memo.remember(None)
+    """Ask kie.ai for a picture; the task id, remembered before anything else.
+    The request is noted as in flight before it is sent, so dying mid-request
+    leaves the same "may have been accepted" mark as an unanswered one."""
+    a.memo.remember({"unanswered": True, "at": a.memo.clock()})
     created = net.post_json(
         KIE_CREATE_URL,
         {"model": a.settings.kie_model, "input": {"prompt": a.detailed, "image_size": "9:16"}},
@@ -284,9 +293,11 @@ def _kie_create(a: Attempt, auth: dict[str, str]) -> str:
         return str(task_id)
     if created.status == 0 or created.status >= 500:
         # No answer (or a server error) after the request went out: kie may
-        # have accepted and be charging for it. Do not ask again for a while.
-        a.memo.remember({"unanswered": True, "at": a.memo.clock()})
+        # have accepted and be charging for it. The in-flight mark stays, so
+        # it is not asked again for a while.
         raise PaintError(f"task request unanswered ({created.reason()}); not resending yet")
+    # A definite refusal: nothing was accepted, nothing to remember.
+    a.memo.remember(None)
     raise PaintError(f"task not created ({_message(answer) or created.reason()})")
 
 

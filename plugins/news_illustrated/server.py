@@ -87,12 +87,10 @@ def fetch(
     preview = bool(ctx.get("preview"))
     settled = bool(ctx.get("settled", not preview))
     tz = _timezone()
-    if (
-        settled
-        and not pipeline.RUNNER.running(data_dir)
-        and pipeline.due(data_dir, cfg.run_at, datetime.now(tz))
-    ):
-        pipeline.RUNNER.start(cfg, data_dir, tz=tz, reason="schedule")
+    if settled and not pipeline.RUNNER.running(data_dir):
+        reason = pipeline.due(data_dir, cfg.run_at, datetime.now(tz))
+        if reason:
+            pipeline.RUNNER.start(cfg, data_dir, tz=tz, reason=reason)
 
     out: dict[str, Any] = {"run_at": cfg.run_at, "running": pipeline.RUNNER.running(data_dir)}
     if out["running"]:

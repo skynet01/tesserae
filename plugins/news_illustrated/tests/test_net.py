@@ -29,6 +29,9 @@ class _Resp:
         time.sleep(self._delay)
         return self._chunks.pop(0) if self._chunks else b""
 
+    def close(self) -> None:
+        return None
+
     def __enter__(self) -> _Resp:
         return self
 
@@ -110,3 +113,51 @@ def test_error_text_never_quotes_a_header(monkeypatch: pytest.MonkeyPatch) -> No
     assert reply.error == "invalid request"
     _serve(monkeypatch, OSError("[Errno 54] reset by peer while sending key=abc"))
     assert "abc" not in net.request("https://api.example.com/", timeout=5).error
+
+
+def test_a_slow_error_body_is_held_to_the_same_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    import email.message
+    import urllib.error
+
+    slow = _Resp([b'{"error": "x"}'] * 1000, {}, delay=0.01)
+    _serve(
+        monkeypatch,
+        urllib.error.HTTPError(
+            "https://api.example.com/", 500, "err", email.message.Message(), slow
+        ),  # type: ignore[arg-type]
+    )
+    started = time.monotonic()
+    assert net.request("https://api.example.com/", timeout=0.2).error == "timed out"
+    assert time.monotonic() - started < 1.0
+
+
+def test_an_error_body_is_truncated_not_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    import email.message
+    import urllib.error
+
+    body = _Resp([b"e" * 3000, b"e" * 3000], {})
+    _serve(
+        monkeypatch,
+        urllib.error.HTTPError(
+            "https://api.example.com/", 429, "slow down", email.message.Message(), body
+        ),  # type: ignore[arg-type]
+    )
+    reply = net.request("https://api.example.com/", timeout=5)
+    assert reply.status == 429 and reply.body == b"e" * net.ERROR_BODY_BYTES
+
+
+def test_redirects_get_only_the_time_that_is_left() -> None:
+    req = urllib.request.Request("https://news.example.com/a")
+    req.timeout = 30  # type: ignore[attr-defined]
+    handler = net._PublicRedirects(time.monotonic() + 2)
+    monkeypatched_guard = net.assert_public_url
+    try:
+        net.assert_public_url = lambda url: None  # type: ignore[assignment]
+        handler.redirect_request(req, None, 302, "Found", {}, "https://news.example.com/b")
+        assert req.timeout <= 2  # type: ignore[attr-defined]
+        with pytest.raises(net._OutOfTime):
+            net._PublicRedirects(time.monotonic() - 1).redirect_request(
+                req, None, 302, "Found", {}, "https://news.example.com/c"
+            )
+    finally:
+        net.assert_public_url = monkeypatched_guard  # type: ignore[assignment]

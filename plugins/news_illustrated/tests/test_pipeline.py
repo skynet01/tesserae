@@ -389,3 +389,135 @@ def test_secrets_never_reach_the_log(fake_net: FakeNet, tmp_path: Path) -> None:
     assert "gsk_live_SECRET" not in saved and "AIza" not in saved
     assert "Groq failed: Invalid API Key ***" in saved
     assert "gemini_api_key has spaces or control characters in it" in saved
+
+
+KIE_RESULT = "https://cdn.example.com/p.png"
+
+
+def _fake_budget() -> painters.Budget:
+    clock = {"now": 0.0}
+
+    def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    return painters.Budget(clock=lambda: clock["now"], sleep=sleep)
+
+
+def _kie_only() -> pipeline.Config:
+    return _cfg(huggingface_api_key="", kie_api_key="kie", sources=f"Tech | {FEEDS['Tech']}")
+
+
+def _kie_finishes(fake: FakeNet) -> None:
+    fake.routes = [r for r in fake.routes if not r[0].startswith(painters.KIE_RECORD_URL)]
+    fake.on(
+        painters.KIE_RECORD_URL,
+        ok_json(
+            {"data": {"state": "success", "resultJson": f'{{"resultUrls": ["{KIE_RESULT}"]}}'}}
+        ),
+    )
+    fake.on(KIE_RESULT, ok(picture(), "image/png"))
+
+
+def test_a_pending_task_is_collected_without_waiting_for_tomorrow(
+    monkeypatch: pytest.MonkeyPatch, fake_net: FakeNet, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(painters, "KIE_POLL_EVERY_S", 0.001)
+    monkeypatch.setattr(painters, "KIE_POLL_MAX_S", 0.02)
+    cfg = _kie_only()
+    _news(fake_net)
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    fake_net.on(painters.KIE_RECORD_URL, ok_json({"data": {"state": "generating"}}))
+    runner = pipeline.Runner()
+    assert runner.start(cfg, tmp_path, tz=None, reason="schedule")
+    _wait(runner, tmp_path)
+    now = datetime.now()
+    # The text-only story completes the edition, but the paid task is still owed...
+    assert store.load_state(tmp_path)["edition"] == pipeline.edition(now, "06:05")
+    assert pipeline.owed(tmp_path, time.time()) == [cfg.sources[0].key]
+    assert pipeline.due(tmp_path, "06:05", now) == "collect"
+    # ...so a run comes round for it, and collects it rather than ordering another.
+    _kie_finishes(fake_net)
+    assert runner.start(cfg, tmp_path, tz=None, reason="collect")
+    _wait(runner, tmp_path)
+    assert len(fake_net.to(painters.KIE_CREATE_URL)) == 1
+    assert store.load_stories(tmp_path)[0]["provider"] == "kie"
+    assert pipeline.owed(tmp_path, time.time()) == []
+    assert pipeline.due(tmp_path, "06:05", now) == ""
+    attempts = store.load_state(tmp_path)["attempts"][pipeline.edition(now, "06:05")]
+    assert len(attempts) == 1, "a collection run does not use up the day's attempts"
+
+
+def test_collection_runs_are_spaced_out(tmp_path: Path) -> None:
+    store.save_stories(tmp_path, [{"title": "x"}])
+    now = datetime.now()
+    store.save_job(tmp_path, "tech", {"kie": {"task_id": "t1", "at": now.timestamp()}})
+    done = pipeline.edition(now, "06:05")
+    store.save_state(tmp_path, {"edition": done, "collect_at": now.timestamp() - 60})
+    assert pipeline.due(tmp_path, "06:05", now) == ""
+    store.save_state(tmp_path, {"edition": done, "collect_at": now.timestamp() - 601})
+    assert pipeline.due(tmp_path, "06:05", now) == "collect"
+    old = now.timestamp() - painters.KIE_RESUME_S - 1
+    store.save_job(tmp_path, "tech", {"kie": {"task_id": "t1", "at": old}})
+    assert pipeline.due(tmp_path, "06:05", now) == "", "an expired task is not chased"
+
+
+def test_an_image_write_failure_after_payment_is_recovered(
+    monkeypatch: pytest.MonkeyPatch, fake_net: FakeNet, tmp_path: Path
+) -> None:
+    cfg = _kie_only()
+    _news(fake_net)
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    _kie_finishes(fake_net)
+    real = store.save_image
+
+    def disk_full(*a: Any, **k: Any) -> str:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(store, "save_image", disk_full)
+    assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(missing=1)
+    assert store.load_job(tmp_path, cfg.sources[0].key)["kie"]["task_id"] == "t1"
+    monkeypatch.setattr(store, "save_image", real)
+    fake_net.calls.clear()
+    assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(made=1)
+    assert fake_net.to(painters.KIE_CREATE_URL) == [] and fake_net.to(summarise.GROQ_URL) == []
+    assert store.load_stories(tmp_path)[0]["image"]
+    assert store.load_job(tmp_path, cfg.sources[0].key) == {}
+
+
+def test_a_story_commit_failure_after_payment_is_recovered(
+    monkeypatch: pytest.MonkeyPatch, fake_net: FakeNet, tmp_path: Path
+) -> None:
+    cfg = _kie_only()
+    _news(fake_net)
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    _kie_finishes(fake_net)
+    real = store.save_stories
+
+    def disk_full(*a: Any, **k: Any) -> None:
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(store, "save_stories", disk_full)
+    with pytest.raises(OSError):
+        _run(tmp_path, cfg, budget=_fake_budget)
+    assert store.load_job(tmp_path, cfg.sources[0].key)["kie"]["task_id"] == "t1"
+    monkeypatch.setattr(store, "save_stories", real)
+    fake_net.calls.clear()
+    assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(made=1)
+    assert fake_net.to(painters.KIE_CREATE_URL) == []
+    assert store.load_job(tmp_path, cfg.sources[0].key) == {}
+
+
+def test_a_kept_story_does_not_settle_a_pending_task(fake_net: FakeNet, tmp_path: Path) -> None:
+    """The picture failed and the previous story (with its own picture) stays:
+    the task for the new story is still owed."""
+    cfg = _kie_only()
+    _news(fake_net)
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t0"}}))
+    _kie_finishes(fake_net)
+    _run(tmp_path, cfg, budget=_fake_budget)
+    fake_net.routes.clear()
+    _news(fake_net, "-2")
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    fake_net.on(painters.KIE_RECORD_URL, ok_json({"data": {"state": "generating"}}))
+    assert _run(tmp_path, cfg, budget=_fake_budget) == pipeline.Outcome(kept=1)
+    assert store.load_job(tmp_path, cfg.sources[0].key)["kie"]["task_id"] == "t1"

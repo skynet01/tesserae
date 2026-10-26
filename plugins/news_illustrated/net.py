@@ -39,6 +39,8 @@ from app.net_guard import BlockedURLError, assert_public_url
 # not sending what we asked for.
 MAX_BYTES = 25 * 1024 * 1024
 CHUNK = 64 * 1024
+# APIs explain an error in their body; this much is enough to read why.
+ERROR_BODY_BYTES = 4096
 API_USER_AGENT = "tesserae/0.1 (+news_illustrated)"
 # Article pages and some feeds sit behind bot filters that refuse a
 # bot-shaped User-Agent outright (the PHP original learned this the hard way).
@@ -96,12 +98,22 @@ class _OutOfTime(Exception):
 
 
 class _PublicRedirects(urllib.request.HTTPRedirectHandler):
-    """Follow a redirect only to a public address."""
+    """Follow a redirect only to a public address, and only with the time the
+    whole request has left (urllib reuses the first timeout for every hop)."""
+
+    def __init__(self, deadline: float = float("inf")) -> None:
+        super().__init__()
+        self.deadline = deadline
 
     def redirect_request(  # type: ignore[no-untyped-def]
         self, req, fp, code, msg, headers, newurl
     ):
         assert_public_url(newurl)
+        left = self.deadline - time.monotonic()
+        if left <= 0:
+            raise _OutOfTime
+        # http_error_30x opens the next hop with ``req.timeout``.
+        req.timeout = left
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -127,7 +139,7 @@ def request(
     sent = {"User-Agent": API_USER_AGENT, "Accept-Encoding": "gzip, deflate", **(headers or {})}
     try:
         req = urllib.request.Request(url, data=body, headers=sent, method=method)
-        opener = urllib.request.build_opener(_PublicRedirects())
+        opener = urllib.request.build_opener(_PublicRedirects(deadline))
         with opener.open(req, timeout=max(0.5, timeout)) as resp:
             raw = _read(resp, deadline, max_bytes)
             encoding = str(resp.headers.get("Content-Encoding", "") or "")
@@ -136,11 +148,15 @@ def request(
     except urllib.error.HTTPError as err:
         err_headers = getattr(err, "headers", None)
         try:
+            # The error body is read under the same deadline: an API explaining
+            # itself slowly must not hold the run past its budget.
             raw = decode(
-                err.read(4096),
+                _read(err, deadline, ERROR_BODY_BYTES, truncate=True),
                 str(err_headers.get("Content-Encoding", "") or "") if err_headers else "",
                 64 * 1024,
             )
+        except (_OutOfTime, TimeoutError):
+            return Reply(0, error="timed out")
         except Exception:
             raw = b""
         finally:
@@ -175,8 +191,9 @@ def post_json(
     return request(url, timeout=timeout, method="POST", headers=sent, body=data)
 
 
-def _read(resp: Any, deadline: float, max_bytes: int) -> bytes:
-    """The body, one network read at a time, inside the deadline and the cap."""
+def _read(resp: Any, deadline: float, max_bytes: int, *, truncate: bool = False) -> bytes:
+    """The body, one network read at a time, inside the deadline and the cap.
+    Past the cap it is an error, or with ``truncate`` the first ``max_bytes``."""
     chunks: list[bytes] = []
     size = 0
     read = getattr(resp, "read1", None) or resp.read
@@ -185,11 +202,13 @@ def _read(resp: Any, deadline: float, max_bytes: int) -> bytes:
         if left <= 0:
             raise _OutOfTime
         _socket_timeout(resp, left)
-        chunk = read(CHUNK)
+        chunk: bytes = read(min(CHUNK, max_bytes + 1 - size))
         if not chunk:
             return b"".join(chunks)
         size += len(chunk)
         if size > max_bytes:
+            if truncate:
+                return b"".join(chunks) + chunk[: max_bytes - (size - len(chunk))]
             raise _TooLarge
         chunks.append(chunk)
 
