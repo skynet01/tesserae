@@ -476,10 +476,12 @@ def test_stop_closes_a_connected_signs_socket(harness: Harness) -> None:
         try:
             while True:
                 if not sign.sock.recv(65536):
-                    closed = True
+                    closed = True  # EOF
                     break
-        except (ConnectionResetError, TimeoutError):
+        except ConnectionResetError:
             closed = True
+        except TimeoutError:
+            closed = False  # still open: the listener left the socket behind
         assert closed
     finally:
         sign.close()
@@ -502,3 +504,118 @@ def test_register_moves_the_listener_when_the_port_changes(tmp_path: Path, monke
     visionect.register(h.app)
     assert h.app.config["VISIONECT_SERVICE"] is not first
     assert h.app.config["VISIONECT_SERVICE"].port == 12001
+
+
+def test_refused_sleep_backs_off(tmp_path: Path) -> None:
+    h = Harness(tmp_path, app_settings=_window_around_now(sleep=True))
+    try:
+        assert h.svc.start()  # no render: straight to the sleep step
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.commands()) == 1)
+            sign.nack(sign.commands()[0].id)
+            sign.status()
+            sign.wait_for(lambda s: len(s.commands()) > 1, timeout=1.5)
+            assert len(sign.commands()) == 1  # no NACK/sleep ping-pong
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_sleep_waits_for_the_repaint_after_a_size_change(tmp_path: Path) -> None:
+    h = Harness(tmp_path, app_settings=_window_around_now(sleep=True))
+    try:
+        thirteen = {
+            "w": 1600,
+            "h": 1200,
+            "orientation": "landscape",
+            "native_w": 1600,
+            "native_h": 1200,
+        }
+        h.device.manifest["panel"] = dict(thirteen)
+        h.device.path.write_text(json.dumps({"id": "lobby", "panel": thirteen}), encoding="utf-8")
+        h.render("frame-a")
+
+        def _invalidate(device_id: str, reencode: bool = True) -> None:
+            h.repaints.append(device_id)
+            h.latest = None  # the real repaint drops the render until it's redone
+
+        h.app.config["PUSH_MANAGER"] = SimpleNamespace(invalidate_and_repaint=_invalidate)
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            deadline = time.monotonic() + 10
+            while not h.repaints and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert h.repaints == ["lobby"]
+            sign.status()
+            sign.wait_for(lambda s: len(s.commands()) > 0, timeout=1.5)
+            assert sign.commands() == []  # not asleep before the new frame
+            h.render("frame-b")
+            h.push()
+            assert sign.wait_for(lambda s: len(s.images()) == 1)
+            sign.ack(sign.images()[0].id)
+            assert sign.wait_for(lambda s: len(s.commands()) == 1)
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_disconnected_sign_stops_reading_as_connected(harness: Harness) -> None:
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    sign.status()
+    deadline = time.monotonic() + 5
+    while not (harness.svc.sign_view(UUID) or {}).get("connected"):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    sign.close()
+    time.sleep(0.3)
+    harness.svc._call_soon(harness.svc._rescan)
+    deadline = time.monotonic() + 5
+    while (harness.svc.sign_view(UUID) or {}).get("connected"):
+        assert time.monotonic() < deadline, "still reads as connected"
+        time.sleep(0.05)
+
+
+def test_glass_check_resends_once_after_the_crc_has_had_time() -> None:
+    svc = visionect.VisionectService()
+    sign = visionect._Sign(uuid=UUID)
+    sign.shown_digest, sign.shown_checksum = "frame-a", 111
+    status = SimpleNamespace(display_state_crc=222)
+    sign.shown_at = time.time()
+    svc._check_glass(sign, status)
+    assert sign.shown_digest == "frame-a"  # too soon: 6.17 reports a status late
+    sign.shown_at = time.time() - visionect.CRC_CONVERGE_S - 1
+    svc._check_glass(sign, status)
+    assert sign.shown_digest == ""  # one corrective resend
+    sign.shown_digest, sign.shown_at = "frame-a", time.time() - visionect.CRC_CONVERGE_S - 1
+    svc._check_glass(sign, status)
+    assert sign.shown_digest == "frame-a"  # never a loop
+    svc._check_glass(sign, SimpleNamespace(display_state_crc=111))
+    assert not sign.crc_corrected  # a match re-arms the check
+
+
+def test_busy_port_is_retried_on_a_timer(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(visionect, "START_RETRY_S", 0.3)
+    h = Harness(tmp_path)
+    blocker = socket.socket()
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", h.svc.port))
+    blocker.listen()
+    try:
+        assert not h.svc.maybe_start()  # port held, as by the old VSS
+        assert h.svc.start_error
+    finally:
+        blocker.close()
+    try:
+        deadline = time.monotonic() + 5
+        while not h.svc.running:
+            assert time.monotonic() < deadline, "listener never retried"
+            time.sleep(0.05)
+    finally:
+        h.svc.stop()

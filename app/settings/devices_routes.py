@@ -832,6 +832,18 @@ def devices_register_discovered(discovered_id: str) -> Response:
         flash(result.error or "Failed to register device.", "error")
         return redirect(url_for("auth.settings_area", area="devices"))
     cache.forget(discovered_id)
+    # A Visionect sign announces its UUID; bind the new device to that sign
+    # before the transport rebuild, whatever id the device was given.
+    announced_uuid = entry.parsed.get("uuid")
+    uuid_fields = [
+        f for f in config_fields_from_schema(result.device.config_schema) if f["name"] == "uuid"
+    ]
+    if isinstance(announced_uuid, str) and announced_uuid and uuid_fields:
+        ok, _err = result.device.validate_config({"uuid": announced_uuid})
+        if ok:
+            settings_store().update_for_namespace(
+                "devices", result.device.id, {"uuid": announced_uuid}, uuid_fields
+            )
     # Same picture-quality seeding as the manual add-device path.
     renderer_loader.seed_device_settings_from_base(renderers(), settings_store())
     rebuild_transport_fn()()

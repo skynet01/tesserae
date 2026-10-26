@@ -387,3 +387,29 @@ def test_topbar_chip_lists_unregistered_devices(app: Flask) -> None:
     cache.forget("pi_hall")
     body = client.get("/settings/server").get_data(as_text=True)
     assert "topbar-discovered" not in body
+
+
+def test_register_discovered_visionect_sign_keeps_its_uuid(app: Flask) -> None:
+    # A Visionect sign announces its UUID. Registering it, even under a
+    # custom id, must bind that device to that sign, not to whichever
+    # unknown sign happens to connect next.
+    cache = app.config["DISCOVERY_CACHE"]
+    cache.record(
+        "visionect_6a7e40",
+        b'{"kind":"visionect","transport":"visionect",'
+        b'"uuid":"aabbccdd-0000-1111-2222-333344445555","panel_w":1024,"panel_h":758}',
+    )
+    client = app.test_client()
+    _sign_in(client)
+    resp = client.post(
+        "/settings/devices/discovery/visionect_6a7e40/register",
+        data={"id": "desk_joan", "name": "Desk Joan"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 302
+    dev = app.config["DEVICE_REGISTRY"].get("desk_joan")
+    assert dev is not None
+    assert dev.kind_of == "visionect"
+    assert dev.transport == "push"
+    section = app.config["SETTINGS_STORE"].get_section("devices")
+    assert section["desk_joan"]["uuid"] == "aabbccdd-0000-1111-2222-333344445555"

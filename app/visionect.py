@@ -64,8 +64,13 @@ TICK_S = 60.0
 # Retry delays after the sign refuses a frame; a charging refusal is normal.
 NACK_RETRY_S = 60.0
 NACK_CHARGING_RETRY_S = 300.0
-# Minimum gap between attempts to bind the port after a failure.
+# Gap between attempts to bind the port after a failure (a timer retries).
 START_RETRY_S = 30.0
+# How long to hold off sleep while a size change repaints the frame.
+REPAINT_WAIT_S = 300.0
+# Firmware 6.17 reports the new DisplayStateCRC only at its next status,
+# up to 30 minutes after the ACK; only after this long is a mismatch real.
+CRC_CONVERGE_S = 40 * 60.0
 # The longest single deep sleep we ask for, and the margin past the window's
 # end so the sign wakes to the day's first frame.
 MAX_SLEEP_MINUTES = 6 * 24 * 60
@@ -169,10 +174,16 @@ class _Sign:
     frame: Any = None  # EncodedFrame for frame_digest
     frame_digest: str = ""
     shown_digest: str = ""  # acked by the sign during this run
-    image_inflight: tuple[int, str] | None = None  # (packet id, digest)
+    shown_checksum: int | None = None  # its state checksum (status tag 9)
+    shown_at: float = 0.0  # wall clock of that ACK
+    crc_corrected: bool = False  # one corrective resend per mismatch
+    image_inflight: tuple[int, str, int] | None = None  # (packet id, digest, checksum)
     sleep_inflight: tuple[int, int] | None = None  # (packet id, minutes)
-    retry_at: float = 0.0
+    retry_at: float = 0.0  # monotonic; after a refused frame
+    sleep_retry_at: float = 0.0  # monotonic; after a refused sleep
     retry_handle: asyncio.TimerHandle | None = None
+    repaint_until: float = 0.0  # monotonic; a size change is repainting
+    conformed: bool = False  # panel conformance tried this run
     asleep_until: float = 0.0
     remote: str = ""
     connected_at: float = 0.0
@@ -201,7 +212,7 @@ class VisionectService:
         self._signs: dict[str, _Sign] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._warned_unbound: set[str] = set()
-        self._discovered: dict[str, str] = {}  # discovery id -> uuid
+        self._retry_timer: threading.Timer | None = None
         # Read by Flask request threads; written on the loop thread.
         self._snapshot_lock = threading.Lock()
         self._snapshot: dict[str, dict[str, Any]] = {}
@@ -254,9 +265,29 @@ class VisionectService:
                 self.port,
                 self.start_error or "timed out",
             )
+            self._arm_retry()
         return ok
 
+    def _arm_retry(self) -> None:
+        """Retry the bind on a timer, independent of pushes, until it works
+        or no Visionect device is left."""
+        timer = self._retry_timer
+        if timer is not None and timer.is_alive():
+            return
+        timer = threading.Timer(START_RETRY_S, self._retry_fire)
+        timer.daemon = True
+        self._retry_timer = timer
+        timer.start()
+
+    def _retry_fire(self) -> None:
+        self._retry_timer = None
+        self._last_start_attempt = 0.0
+        self.maybe_start()
+
     def stop(self, timeout: float = 5.0) -> None:
+        timer, self._retry_timer = self._retry_timer, None
+        if timer is not None:
+            timer.cancel()
         loop, stop_event = self._loop, self._stop_event
         if loop is not None and stop_event is not None and not loop.is_closed():
             with contextlib.suppress(RuntimeError):
@@ -375,9 +406,9 @@ class VisionectService:
         return None
 
     def _bind(self, uuid: str) -> Device | None:
-        """Bind a sign we don't know to a visionect device with no UUID:
-        the one registered from its discovery entry if there is one, else the
-        first by id. Persisted so the binding survives a restart."""
+        """Bind a sign we don't know to the first visionect device (by id)
+        with no UUID. Persisted so the binding survives a restart; a device
+        registered from the discovered banner already carries its UUID."""
         ctx = self._ctx
         if ctx is None:
             return None
@@ -388,17 +419,10 @@ class VisionectService:
         ]
         if not blank:
             return None
-        chosen = next((d for d in blank if self._discovered.get(d.id) == uuid), None)
-        if chosen is None:
-            # A device registered for a *different* discovered sign waits for it.
-            claimed = {did for did, u in self._discovered.items() if u != uuid}
-            chosen = next((d for d in blank if d.id not in claimed), None)
-        if chosen is None:
-            return None
+        chosen = blank[0]
         cfg = self._device_cfg(chosen.id)
         cfg["uuid"] = uuid
         ctx.settings.patch_section("devices", {chosen.id: cfg})
-        self._discovered.pop(chosen.id, None)
         self._forget_discovery(uuid)
         logger.info("visionect: bound sign %s to device %s", uuid, chosen.id)
         return chosen
@@ -425,9 +449,7 @@ class VisionectService:
         }
         if beat.get("fw_version"):
             payload["fw_version"] = beat["fw_version"]
-        did = discovery_id(uuid)
-        self._discovered[did] = uuid
-        cache.record(did, json.dumps(payload).encode("utf-8"))
+        cache.record(discovery_id(uuid), json.dumps(payload).encode("utf-8"))
 
     def _model_for(self, canvas: tuple[int, int]) -> str:
         """The catalog model whose native size is the sign's, when exactly
@@ -465,13 +487,19 @@ class VisionectService:
         """Re-run every connected sign, binding any that still need a device."""
         if self._server is None:
             return
-        for device_key in list(self._server.connections):
+        live = list(self._server.connections)
+        for device_key in live:
             uuid = normalise_uuid(device_key.hex())
             if not uuid:
                 continue
             if self._device_for_uuid(uuid) is None and self._bind(uuid) is None:
                 continue
             self._schedule(uuid)
+        # A sign that dropped its socket raises no event; refresh its card.
+        gone = {normalise_uuid(k.hex()) for k in live}
+        for uuid, sign in list(self._signs.items()):
+            if uuid not in gone:
+                self._publish(sign)
 
     def _schedule(self, uuid: str, *, delay: float = 0.0) -> None:
         sign = self._sign(uuid)
@@ -513,14 +541,21 @@ class VisionectService:
         # 0. The sign's own DisplayType is the truth about its buffer (a
         #    Joan 6 is 1024x758, the 32" is 4 x 1440x640): conform the
         #    device's native size to it and re-render before sending.
-        if state.last_status is not None:
+        if state.last_status is not None and not sign.conformed:
             canvas = canvas_size(state.panel)
             if canvas is not None and native_size(device) != canvas:
+                sign.conformed = True  # once per run: never a repaint loop
                 changed = await loop.run_in_executor(
-                    None, conform_panel, device, canvas, kind_default_dims(ctx.devices, device)
+                    None,
+                    conform_panel,
+                    device,
+                    canvas,
+                    kind_default_dims(ctx.devices, device),
+                    functools.partial(ctx.devices.devices.get, device.id),
                 )
                 if changed:
                     sign.frame, sign.frame_digest = None, ""
+                    sign.repaint_until = time.monotonic() + REPAINT_WAIT_S
                     push_mgr = ctx.app.config.get("PUSH_MANAGER")
                     if push_mgr is not None:
                         await loop.run_in_executor(
@@ -552,6 +587,7 @@ class VisionectService:
                 sign.dirty = True  # superseded while encoding; start over
                 return
             sign.frame, sign.frame_digest = frame, digest
+            sign.repaint_until = 0.0
             sign.last_error = ""
             reported = state.last_status.display_state_crc
             if not sign.shown_digest and reported == frame.state_checksum:
@@ -570,7 +606,7 @@ class VisionectService:
                 self._schedule(sign.uuid, delay=wait)
                 return
             packet_id = int(conn.send_image(sign.frame))
-            sign.image_inflight = (packet_id, sign.frame_digest)
+            sign.image_inflight = (packet_id, sign.frame_digest, int(sign.frame.state_checksum))
             logger.info(
                 "visionect %s: sending frame %s to sign %s",
                 device.id,
@@ -583,6 +619,12 @@ class VisionectService:
         # 3. Only with the latest frame on the glass: quiet-hours sleep, once
         #    (the sign takes a moment to drop the socket after acking it).
         if sign.asleep_until > time.time():
+            return
+        if sign.frame is None and sign.repaint_until > time.monotonic():
+            return  # the size change's repaint hasn't produced a frame yet
+        wait = sign.sleep_retry_at - time.monotonic()
+        if wait > 0:
+            self._schedule(sign.uuid, delay=wait)
             return
         minutes = self._sleep_minutes(device)
         if minutes is not None:
@@ -652,6 +694,7 @@ class VisionectService:
             sign.connected_at = time.time()
             sign.remote = self._peer(uuid)
             device = self._device_for_uuid(uuid) or self._bind(uuid)
+            self._check_glass(sign, event.status)
             if device is None:
                 self._announce_unknown(uuid, event.status)
                 if uuid not in self._warned_unbound:
@@ -666,6 +709,7 @@ class VisionectService:
             return uuid
         if isinstance(event, StatusReceived):
             sign.last_seen = time.time()
+            self._check_glass(sign, event.status)
             device = self._device_for_uuid(uuid)
             if device is not None:
                 self._spawn(self._record_status(device, uuid, event.status))
@@ -674,6 +718,8 @@ class VisionectService:
         if isinstance(event, Acked):
             if sign.image_inflight and sign.image_inflight[0] == event.packet_id:
                 sign.shown_digest = sign.image_inflight[1]
+                sign.shown_checksum = sign.image_inflight[2]
+                sign.shown_at = time.time()
                 sign.image_inflight = None
                 sign.retry_at = 0.0
                 sign.last_error = ""
@@ -693,9 +739,35 @@ class VisionectService:
                 level = logging.DEBUG if event.charging else logging.WARNING
                 logger.log(level, "visionect: sign %s refused a frame; retrying", uuid)
             elif sign.sleep_inflight and sign.sleep_inflight[0] == event.packet_id:
-                sign.sleep_inflight = None  # recomputed on the next pass
+                # Back off like a refused frame; the duration is recomputed then.
+                sign.sleep_inflight = None
+                delay = NACK_CHARGING_RETRY_S if event.charging else NACK_RETRY_S
+                sign.sleep_retry_at = now + delay
             return uuid
         return ""
+
+    def _check_glass(self, sign: _Sign, status: Any) -> None:
+        """Re-send when the sign reports showing something other than the
+        frame it acked: its framebuffer changed while we weren't looking.
+        Only once its CRC has had time to converge (firmware 6.17 reports it
+        a status late), and only one corrective resend per mismatch, so a
+        sign whose CRC never matches can't cause a redraw loop."""
+        reported = getattr(status, "display_state_crc", None)
+        if reported is None or sign.shown_checksum is None or sign.image_inflight:
+            return
+        if reported == sign.shown_checksum:
+            sign.crc_corrected = False
+            return
+        if time.time() - sign.shown_at < CRC_CONVERGE_S or sign.crc_corrected:
+            return
+        sign.crc_corrected = True
+        logger.info(
+            "visionect: sign %s reports state %s, not the acked %s; re-sending",
+            sign.uuid,
+            reported,
+            sign.shown_checksum,
+        )
+        sign.shown_digest = ""
 
     def _peer(self, uuid: str) -> str:
         writers = getattr(self._server, "_writers", None)
@@ -791,7 +863,10 @@ def kind_default_dims(devices: DeviceRegistry, device: Device) -> tuple[int, int
 
 
 def conform_panel(
-    device: Device, canvas: tuple[int, int], defaults: tuple[int, int] | None
+    device: Device,
+    canvas: tuple[int, int],
+    defaults: tuple[int, int] | None,
+    current: Callable[[], Device | None] | None = None,
 ) -> bool:
     """Set the device's native buffer to the sign's canvas (executor thread).
 
@@ -800,7 +875,12 @@ def conform_panel(
     kind's defaults (or the old buffer's size) is re-seeded to the new one,
     ordered for the stored orientation. Unlike TRMNL this isn't one-shot:
     the bound sign's DisplayType is authoritative. Returns True when it
-    wrote."""
+    wrote.
+
+    The file is re-read right before the write and replaced atomically, so
+    readers never see half-written JSON and only the size keys change.
+    ``current`` returns the registry's device object now, which a reload may
+    have replaced; it is patched too."""
     width, height = canvas
     try:
         raw = json.loads(device.path.read_text(encoding="utf-8"))
@@ -823,11 +903,18 @@ def conform_panel(
         block["w"], block["h"] = (short, long) if portrait else (long, short)
     block["native_w"], block["native_h"] = width, height
     raw["panel"] = block
+    tmp = device.path.with_name(f".{device.path.name}.visionect.tmp")
     try:
-        device.path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+        tmp.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, device.path)
     except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
         return False
     device.manifest["panel"] = dict(block)
+    live = current() if current is not None else None
+    if live is not None and live is not device:
+        live.manifest["panel"] = dict(block)
     logger.info(
         "visionect: device %s now uses the sign's %dx%d buffer (canvas %sx%s)",
         device.id,
