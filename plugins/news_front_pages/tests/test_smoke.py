@@ -141,8 +141,11 @@ def clocks(monkeypatch: pytest.MonkeyPatch) -> Clocks:
 
 @pytest.fixture
 def cdn(monkeypatch: pytest.MonkeyPatch, clocks: Clocks, tmp_path: Path) -> Iterator[FakeCdn]:
+    """Freedom Forum, faked. The PDF rasteriser is off here, so these tests
+    see the JPEG path alone; the ``pdf`` fixture turns it on."""
     fake = FakeCdn()
     monkeypatch.setattr(server, "_edition_today", lambda: TODAY)
+    monkeypatch.setattr(server, "rasteriser_available", lambda: False)
     with patch("urllib.request.urlopen", fake):
         try:
             yield fake
@@ -624,7 +627,7 @@ def test_bad_pinned_code_and_empty_list_are_errors(tmp_path: Path, cdn: FakeCdn)
 def test_payload_carries_size_and_css(tmp_path: Path, cdn: FakeCdn) -> None:
     _seed_today(tmp_path, "NY_NYT")
     assert _fetch(tmp_path, papers="NY_NYT 3.5") == {
-        "url": "/plugins/news_front_pages/page/NY_NYT_20261025.jpg",
+        "url": "/plugins/news_front_pages/page/NY_NYT_20261025.jpg?w=700",
         "code": "NY_NYT",
         "date": "2026-10-25",
         "width": 700,
@@ -1005,6 +1008,221 @@ def test_refuses_last_months_file_in_a_reused_slot(tmp_path: Path, cdn: FakeCdn)
     assert _fetch_settled(tmp_path, paper="WSJ")["date"] == "2026-10-24"
 
 
+# ----- the PDF: sharp pages ----------------------------------------------------
+
+needs_pdfium = pytest.mark.skipif(
+    importlib.util.find_spec("pypdfium2") is None, reason="pypdfium2 not installed"
+)
+
+
+def _pdf(width_pt: int = 612, height_pt: int = 1188) -> bytes:
+    """A one-page PDF ``width_pt`` x ``height_pt`` points: white, with a black
+    band across the top tenth, so a drawn page can be told from a blank."""
+    img = Image.new("L", (width_pt, height_pt), 255)
+    img.paste(0, (0, 0, width_pt, height_pt // 10))
+    buf = io.BytesIO()
+    img.save(buf, format="PDF", resolution=72)
+    return buf.getvalue()
+
+
+def _pdf_url(code: str, day: int) -> str:
+    return f"{CDN}/pdf{day}/{code}.pdf"
+
+
+@pytest.fixture
+def pdf(monkeypatch: pytest.MonkeyPatch, cdn: FakeCdn) -> FakeCdn:
+    """The fake CDN with the PDF rasteriser on."""
+    monkeypatch.setattr(server, "rasteriser_available", lambda: True)
+    return cdn
+
+
+def _size(body: bytes | None) -> tuple[int, int] | None:
+    return server.page_size(body) if body else None
+
+
+@needs_pdfium
+def test_rasterise_draws_page_one_at_panel_width() -> None:
+    body = server.rasterise_pdf(_pdf())
+    assert body is not None
+    with Image.open(io.BytesIO(body)) as img:
+        assert img.format == "JPEG"
+        assert img.width == server.RASTER_WIDTH_PX
+        assert abs(img.height - 1188 * server.RASTER_WIDTH_PX / 612) <= 1
+        grey = img.convert("L")
+        assert grey.getpixel((700, 20)) < 40  # the band, drawn
+        assert grey.getpixel((700, 2000)) > 215  # the page, white
+
+
+@needs_pdfium
+@pytest.mark.parametrize(
+    "body",
+    [b"%PDF-1.4 not really", b"", _jpeg(), _pdf(100, 5000), _pdf(5000, 100)],
+)
+def test_rasterise_refuses_what_it_cannot_draw(body: bytes) -> None:
+    assert server.rasterise_pdf(body) is None
+
+
+def test_rasterise_gives_up_on_a_stuck_or_failing_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "rasteriser_available", lambda: True)
+    monkeypatch.setattr(server, "_RASTER_CHILD", "import time; time.sleep(30)")
+    monkeypatch.setattr(server, "RASTER_TIMEOUT_S", 0.5)
+    start = time.monotonic()
+    assert server.rasterise_pdf(_pdf()) is None
+    assert time.monotonic() - start < 10
+    monkeypatch.setattr(server, "_RASTER_CHILD", "import sys; sys.stdout.write('junk')")
+    assert server.rasterise_pdf(_pdf()) is None
+    monkeypatch.setattr(server, "_RASTER_CHILD", "raise SystemExit(9)")
+    assert server.rasterise_pdf(_pdf()) is None
+
+
+def test_rasterise_child_caps_its_own_memory_and_cpu() -> None:
+    assert '"RLIMIT_AS", memory' in server._RASTER_CHILD
+    assert '"RLIMIT_CPU", cpu' in server._RASTER_CHILD
+    assert "document[0]" in server._RASTER_CHILD  # page one only
+
+
+@needs_pdfium
+def test_the_pdf_comes_first(pdf: FakeCdn) -> None:
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf(), _url("WSJ", 25): PAGE}
+    size = _size(server.download_edition("WSJ", TODAY))
+    assert size is not None and size[0] == server.RASTER_WIDTH_PX
+    assert pdf.calls == [_pdf_url("WSJ", 25)]
+
+
+@needs_pdfium
+@pytest.mark.parametrize(
+    "served",
+    [
+        None,  # no PDF for this paper (a 404)
+        b"<html>captive portal</html>",
+        _jpeg(),  # not a PDF
+        b"%PDF-1.4 truncated",  # a PDF that won't draw
+    ],
+)
+def test_the_jpeg_stands_in_when_the_pdf_fails(pdf: FakeCdn, served: bytes | None) -> None:
+    pdf.pages = {_url("WSJ", 25): PAGE}
+    if served is not None:
+        pdf.pages[_pdf_url("WSJ", 25)] = served
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    assert pdf.calls == [_pdf_url("WSJ", 25), _url("WSJ", 25)]
+
+
+@needs_pdfium
+def test_an_oversized_or_stale_pdf_is_refused(
+    pdf: FakeCdn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "MAX_PDF_BYTES", 1000)
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf(), _url("WSJ", 25): PAGE}
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    monkeypatch.setattr(server, "MAX_PDF_BYTES", 30 * 1024 * 1024)
+    stale = {"Last-Modified": "Mon, 21 Sep 2026 06:00:00 GMT"}
+    pdf.pages = {_pdf_url("WSJ", 25): _Resp(_pdf(), stale), _url("WSJ", 25): PAGE}
+    assert server.download_edition("WSJ", TODAY) == PAGE
+
+
+def test_without_the_rasteriser_only_the_jpeg_is_asked_for(cdn: FakeCdn) -> None:
+    cdn.pages = {_pdf_url("WSJ", 25): b"%PDF", _url("WSJ", 25): PAGE}
+    assert server.download_edition("WSJ", TODAY) == PAGE
+    assert cdn.calls == [_url("WSJ", 25)]
+
+
+@needs_pdfium
+def test_a_pdf_outage_falls_to_the_jpeg_which_reports_it(pdf: FakeCdn) -> None:
+    pdf.down = True
+    with pytest.raises(server.CdnUnreachable):
+        server.download_edition("WSJ", TODAY)
+    assert pdf.calls == [_pdf_url("WSJ", 25), _url("WSJ", 25)]
+
+
+@needs_pdfium
+def test_a_render_gets_the_sharp_page_and_its_size(tmp_path: Path, pdf: FakeCdn) -> None:
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
+    data = _fetch_settled(tmp_path, paper="WSJ")
+    assert data["url"].endswith(f"/WSJ_20261025.jpg?w={server.RASTER_WIDTH_PX}")
+    assert data["width"] == server.RASTER_WIDTH_PX
+
+
+@needs_pdfium
+def test_todays_blurry_page_is_redrawn_from_the_pdf_once(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    """A page saved from the JPEG (before the PDF path, or while the PDF
+    wasn't out) is redrawn when the PDF is there: the render shows it at
+    once and the next one gets the sharp page, under a new URL."""
+    _seed(tmp_path, "WSJ_20261025.jpg")  # 700 px wide
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
+    first = _fetch(tmp_path, paper="WSJ")
+    assert first["url"].endswith("?w=700")
+    assert first["live_pending"] == 1  # the redraw is on its way
+    _settle(tmp_path)
+    second = _fetch(tmp_path, paper="WSJ")
+    assert second["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+    assert "live_pending" not in second
+    assert pdf.calls == [_pdf_url("WSJ", 25)]  # the PDF only: the JPEG is what it had
+    clocks.wall += 2 * server.RECHECK_S
+    _fetch_settled(tmp_path, paper="WSJ")
+    assert len(pdf.calls) == 1  # sharp now: nothing more to do
+
+
+@needs_pdfium
+def test_a_redraw_that_finds_no_pdf_is_not_tried_again_that_day(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    _seed(tmp_path, "WSJ_20261025.jpg")
+    first = _fetch_settled(tmp_path, paper="WSJ")
+    assert first["url"].endswith("?w=700")  # kept: the redraw found nothing
+    assert pdf.calls == [_pdf_url("WSJ", 25)]
+    assert _state(tmp_path)["jpeg_only"] == {"WSJ": "2026-10-25"}
+    clocks.wall += 2 * server.RECHECK_S
+    _fetch_settled(tmp_path, paper="WSJ")
+    assert len(pdf.calls) == 1
+
+
+@needs_pdfium
+def test_a_jpeg_saved_while_the_pdf_failed_is_not_redrawn(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    pdf.pages = {_pdf_url("WSJ", 25): b"<html>", _url("WSJ", 25): PAGE}
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
+    assert _state(tmp_path)["jpeg_only"] == {"WSJ": "2026-10-25"}
+    calls = len(pdf.calls)
+    clocks.wall += 2 * server.RECHECK_S
+    _fetch_settled(tmp_path, paper="WSJ")
+    assert len(pdf.calls) == calls
+
+
+@needs_pdfium
+def test_an_outage_during_a_redraw_is_tried_again_later(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    _seed(tmp_path, "WSJ_20261025.jpg")
+    pdf.down = True
+    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("?w=700")
+    assert _state(tmp_path).get("jpeg_only") == {}
+    pdf.down = False
+    pdf.pages = {_pdf_url("WSJ", 25): _pdf()}
+    clocks.wall += server.RECHECK_S
+    data = _fetch_settled(tmp_path, paper="WSJ")
+    assert data["url"].endswith(f"?w={server.RASTER_WIDTH_PX}")
+
+
+def test_old_jpeg_only_marks_are_dropped(tmp_path: Path, cdn: FakeCdn) -> None:
+    server._write_json(
+        tmp_path / "state.json", {"jpeg_only": {"OLD": "2026-10-01", "BAD": 3, "NEW": "2026-10-25"}}
+    )
+    cdn.pages = {_url("WSJ", 25): PAGE}
+    _fetch_settled(tmp_path, paper="WSJ")
+    assert _state(tmp_path)["jpeg_only"] == {"NEW": "2026-10-25"}
+
+
+def test_client_snaps_the_page_to_whole_pixels() -> None:
+    js = (Path(server.__file__).parent / "client.js").read_text()
+    assert "snapToPixels(img)" in js
+    assert 'addEventListener("load", () => snapToPixels(img)' in js
+    # The paper's CSS can't take the property the snap uses.
+    assert server.sanitize_css("translate: 0 -2px") == ""
+
+
 # ----- the lock and handed-out pages -----------------------------------------
 
 
@@ -1033,7 +1251,7 @@ def test_a_page_just_handed_out_survives_a_newer_download(tmp_path: Path, cdn: F
     page's URL must not get a 404."""
     old = _seed(tmp_path, "WSJ_20261015.jpg", idle_s=IDLE)
     cdn.down = True
-    assert _fetch_settled(tmp_path, paper="WSJ")["url"].endswith("/WSJ_20261015.jpg")
+    assert "/WSJ_20261015.jpg?" in _fetch_settled(tmp_path, paper="WSJ")["url"]
     cdn.down = False
     cdn.pages = {_url("WSJ", 25): PAGE, _url("USAT", 25): PAGE}
     assert _fetch_settled(tmp_path, paper="WSJ", fresh=True)["date"] == "2026-10-25"

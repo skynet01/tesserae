@@ -6,9 +6,10 @@ round-robined the enabled papers on every frame request. Here there is no cron
 and no PDF tooling: ``fetch()`` answers from the pages saved in the widget's
 data dir and queues what is missing for one background download worker.
 
-Freedom Forum publishes each paper at
-``https://cdn.freedomforum.org/dfp/jpg<day-of-month>/lg/<CODE>.jpg``. Three
-quirks shape the code below:
+Freedom Forum publishes each paper as a PDF at
+``https://cdn.freedomforum.org/dfp/pdf<day-of-month>/<CODE>.pdf`` and as a
+JPEG at ``.../dfp/jpg<day-of-month>/lg/<CODE>.jpg``. Three quirks shape the
+code below:
 
 * The path names only the day of the month, so each slot is reused every
   month. Freedom Forum clears a slot a couple of days after the edition, and a
@@ -18,9 +19,16 @@ quirks shape the code below:
   date whatever the server's own time zone is. A paper that isn't out yet (or
   doesn't print that day, like the Sunday WSJ) falls back to yesterday's and
   then the day before's edition, as the old cron did.
-* The ``lg`` JPEG is the largest image on offer, about 700 px wide. Only the
-  PDF is bigger, and rasterising it would need a dependency a widget can't
-  declare, so a full-width page on a large panel is an upscale.
+* The ``lg`` JPEG is only about 700 px wide: on a 1440 px panel it is an
+  upscale, and body text can't be read. So the page comes from the PDF,
+  page one drawn at ``RASTER_WIDTH_PX`` from its own vectors and fonts (as
+  the old cron did with ImageMagick at 150 dpi). pypdfium2 does the drawing,
+  in a child process with a wall-clock timeout and capped CPU time and
+  address space, so a PDF that hangs or balloons costs that process, never
+  the server; the PDF itself is capped at ``MAX_PDF_BYTES``. When there is
+  no PDF, it can't be drawn, or pypdfium2 isn't installed, the JPEG stands
+  in, and today's page is redrawn once the PDF can be had (``jpeg_only`` in
+  state.json stops it retrying an edition whose PDF failed).
 
 How a render works:
 
@@ -53,7 +61,8 @@ How a render works:
 
 Layout under ``data_dir``::
 
-    pages/<CODE>_<YYYYMMDD>.jpg   one validated download per paper and edition
+    pages/<CODE>_<YYYYMMDD>.jpg   one validated page per paper and edition (the
+                                  PDF drawn at panel width, or the JPEG)
     state.json                    paper shown, since when and the order it came from;
                                   download attempts and failures
     directory.json                Freedom Forum's paper list, for the editor's picker
@@ -67,15 +76,18 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import functools
 import hashlib
 import html
 import http.client
+import importlib.util
 import io
 import json
 import logging
 import math
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -109,6 +121,7 @@ logger = logging.getLogger(__name__)
 # blueprint, so an install under another folder name still serves its pages.
 PLUGIN_ID = Path(__file__).resolve().parent.name
 
+PDF_URL = "https://cdn.freedomforum.org/dfp/pdf{day}/{code}.pdf"
 PAGE_URL = "https://cdn.freedomforum.org/dfp/jpg{day}/lg/{code}.jpg"
 SITEMAP_URL = "https://frontpages.freedomforum.org/sitemap.xml"
 USER_AGENT = f"tesserae/0.1 (+{PLUGIN_ID})"
@@ -134,7 +147,18 @@ MAX_QUEUED = 32
 # All of one job's requests (today, yesterday, the day before) together; a
 # request in flight can overrun it by one socket timeout.
 JOB_BUDGET_S = 90.0
-JOB_WORST_S = JOB_BUDGET_S + HTTP_TIMEOUT_S
+# The PDF rasteriser runs in a child process (rasterise_pdf): page one only,
+# at RASTER_WIDTH_PX, killed after RASTER_TIMEOUT_S of wall time, with its
+# CPU time and address space capped where the platform allows.
+RASTER_WIDTH_PX = 1440
+RASTER_TIMEOUT_S = 45.0
+RASTER_CPU_S = 30
+RASTER_MEMORY_BYTES = 1536 * 1024 * 1024
+RASTER_MAX_ASPECT = 4.0
+MAX_PDF_BYTES = 30 * 1024 * 1024
+# A saved page narrower than this came from the JPEG fallback.
+SHARP_MIN_WIDTH_PX = 1000
+JOB_WORST_S = JOB_BUDGET_S + HTTP_TIMEOUT_S + RASTER_TIMEOUT_S
 # The host follows a push up at most this many times in a row
 # (FOLLOWUP_LIMIT in app/push.py); the hint is spread so they cover the wait.
 HOST_FOLLOW_UPS = 8
@@ -383,7 +407,9 @@ def parse_papers(value: Any) -> list[Paper]:
 #   unit and stay inside its bound; the scale factors together stay under
 #   ``CSS_MAX_SCALE``. A declaration that fails is dropped on its own.
 # * No position, z-index or anything else that could put the page outside
-#   its cell; nothing that loads anything.
+#   its cell; nothing that loads anything. The ``translate`` property is
+#   client.js's, to put the page on whole pixels; ``transform: translate()``
+#   does what a paper needs.
 
 CSS_MAX_CHARS = 1000
 CSS_MAX_DECLARATIONS = 12
@@ -397,7 +423,6 @@ _CSS_PROPERTIES = frozenset(
         "opacity",
         "transform",
         "transform-origin",
-        "translate",
         "scale",
         "rotate",
         "object-fit",
@@ -621,18 +646,18 @@ def page_size(body: bytes) -> tuple[int, int] | None:
     return size if fmt in ("JPEG", "PNG") and min(size) >= MIN_IMAGE_EDGE_PX else None
 
 
-def _read_capped(resp: Any, deadline: float) -> bytes:
-    """The body, stopping one byte past ``MAX_IMAGE_BYTES`` and at ``deadline``.
+def _read_capped(resp: Any, deadline: float, cap: int = MAX_IMAGE_BYTES) -> bytes:
+    """The body, stopping one byte past ``cap`` and at ``deadline``.
     ``read1`` returns whatever one socket read brings, where ``read(n)`` would
     wait for all n bytes, so the deadline is checked at least once per
     ``HTTP_TIMEOUT_S`` however slowly the bytes arrive."""
     read = getattr(resp, "read1", None) or resp.read
     chunks: list[bytes] = []
     total = 0
-    while total <= MAX_IMAGE_BYTES:
+    while total <= cap:
         if _clock() >= deadline:
             raise CdnUnreachable("download too slow")
-        chunk = read(min(READ_CHUNK_BYTES, MAX_IMAGE_BYTES + 1 - total))
+        chunk = read(min(READ_CHUNK_BYTES, cap + 1 - total))
         if not chunk:
             break
         chunks.append(chunk)
@@ -640,20 +665,17 @@ def _read_capped(resp: Any, deadline: float) -> bytes:
     return b"".join(chunks)
 
 
-def download_edition(code: str, day: date, deadline: float | None = None) -> bytes | None:
-    """The ``code`` front page for ``day``, validated, or None when that
-    edition isn't there. Raises :class:`CdnUnreachable` when the CDN fails or
-    ``deadline`` (on ``_clock``; at most ``DOWNLOAD_BUDGET_S`` away) passes."""
-    deadline = min(deadline or math.inf, _clock() + DOWNLOAD_BUDGET_S)
+def _get(url: str, deadline: float, cap: int, accept: str) -> tuple[bytes, str | None] | None:
+    """The body (at most ``cap`` + 1 bytes) and its Last-Modified, or None on
+    a 404. Raises :class:`CdnUnreachable` when the CDN fails or ``deadline``
+    (on ``_clock``; at most ``DOWNLOAD_BUDGET_S`` away) passes."""
+    deadline = min(deadline, _clock() + DOWNLOAD_BUDGET_S)
     if deadline <= _clock():
         raise CdnUnreachable("out of time")
-    url = PAGE_URL.format(day=day.day, code=code)
-    request = urllib.request.Request(
-        url, headers={"User-Agent": USER_AGENT, "Accept": "image/jpeg,image/*;q=0.8"}
-    )
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
     try:
         with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_S) as resp:
-            body = _read_capped(resp, deadline)
+            body = _read_capped(resp, deadline, cap)
             headers = getattr(resp, "headers", None)
             last_modified = headers.get("Last-Modified") if headers is not None else None
     except urllib.error.HTTPError as err:
@@ -664,6 +686,145 @@ def download_edition(code: str, day: date, deadline: float | None = None) -> byt
     except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as err:
         # HTTPException covers a response cut off mid-body (IncompleteRead).
         raise CdnUnreachable(str(getattr(err, "reason", None) or err)) from err
+    return body, last_modified
+
+
+# Runs in a child process (``python -I -c``), so a PDF that hangs, crashes
+# or balloons the rasteriser takes down that process, never the server. It
+# caps its own address space and CPU time first (where ``resource`` exists:
+# Linux and macOS), reads the PDF from stdin and writes page one as a JPEG,
+# ``argv[1]`` pixels wide, to stdout. Exit 3 is a PDF it won't draw.
+_RASTER_CHILD = r"""
+import io
+import sys
+
+width, memory, cpu, max_aspect = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4])
+try:
+    import resource
+except ImportError:
+    resource = None
+if resource is not None:
+    for name, value in (("RLIMIT_AS", memory), ("RLIMIT_CPU", cpu)):
+        limit = getattr(resource, name, None)
+        if limit is not None:
+            try:
+                resource.setrlimit(limit, (value, value))
+            except (ValueError, OSError):
+                pass
+import pypdfium2
+document = pypdfium2.PdfDocument(sys.stdin.buffer.read())
+if len(document) < 1:
+    sys.exit(3)
+page = document[0]
+w, h = page.get_size()
+if not (w > 0 and h > 0) or h / w > max_aspect or w / h > max_aspect:
+    sys.exit(3)
+image = page.render(scale=width / w).to_pil().convert("RGB")
+out = io.BytesIO()
+image.save(out, "JPEG", quality=90, subsampling=0, optimize=True)
+sys.stdout.buffer.write(out.getvalue())
+"""
+
+
+@functools.cache
+def rasteriser_available() -> bool:
+    """Whether pypdfium2 is installed (a core dependency, but an older
+    install may not have it yet). Looked up, not imported: only the child
+    process ever loads it."""
+    return importlib.util.find_spec("pypdfium2") is not None
+
+
+def rasterise_pdf(body: bytes, width: int = RASTER_WIDTH_PX) -> bytes | None:
+    """Page one of the PDF ``body`` as a JPEG ``width`` pixels wide, drawn
+    at that width from the PDF's own vectors and fonts (never an upscaled
+    bitmap), or None when it can't be drawn: no rasteriser, a broken or odd
+    PDF, the child over its time or memory. Blocks for at most
+    ``RASTER_TIMEOUT_S``; the worker thread is the only caller."""
+    if not rasteriser_available():
+        return None
+    command = [
+        sys.executable,
+        "-I",
+        "-c",
+        _RASTER_CHILD,
+        str(width),
+        str(RASTER_MEMORY_BYTES),
+        str(RASTER_CPU_S),
+        str(RASTER_MAX_ASPECT),
+    ]
+    try:
+        done = subprocess.run(
+            command, input=body, capture_output=True, timeout=RASTER_TIMEOUT_S, check=False
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("%s: PDF rasteriser timed out", PLUGIN_ID)
+        return None
+    except (OSError, ValueError) as err:
+        logger.warning("%s: PDF rasteriser didn't start: %s", PLUGIN_ID, err)
+        return None
+    if done.returncode != 0:
+        detail = done.stderr[-300:].decode("utf-8", "replace").strip()
+        logger.warning("%s: PDF rasteriser failed (%s) %s", PLUGIN_ID, done.returncode, detail)
+        return None
+    size = page_size(done.stdout)
+    if size is None or abs(size[0] - width) > 2:
+        logger.warning("%s: PDF rasteriser returned no usable page", PLUGIN_ID)
+        return None
+    return done.stdout
+
+
+def _pdf_edition(code: str, day: date, deadline: float, *, quiet: bool) -> bytes | None:
+    """The ``code`` front page for ``day`` drawn from its PDF, or None when
+    there's no PDF or it can't be drawn. With ``quiet`` a CDN failure is a
+    None too, and the JPEG fallback after it decides whether Freedom Forum
+    is reachable; without, it raises :class:`CdnUnreachable`."""
+    try:
+        got = _get(
+            PDF_URL.format(day=day.day, code=code), deadline, MAX_PDF_BYTES, "application/pdf"
+        )
+    except CdnUnreachable as err:
+        if not quiet:
+            raise
+        logger.info("%s: %s PDF for %s unavailable (%s)", PLUGIN_ID, code, day, err)
+        return None
+    if got is None:
+        return None
+    body, last_modified = got
+    if len(body) > MAX_PDF_BYTES or _slot_is_stale(last_modified, day):
+        logger.info("%s: %s PDF for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
+        return None
+    if not body.startswith(b"%PDF"):
+        logger.info("%s: %s PDF for %s is not a PDF", PLUGIN_ID, code, day)
+        return None
+    return rasterise_pdf(body)
+
+
+def download_edition(
+    code: str, day: date, deadline: float | None = None, *, pdf_only: bool = False
+) -> bytes | None:
+    """The ``code`` front page for ``day``, validated, or None when that
+    edition isn't there. The PDF comes first, drawn at panel width; the
+    ``lg`` JPEG (about 700 px wide) is the fallback, skipped when
+    ``pdf_only``. Raises :class:`CdnUnreachable` when the CDN fails or
+    ``deadline`` (on ``_clock``) passes."""
+    deadline = min(deadline or math.inf, _clock() + DOWNLOAD_BUDGET_S)
+    if deadline <= _clock():
+        raise CdnUnreachable("out of time")
+    if pdf_only:
+        return _pdf_edition(code, day, deadline, quiet=False) if rasteriser_available() else None
+    if rasteriser_available():
+        sharp = _pdf_edition(code, day, deadline, quiet=True)
+        if sharp is not None:
+            return sharp
+    got = _get(
+        PAGE_URL.format(day=day.day, code=code),
+        deadline,
+        MAX_IMAGE_BYTES,
+        "image/jpeg,image/*;q=0.8",
+    )
+    if got is None:
+        return None
+    body, last_modified = got
     if len(body) > MAX_IMAGE_BYTES or _slot_is_stale(last_modified, day):
         logger.info("%s: %s for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
         return None
@@ -746,6 +907,29 @@ def prune(pages: Path, today: date, now: float) -> None:
         identity = _identity(path)
         if identity is not None and now - identity[2] / 1e9 > PRUNE_GRACE_S:
             _unlink_if_same(path, identity)
+
+
+def _saved_width(path: Path) -> int | None:
+    """A saved page's width from its header alone (no decode), or None."""
+    try:
+        with Image.open(path) as img:
+            return int(img.size[0])
+    except Exception:  # missing, half-written, not an image
+        return None
+
+
+def _wants_sharper(code: str, day: date, width: int | None, state: dict[str, Any]) -> bool:
+    """Whether the saved ``day`` page of ``code``, ``width`` pixels wide, is
+    the blurry JPEG fallback that the PDF could replace: the rasteriser is
+    there and no PDF attempt for that edition has failed yet. Pages saved
+    before the PDF path existed are all of this kind, so today's are
+    redrawn once; older ones age out."""
+    return (
+        width is not None
+        and width < SHARP_MIN_WIDTH_PX
+        and rasteriser_available()
+        and _section(state, "jpeg_only").get(code) != day.isoformat()
+    )
 
 
 # ----- rotation --------------------------------------------------------------
@@ -959,7 +1143,9 @@ def _work(run: _Run) -> None:
 
 def _refresh(data_dir: Path, job: _Job) -> None:
     """One job: look at the state again (the render that queued it read it
-    before earlier jobs landed), download outside the lock, save under it."""
+    before earlier jobs landed), download outside the lock, save under it.
+    Today's page already saved as the blurry JPEG fallback is redrawn from
+    the PDF when that may now work (``_wants_sharper``)."""
     pages = data_dir / PAGES_DIR
     state_path = data_dir / STATE_FILE
     with _LOCK:
@@ -967,17 +1153,19 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if not job.force and _recently_checked(state, job.code, _wall()):
             return
         have = newest_page(pages, job.code, job.today)
-    if have is not None and have.day >= job.today:
+    current = have is not None and have.day >= job.today
+    sharpen = current and have is not None and _wants_sharper(job.code, have.day, have.width, state)
+    if current and not sharpen:
         return
     saved: tuple[date, bytes] | None = None
     failure = "missing"
     deadline = _clock() + JOB_BUDGET_S
     for back in range(LOOKBACK_DAYS):
         day = job.today - timedelta(days=back)
-        if have is not None and day <= have.day:
+        if have is not None and (day < have.day or (day == have.day and not sharpen)):
             break  # nothing older can beat an edition already kept
         try:
-            body = download_edition(job.code, day, deadline)
+            body = download_edition(job.code, day, deadline, pdf_only=sharpen)
         except Exception as err:  # CdnUnreachable, or the host refusing the egress
             logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
             failure = "unreachable"
@@ -985,6 +1173,16 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if body is not None:
             saved = (day, body)
             break
+    # The edition whose PDF failed, so it isn't tried again: a JPEG saved in
+    # its place, or a redraw that came to nothing. An outage isn't a failure
+    # of the PDF, and leaves the next job to try again.
+    blurry_day: date | None = None
+    if saved is not None and rasteriser_available():
+        size = page_size(saved[1])
+        if size is not None and size[0] < SHARP_MIN_WIDTH_PX:
+            blurry_day = saved[0]
+    elif sharpen and saved is None and failure != "unreachable" and have is not None:
+        blurry_day = have.day
     now = _wall()
     with _LOCK:
         if saved is not None:
@@ -1006,6 +1204,15 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if saved is None and have is None:
             failed[job.code] = failure
         state["failed"] = failed
+        oldest = (job.today - timedelta(days=LOOKBACK_DAYS)).isoformat()
+        jpeg_only = {
+            code: day
+            for code, day in _section(state, "jpeg_only").items()
+            if isinstance(day, str) and day >= oldest
+        }
+        if blurry_day is not None:
+            jpeg_only[job.code] = blurry_day.isoformat()
+        state["jpeg_only"] = jpeg_only
         _write_json(state_path, state)
 
 
@@ -1089,8 +1296,13 @@ def _select(
         due = [
             code
             for code in candidates
-            if not edition_path(pages, code, today).is_file()
-            and (force or not _recently_checked(state, code, now))
+            if (force or not _recently_checked(state, code, now))
+            and (
+                not edition_path(pages, code, today).is_file()
+                or _wants_sharper(
+                    code, today, _saved_width(edition_path(pages, code, today)), state
+                )
+            )
         ]
     finally:
         _LOCK.release()
@@ -1155,7 +1367,10 @@ def fetch(
     code, page = picked.chosen
     styles = {p.code: p.css for p in papers}
     payload: dict[str, Any] = {
-        "url": f"/plugins/{PLUGIN_ID}/page/{page.path.name}",
+        # The width tells a JPEG-fallback page from its sharp redraw, which
+        # replaces it under the same name: a browser holding the first (the
+        # route lets it keep a page a day) fetches the second.
+        "url": f"/plugins/{PLUGIN_ID}/page/{page.path.name}?w={page.width}",
         "code": code,
         "date": page.day.isoformat(),
         "width": page.width,
