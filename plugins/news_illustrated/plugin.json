@@ -1,0 +1,190 @@
+{
+  "tesserae_compat": "1.x",
+  "name": "News, AI Illustrated",
+  "version": "0.1.0",
+  "kind": "widget",
+  "locales": ["en"],
+  "description": "AI News: once a day, the top story of each of your feeds, summarised by Groq and drawn as a satirical ink cartoon (kie.ai, Gemini, Pollinations or HuggingFace). Shows one story at a time, poster style, moving to the next on each refresh.",
+  "icon": "ph-newspaper-clipping",
+  "category": "reading",
+  "supports": {
+    "sizes": ["xs", "sm", "md", "lg"]
+  },
+  "cell_options": [
+    {
+      "name": "show_summary",
+      "type": "boolean",
+      "label": "Summary",
+      "default": true,
+      "help": "The story's summary under the headline, where the cell has room for it."
+    },
+    {
+      "name": "show_source",
+      "type": "boolean",
+      "label": "Source and date",
+      "default": true,
+      "help": "The feed's label, the story's date and which story of how many."
+    }
+  ],
+  "settings": [
+    {
+      "name": "sources",
+      "type": "textarea",
+      "label": "Sources",
+      "rows": 4,
+      "default": "Tech | https://hnrss.org/frontpage?points=100\nBusiness | https://feeds.bbci.co.uk/news/business/rss.xml\nGlobal | https://feeds.bbci.co.uk/news/world/rss.xml",
+      "help": "One feed per line, as Label | feed URL (RSS or Atom). Each feed gives one story a day: its newest item."
+    },
+    {
+      "name": "run_at",
+      "type": "time",
+      "label": "Daily at",
+      "default": "06:05",
+      "help": "New stories are made at the first panel render after this time (the server's time zone). For an exact time, turn on the placement's daily refresh at the same time."
+    },
+    {
+      "name": "groq_api_key",
+      "type": "string",
+      "label": "Groq API key",
+      "secret": true,
+      "default": "",
+      "help": "Writes the summaries. Without it a story shows the opening words of the article."
+    },
+    {
+      "name": "kie_api_key",
+      "type": "string",
+      "label": "kie.ai API key",
+      "secret": true,
+      "default": "",
+      "help": "Image providers are tried in turn (kie.ai, Gemini, Pollinations, HuggingFace, or the order under More options) and the first picture wins. Leave a key blank to skip that provider."
+    },
+    {
+      "name": "gemini_api_key",
+      "type": "string",
+      "label": "Gemini API key",
+      "secret": true,
+      "default": ""
+    },
+    {
+      "name": "pollinations_api_key",
+      "type": "string",
+      "label": "Pollinations API key",
+      "secret": true,
+      "default": ""
+    },
+    {
+      "name": "huggingface_api_key",
+      "type": "string",
+      "label": "HuggingFace token",
+      "secret": true,
+      "default": ""
+    },
+    {
+      "name": "summary_words",
+      "type": "number",
+      "label": "Summary words",
+      "default": 70,
+      "min": 10,
+      "max": 300,
+      "help": "About how long each summary is. Short articles get shorter summaries."
+    },
+    {
+      "name": "provider_order",
+      "type": "string",
+      "label": "Image provider order",
+      "default": "kie, gemini, pollinations, huggingface",
+      "advanced": true,
+      "help": "Any of kie, gemini, pollinations and huggingface, comma separated. A story's picture has 150 seconds across all of them."
+    },
+    {
+      "name": "summary_prompt",
+      "type": "textarea",
+      "label": "Summary prompt",
+      "rows": 3,
+      "advanced": true,
+      "default": "Summarize this news story in about {words} words. Use simple, plain language that anyone can understand. No jargon, no bullet points, no headers — just clear flowing sentences.",
+      "help": "{words} is the summary length. Rules against inventing facts are always added."
+    },
+    {
+      "name": "image_prompt",
+      "type": "textarea",
+      "label": "Illustration prompt",
+      "rows": 6,
+      "advanced": true,
+      "default": "Draw a black and white comic illustration. The comic should be a witty/funny observation or ironic comment on this specific news story like Far Side. Think: what is the absurd or ironic none spoken truth hiding inside this story? Show that moment. Characters should be consistent across all panels, right amount of hands, legs etc. Black and white ink art, bold outlines, dramatic composition, crosshatching for shading. CRITICAL: the ratio should be 9:16, leave the bottom 10% of the image completely empty — no characters, objects, speech bubbles, or any detail whatsoever in that zone. Story for the comic: {summary}.",
+      "help": "For kie.ai and Gemini; {title} and {summary} are filled in. Pollinations and HuggingFace get a short prompt of their own, which suits FLUX better."
+    },
+    {
+      "name": "groq_model",
+      "type": "string",
+      "label": "Groq model",
+      "default": "openai/gpt-oss-120b",
+      "advanced": true
+    },
+    {
+      "name": "kie_model",
+      "type": "string",
+      "label": "kie.ai model",
+      "default": "google/nano-banana",
+      "advanced": true
+    },
+    {
+      "name": "gemini_model",
+      "type": "string",
+      "label": "Gemini model",
+      "default": "gemini-2.5-flash-image",
+      "advanced": true
+    },
+    {
+      "name": "pollinations_model",
+      "type": "string",
+      "label": "Pollinations model",
+      "default": "flux",
+      "advanced": true
+    },
+    {
+      "name": "huggingface_model",
+      "type": "string",
+      "label": "HuggingFace model",
+      "default": "black-forest-labs/FLUX.1-schnell",
+      "advanced": true
+    }
+  ],
+  "requires": [
+    "network:*",
+    "settings:plugin"
+  ],
+  "render": {
+    "needs_network": true,
+    "full_bleed": true,
+    "dither": "floyd-steinberg",
+    "warm_ahead_s": 150
+  },
+  "updates": {
+    "on_schedule": [
+      { "kind": "daily", "suggested_at": "06:05" }
+    ]
+  },
+  "design": {
+    "palette": "extended"
+  },
+  "data_schema": {
+    "color": "#1F1F1F",
+    "fields": [
+      { "name": "title", "type": "str", "label": "Headline" },
+      { "name": "summary", "type": "str", "label": "Summary" },
+      { "name": "source", "type": "str", "label": "Source" },
+      { "name": "date", "type": "str", "label": "Date" },
+      { "name": "image", "type": "str", "label": "Illustration URL" },
+      { "name": "url", "type": "str", "label": "Article link" }
+    ],
+    "sample": {
+      "title": "Ukraine says Starlink connection 'now stable' after network limits",
+      "summary": "Ukraine's defence minister said the country now has a stable Starlink connection after days of limited satellite internet that hampered military operations.",
+      "source": "Global",
+      "date": "2026-10-24",
+      "image": "",
+      "url": "https://www.bbc.co.uk/news/articles/cwkg5md14j8go"
+    }
+  }
+}

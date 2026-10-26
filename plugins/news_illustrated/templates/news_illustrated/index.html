@@ -1,0 +1,86 @@
+{% extends "_base.html" %}
+{% from "_components.html" import card_head, button, empty_state %}
+{% block title %}AI News, Tesserae{% endblock %}
+
+{% block main %}
+<div class="page-head">
+  <h1><i class="ph-bold ph-newspaper-clipping" aria-hidden="true"></i> AI News</h1>
+  <p class="page-blurb">One story a day from each of your feeds, summarised and drawn as an ink cartoon. Panels show one story at a time and move to the next on each refresh. Keys, feeds and prompts are under <a href="{{ settings_url }}">this widget's settings</a>.</p>
+</div>
+
+<section class="card">
+  {{ card_head('Making stories', icon_name='clock', level=2) }}
+  <p class="lede">
+    {% if running %}
+      A run is going now; the job tray shows which story it is on.
+    {% elif edition_done %}
+      Today's stories are made. The next run is after {{ cfg.run_at }} tomorrow.
+    {% else %}
+      Today's stories are made at the first panel render after {{ cfg.run_at }}.
+    {% endif %}
+  </p>
+  <p class="field-help">
+    Summaries: {{ 'Groq (' ~ cfg.groq_model ~ ')' if cfg.groq_key else 'no Groq key, so the opening words of each article' }}.
+    Pictures: {{ cfg.painters_ready | join(', ') if cfg.painters_ready else 'no provider has a key, so stories are text only' }}.
+  </p>
+  <div class="actions">
+    {% if running %}
+      <form method="post" action="{{ url_for('news_illustrated_admin.stop') }}">
+        {{ button('Stop', variant='secondary', icon='stop') }}
+      </form>
+    {% else %}
+      <form method="post" action="{{ url_for('news_illustrated_admin.run_now') }}"
+            onsubmit="return confirm('Make new stories now? Each picture is a paid call to the image provider.');">
+        {{ button('Generate now', icon='sparkle') }}
+      </form>
+    {% endif %}
+  </div>
+</section>
+
+<section class="card">
+  {{ card_head('Stories', icon_name='newspaper', level=2) }}
+  {% if stories %}
+  <div class="ain-grid">
+    {% for s in stories %}
+    <article class="ain-story">
+      {% if s.image %}
+        <img src="{{ url_for('news_illustrated_admin.image', name=s.image) }}" alt="" loading="lazy">
+      {% else %}
+        <div class="ain-noart"><i class="ph ph-image" aria-hidden="true"></i> No picture</div>
+      {% endif %}
+      <p class="field-help"><strong>{{ s.source }}</strong> · {{ s.date }}{% if s.provider %} · {{ s.provider }}{% endif %}</p>
+      <h3>{% if s.url and s.url.startswith(('http://', 'https://')) %}<a href="{{ s.url }}" rel="noopener noreferrer" target="_blank">{{ s.title }}</a>{% else %}{{ s.title }}{% endif %}</h3>
+      <p>{{ s.summary }}</p>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+    {{ empty_state('newspaper-clipping', 'No stories yet', 'They are made at the first panel render after ' ~ cfg.run_at ~ ', or now with Generate now.') }}
+  {% endif %}
+</section>
+
+{% if last %}
+<section class="card">
+  {{ card_head('Last run', icon_name='list-checks', level=2) }}
+  <p class="lede">
+    {{ 'By hand' if last.reason == 'manual' else 'Scheduled' }}, {{ when(last.started) }} to {{ when(last.finished) }}:
+    {{ last.outcome or 'nothing made' }}{% if last.stopped %} (stopped){% endif %}.
+  </p>
+  {% if last.log %}
+  <details>
+    <summary>Log</summary>
+    <pre class="ain-log">{{ last.log | join('\n') }}</pre>
+  </details>
+  {% endif %}
+</section>
+{% endif %}
+
+<style>
+  .ain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1.25rem; }
+  .ain-story img, .ain-noart { display: block; width: 100%; aspect-ratio: 9 / 16; object-fit: contain; background: #000; }
+  .ain-noart { display: grid; place-items: center; color: #bbb; }
+  .ain-story h3 { margin: 0.25rem 0; font-size: 1rem; }
+  .ain-story p { margin: 0.25rem 0; }
+  .ain-log { white-space: pre-wrap; font-size: 0.8rem; max-height: 28rem; overflow: auto; }
+</style>
+{% endblock %}
