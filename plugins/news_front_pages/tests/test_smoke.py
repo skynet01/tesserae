@@ -1678,3 +1678,19 @@ def test_the_downloads_card_sums_up_the_state_and_lists_the_log(tmp_path: Path) 
         "log": [],
     }
 
+
+def test_the_admin_page_is_newspapers_and_shows_the_log(app: Flask, client: FlaskClient) -> None:
+    plugin = app.config["PLUGIN_REGISTRY"].get("news_front_pages")
+    assert plugin.name == "News, Front Pages"  # the widget keeps its name
+    assert plugin.admin_title == "Newspapers"
+    server._write_json(
+        Path(plugin.data_dir) / "state.json",
+        {"log": [{"at": time.time(), "code": "WSJ", "text": "2026-10-25: JPG, 700 px <b>"}]},
+    )
+    body = client.get("/plugins/news_front_pages/").get_data(as_text=True)
+    assert "Newspapers, Tesserae</title>" in body
+    assert re.search(r"<h1>.*Newspapers</h1>", body)
+    assert re.search(r'href="/plugins/news_front_pages/">\s*<i[^>]*></i>Newspapers\s*</a>', body)
+    downloads = body[body.index('id="downloads"') :]
+    assert "data-log-tail" in downloads
+    assert "WSJ  2026-10-25: JPG, 700 px &lt;b&gt;" in downloads

@@ -222,6 +222,9 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   objects, or `None`), and the next save stores them. Until then the old
   value is what `fetch()` gets, so read both shapes.
 * **`icon`**, Phosphor name used in the editor's widget picker.
+* **`admin_title`**, optional: what the Widgets menu's Admin pages list calls
+  the widget's admin page, when that should differ from `name` (News, Front
+  Pages has its admin page listed as "Newspapers"). Defaults to `name`.
 * **`name`**, shown in the widget picker. Widgets that belong to a family
   are named `Family, Item` ("Weather, Now", "GitHub, Streak"), and the
   picker shows the item in bold after the muted family. A widget on its own

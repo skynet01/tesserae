@@ -25,6 +25,11 @@
     "description": {
       "type": "string"
     },
+    "admin_title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What the Widgets menu's Admin pages list and the admin page itself call the plugin's admin page, when that should differ from name (e.g. 'Newspapers' for 'News, Front Pages'). Defaults to name."
+    },
     "icon": {
       "type": "string",
       "description": "Phosphor icon class (e.g. 'ph-list-checks').",

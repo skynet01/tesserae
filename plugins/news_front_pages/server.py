@@ -1633,7 +1633,7 @@ def fetch(
         return {"error": f"'{pinned_raw[:60]}' isn't a Freedom Forum paper code."}
     candidates = [pinned] if pinned else [p.code for p in papers if p.enabled]
     if not candidates:
-        where = "under Settings → Widgets → News, Front Pages"
+        where = "under Widgets → Admin pages → Newspapers"
         if papers:
             return {"error": f"Every paper in the list is switched off. Turn one on {where}."}
         return {"error": f"No papers to show. Add paper codes {where}."}
@@ -1849,7 +1849,7 @@ def downloads_view(data_dir: Path, tz: tzinfo | None) -> dict[str, Any]:
 RENDER_SAFE_ENDPOINTS: tuple[str, ...] = (f"{PLUGIN_ID}.serve_page",)
 
 
-# Settings and controls belong together under Widgets > Admin pages.
+# Settings and controls belong together under Widgets > Admin pages > Newspapers.
 ADMIN_SETTINGS = True
 
 

@@ -229,7 +229,7 @@
           <div class="nav-dropdown-sep">Admin pages</div>
           {% for p in nav_admin_plugins %}
           <a class="nav-dropdown-link" href="{{ request.script_root }}/plugins/{{ p.id }}/">
-            <i class="ph ph-{{ p.manifest.get('icon', 'ph-puzzle-piece').removeprefix('ph-') }}" aria-hidden="true"></i>{{ p.name }}
+            <i class="ph ph-{{ p.manifest.get('icon', 'ph-puzzle-piece').removeprefix('ph-') }}" aria-hidden="true"></i>{{ p.admin_title }}
           </a>
           {% endfor %}
           {% else %}

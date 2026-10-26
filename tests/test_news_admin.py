@@ -82,3 +82,8 @@ def test_ai_settings_are_folded_right_above_the_last_run(app, client):
     assert between.count("<section") == 1  # nothing sits between the two cards
     assert "data-log-tail" in body[body.index('id="last-run"') :]
 
+
+def test_an_admin_page_is_titled_like_its_widget_unless_it_says_otherwise(app):
+    registry = app.config["PLUGIN_REGISTRY"]
+    assert registry.get("news_illustrated").admin_title == "News, AI Illustrated"
+    assert registry.get("news_front_pages").admin_title == "Newspapers"

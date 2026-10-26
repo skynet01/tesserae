@@ -157,6 +157,13 @@ class Plugin:
         return name
 
     @property
+    def admin_title(self) -> str:
+        """What the Widgets menu and the admin page call the plugin's admin
+        page: the manifest's ``admin_title``, else its name."""
+        title = self.manifest.get("admin_title")
+        return title.strip() if isinstance(title, str) and title.strip() else self.name
+
+    @property
     def supported_sizes(self) -> list[str]:
         sizes = self.manifest["supports"]["sizes"]
         assert isinstance(sizes, list)
