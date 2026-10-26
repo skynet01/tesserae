@@ -1136,3 +1136,44 @@ def test_lineup_select_and_next_prev_agree_on_the_followed_lineup(tmp_path: Path
     assert both() == ("late", "late")
     decks.upsert(_deck(id="late", name="Late", enabled=False, device_ids=[]))
     assert both() == ("breakfast", "breakfast")  # no longer binds the display
+
+
+def test_teardown_uses_recorded_ownership_not_object_ids(tmp_path: Path) -> None:
+    # ``a``'s Next change sensor is ``dev_a_next_change``, which reads like
+    # an entity of a display called ``a_next``; removing either display must
+    # take exactly its own entities.
+    scheduler = MagicMock()
+    scheduler.upcoming_for_device.return_value = []
+    registry = _FakeRegistry([_FakeDevice("a", "A"), _FakeDevice("a_next", "A next")])
+    ha, client, _pm, _ = _wire(tmp_path, devices=registry, hooks=HaHooks(scheduler=scheduler))
+    ha.start()
+    ha.note_device_heartbeat("a", {"battery_pct": 50})
+    ha.note_device_heartbeat("a_next", {"battery_pct": 60})
+    assert ha._config_owner[("sensor", "dev_a_next_change")] == "a"
+    assert ha._config_owner[("sensor", "dev_a_next_battery")] == "a_next"
+
+    del registry._d["a"]
+    client.published.clear()
+    ha.refresh_entity_configs()
+    blanked = _blanked(client)
+    assert "homeassistant/sensor/tesserae/dev_a_next_change/config" in blanked
+    assert "homeassistant/sensor/tesserae/dev_a_battery/config" in blanked
+    assert "homeassistant/image/tesserae/dev_a_next_frame/config" not in blanked
+    assert "homeassistant/sensor/tesserae/dev_a_next_battery/config" not in blanked
+    assert set(ha._config_owner.values()) == {"a_next"}
+
+
+def test_removing_the_longer_id_spares_the_shorter_ones_lookalikes(tmp_path: Path) -> None:
+    scheduler = MagicMock()
+    scheduler.upcoming_for_device.return_value = []
+    registry = _FakeRegistry([_FakeDevice("a", "A"), _FakeDevice("a_next", "A next")])
+    ha, client, _pm, _ = _wire(tmp_path, devices=registry, hooks=HaHooks(scheduler=scheduler))
+    ha.start()
+    del registry._d["a_next"]
+    client.published.clear()
+    ha.refresh_entity_configs()
+    blanked = _blanked(client)
+    assert "homeassistant/image/tesserae/dev_a_next_frame/config" in blanked
+    # ``a``'s own sensor survives although its id starts with ``dev_a_next_``.
+    assert "homeassistant/sensor/tesserae/dev_a_next_change/config" not in blanked
+    assert ("sensor", "dev_a_next_change") in ha._published_configs

@@ -855,6 +855,9 @@ class HomeAssistantDiscovery:
         # Every (component, object_id) config we've published this session,
         # so teardown never has to enumerate entity kinds by hand.
         self._published_configs: set[tuple[str, str]] = set()
+        # (component, object_id) -> device id, for every per-display config,
+        # recorded at publish time so teardown never guesses from ids.
+        self._config_owner: dict[tuple[str, str], str] = {}
         self._stop_event = threading.Event()
         self._ticker: threading.Thread | None = None
 
@@ -1061,6 +1064,7 @@ class HomeAssistantDiscovery:
         self._published_device_ids.clear()
         self._published_dyn.clear()
         self._published_configs.clear()
+        self._config_owner.clear()
         self._publish_str(AVAILABILITY_TOPIC, "offline", retain=True)
 
     def refresh_entity_configs(self) -> None:
@@ -1212,7 +1216,7 @@ class HomeAssistantDiscovery:
                 topic, payload = build_dynamic_sensor_config(
                     device_id, device.display_name, self._device_model(device), key
                 )
-                self._publish_config(topic, payload)
+                self._publish_config(topic, payload, owner=device_id)
                 self._published_dyn.add((device_id, key))
             self._publish_str(_dev_state(device_id, spec["object"]), str(value), retain=True)
         self._publish_low_battery(device_id, device, adjusted.get("battery_pct"))
@@ -1233,7 +1237,7 @@ class HomeAssistantDiscovery:
             topic, payload = build_low_battery_config(
                 device_id, device.display_name, self._device_model(device)
             )
-            self._publish_config(topic, payload)
+            self._publish_config(topic, payload, owner=device_id)
             self._published_dyn.add((device_id, "low_battery"))
         self._publish_str(
             _dev_state(device_id, "low_battery"),
@@ -1845,7 +1849,7 @@ class HomeAssistantDiscovery:
             if isinstance(predicted, (int, float)):
                 if (device_id, "next_wake") not in self._published_dyn:
                     topic, payload = build_next_wake_config(device_id, name, model)
-                    self._publish_config(topic, payload)
+                    self._publish_config(topic, payload, owner=device_id)
                     self._published_dyn.add((device_id, "next_wake"))
                 self._publish_str(_dev_state(device_id, "next_wake"), _iso(predicted), retain=True)
 
@@ -1855,7 +1859,7 @@ class HomeAssistantDiscovery:
                 topic, payload = build_wake_interval_config(
                     device_id, name, model, minimum=bounds[0], maximum=bounds[1]
                 )
-                self._publish_config(topic, payload)
+                self._publish_config(topic, payload, owner=device_id)
                 self._published_dyn.add((device_id, "wake_interval"))
             current: Any = None
             with contextlib.suppress(Exception):
@@ -1871,7 +1875,7 @@ class HomeAssistantDiscovery:
             if isinstance(info, dict) and info.get("capable"):
                 if (device_id, "firmware") not in self._published_dyn:
                     topic, payload = build_update_config(device_id, name, model)
-                    self._publish_config(topic, payload)
+                    self._publish_config(topic, payload, owner=device_id)
                     self._published_dyn.add((device_id, "firmware"))
                 installed = info.get("installed_version")
                 latest = info.get("latest_version") or installed
@@ -2057,7 +2061,7 @@ class HomeAssistantDiscovery:
         seen_devices = {str(d.id) for d in devices}
         removed = self._published_device_ids - seen_devices
         if removed:
-            self._blank_removed_device_configs(removed, seen_devices)
+            self._blank_removed_device_configs(removed)
         self._published_dyn = {pair for pair in self._published_dyn if pair[0] in seen_devices}
         lineup_names = sorted({str(d.name) for d in decks}) if self._hooks.deck_store else None
         # Entities that need a hook (or a setting) to do anything stay
@@ -2077,7 +2081,7 @@ class HomeAssistantDiscovery:
                     if (component, object_id) in self._published_configs:
                         self._blank_config(component, object_id)
                     continue
-                self._publish_config(topic, payload)
+                self._publish_config(topic, payload, owner=device_id)
         self._published_device_ids = seen_devices
 
     def _device_skip_leaves(self, lineups_on: bool) -> set[str]:
@@ -2101,24 +2105,21 @@ class HomeAssistantDiscovery:
             skip.update(("next", "prev"))
         return skip
 
-    def _blank_removed_device_configs(self, removed: set[str], live: set[str]) -> None:
-        """Blank every config owned by a removed display. A config belongs
-        to the longest known device id its object id starts with, so
-        removing ``a`` leaves ``a_b``'s ``dev_a_b_...`` entities alone."""
-        known = sorted(removed | live, key=len, reverse=True)
-        for component, object_id in sorted(self._published_configs):
-            if not object_id.startswith("dev_"):
-                continue
-            owner = next((d for d in known if object_id.startswith(f"dev_{d}_")), None)
+    def _blank_removed_device_configs(self, removed: set[str]) -> None:
+        """Blank every config a removed display owns. Ownership is recorded
+        when each config is published (``_publish_config(owner=...)``), not
+        read back from object ids, which can't tell ``a``'s
+        ``dev_a_next_change`` from an ``a_next`` display's entities."""
+        for (component, object_id), owner in sorted(self._config_owner.items()):
             if owner in removed:
                 self._blank_config(component, object_id)
 
     def _device_config_topics(self, device_id: str) -> list[str]:
-        prefix = f"dev_{device_id}_"
+        """Discovery topics of every config ``device_id`` owns."""
         return [
             _discovery_topic(component, object_id)
-            for component, object_id in sorted(self._published_configs)
-            if object_id.startswith(prefix)
+            for (component, object_id), owner in sorted(self._config_owner.items())
+            if owner == device_id
         ]
 
     def _seed_device_state(self) -> None:
@@ -2145,15 +2146,22 @@ class HomeAssistantDiscovery:
 
     # -- publish wrappers ----------------------------------------------
 
-    def _publish_config(self, topic: str, payload: dict[str, Any]) -> None:
-        """Publish a retained discovery config and remember its identity."""
+    def _publish_config(
+        self, topic: str, payload: dict[str, Any], *, owner: str | None = None
+    ) -> None:
+        """Publish a retained discovery config and remember its identity,
+        plus, for a per-display entity, the display that owns it."""
         parts = topic.split("/")
         if len(parts) >= 4:
-            self._published_configs.add((parts[1], parts[3]))
+            key = (parts[1], parts[3])
+            self._published_configs.add(key)
+            if owner is not None:
+                self._config_owner[key] = owner
         self._publish_json(topic, payload, retain=True)
 
     def _blank_config(self, component: str, object_id: str) -> None:
         self._published_configs.discard((component, object_id))
+        self._config_owner.pop((component, object_id), None)
         self._publish_str(_discovery_topic(component, object_id), "", retain=True)
 
     def _publish_json(self, topic: str, payload: dict[str, Any], *, retain: bool = True) -> None:
