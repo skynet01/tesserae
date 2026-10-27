@@ -309,6 +309,9 @@ def create_app(
     # private ranges (comma-separated CIDRs). Merged with the Settings UI
     # list at request time; see app.auth._is_private_client.
     app.config["TRUSTED_NETWORKS"] = os.environ.get("TESSERAE_TRUSTED_NETWORKS", "").strip()
+    # Extra proxy peers allowed to supply forwarding/ingress metadata. This
+    # does not grant client access; TRUSTED_NETWORKS controls that separately.
+    app.config["TRUSTED_PROXIES"] = os.environ.get("TESSERAE_TRUSTED_PROXIES", "").strip()
 
     class _IngressPrefixMiddleware:
         """Read the public path HA Supervisor proxied this request from
@@ -409,7 +412,7 @@ def create_app(
         )
 
     class _TrustedProxyMiddleware:
-        """Accept proxy metadata only from the existing loopback/LAN peers.
+        """Accept proxy metadata from private peers or configured proxy CIDRs.
 
         Run before ProxyFix, the Public URL origin capture and HA ingress.
         Host/proto now participate in provenance checks, so they need the
@@ -422,7 +425,9 @@ def create_app(
         def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
             from app.auth import peer_may_forward
 
-            if not peer_may_forward(environ.get("REMOTE_ADDR")):
+            if not peer_may_forward(
+                environ.get("REMOTE_ADDR"), app.config.get("TRUSTED_PROXIES", "")
+            ):
                 for header in (
                     "HTTP_X_FORWARDED_FOR",
                     "HTTP_X_FORWARDED_HOST",

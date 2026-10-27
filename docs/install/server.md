@@ -60,8 +60,25 @@ URL origin are both accepted, so direct LAN forms keep working with a Public
 URL configured. Proxies must preserve the browser's provenance headers and
 supply the correct forwarded scheme, host and port.
 Forwarded client, host, scheme, port and prefix headers, including HA's ingress
-header, are accepted only from loopback or LAN peers, using the existing proxy
-peer policy. `TESSERAE_FORWARDED_HOPS` still controls how many proxy hops are read.
+header, are accepted only from trusted proxy peers. The defaults remain loopback
+(`127.0.0.0/8`, `::1/128`), private IPv4 (`10.0.0.0/8`, `172.16.0.0/12`,
+`192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`) and IPv6 ULA
+(`fc00::/7`). `TESSERAE_FORWARDED_HOPS` still controls how many proxy hops are read.
+
+Add public IPv6, CGNAT or VPN proxies with the separate comma-separated
+`TESSERAE_TRUSTED_PROXIES` environment variable, set before starting the server
+(or in the container's environment). For example:
+
+```sh
+export TESSERAE_TRUSTED_PROXIES='2001:db8::10/128,100.64.1.2/32'
+```
+
+These CIDRs add to the defaults; empty or unset adds nothing. Invalid CIDRs and
+universal `/0` ranges are ignored with a warning. Trust is matched against the
+direct connection peer before forwarded headers are read. This option trusts
+proxy metadata only: it does not authorise clients. The Authentication setting
+**Trusted networks** and `TESSERAE_TRUSTED_NETWORKS` remain separate client
+authorisation rules and never grant proxy trust.
 
 For compatibility, requests with all three provenance headers missing are
 allowed. Their provenance cannot be checked; when a session cookie is present,

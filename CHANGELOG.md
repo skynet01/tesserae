@@ -26,6 +26,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Token-free loopback MCP requests reject cross-origin browser mutations;
   native header-less bridges keep working, and an explicit valid MCP token
   permits independently authenticated cross-origin clients.
+- `TESSERAE_TRUSTED_PROXIES` adds reverse-proxy CIDRs outside the private
+  defaults, including public IPv6 and CGNAT/VPN addresses, independently of
+  client authorisation through Trusted networks.
 
 ## [0.480.1], 2026-10-26
 
