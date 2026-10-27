@@ -692,17 +692,26 @@ def ensure_settings(hint: dict[str, Any] | None = None) -> dict[str, Any] | None
     store, plugin = host
     fields = plugin.manifest.get("settings", [])
     saved = (store.get_section("plugins") or {}).get(PLUGIN_ID)
-    if not isinstance(saved, dict) or "strips" not in saved:
-        defaults = {f["name"]: f.get("default") for f in fields if "name" in f}
-        source = _first_cell_options() or (hint if hint and customised(hint) else None)
-        values = seed_values(source, defaults)
-        if isinstance(saved, dict):
-            values.update({k: v for k, v in saved.items() if k in defaults})
-        store.update_for_namespace("plugins", PLUGIN_ID, values, fields)
-        logger.info(
-            "comics_daily: settings seeded from %s", "a cell's options" if source else "defaults"
-        )
-    result: dict[str, Any] = store.get_for_runtime("plugins", PLUGIN_ID, fields)
+    if isinstance(saved, dict) and "strips" in saved:
+        result: dict[str, Any] = store.get_for_runtime("plugins", PLUGIN_ID, fields)
+        return result
+    defaults = {f["name"]: f.get("default") for f in fields if "name" in f}
+    source = _first_cell_options() or (hint if hint and customised(hint) else None)
+    seeded = seed_values(source, defaults)
+
+    def seed(current: dict[str, Any], stored: set[str]) -> dict[str, Any] | None:
+        # Checked again under the store's lock: a save that got in first
+        # (the settings form, an upload, another render's seeding) stands.
+        if "strips" in stored:
+            return None
+        values = dict(seeded)
+        values.update({k: current[k] for k in stored if k in defaults})
+        return values
+
+    result = store.patch_for_namespace("plugins", PLUGIN_ID, fields, seed)
+    logger.info(
+        "comics_daily: settings seeded from %s", "a cell's options" if source else "defaults"
+    )
     return result
 
 
@@ -1833,16 +1842,46 @@ def _stored_rows(settings: dict[str, Any]) -> list[dict[str, Any]]:
     return [dict(row) for row in settings.get("strips") or [] if isinstance(row, dict)]
 
 
-def _save_rows(plugin: Any, rows: list[dict[str, Any]]) -> None:
-    """Store the strips setting, checked the way the settings form's save is."""
+def _patch_rows(
+    plugin: Any, change: Callable[[list[dict[str, Any]]], list[dict[str, Any]] | None]
+) -> bool:
+    """Change the strips setting in one step under the settings store's lock:
+    ``change`` gets the rows as stored now (not as they were when the request
+    began, which a slow download or another tab may have made stale) and
+    returns the new rows, or None to leave them. The rows are checked the
+    way the settings form's save is. True when they were written."""
     from app import repeater
 
     store = current_app.config["SETTINGS_STORE"]
     fields = plugin.manifest.get("settings", [])
     field = next(f for f in fields if f.get("name") == "strips")
-    values = store.get_for_runtime("plugins", PLUGIN_ID, fields)
-    values["strips"] = repeater.parse_rows(field, rows)
-    store.update_for_namespace("plugins", PLUGIN_ID, values, fields)
+    written: list[bool] = []
+
+    def patch(current: dict[str, Any], stored: set[str]) -> dict[str, Any] | None:
+        rows = change(_stored_rows(current))
+        if rows is None:
+            return None
+        written.append(True)
+        return {"strips": repeater.parse_rows(field, rows)}
+
+    store.patch_for_namespace("plugins", PLUGIN_ID, fields, patch)
+    return bool(written)
+
+
+def _set_row(
+    slug: str, **values: Any
+) -> Callable[[list[dict[str, Any]]], list[dict[str, Any]] | None]:
+    """A _patch_rows change setting ``values`` on the row for ``slug``, if
+    that row is still there."""
+
+    def change(rows: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        row = next((r for r in rows if r.get("slug") == slug), None)
+        if row is None:
+            return None
+        row.update(values)
+        return rows
+
+    return change
 
 
 def _back() -> Response:
@@ -1881,10 +1920,9 @@ def _keep_manual(
         )
 
     store.update(key, record)
-    row["mode"] = "upload"
-    if url:
-        row["image_url"] = url
-    _save_rows(plugin, rows)
+    switch = {"mode": "upload", **({"image_url": url} if url else {})}
+    if not _patch_rows(plugin, _set_row(slug, **switch)):
+        logger.info("comics_daily: %s left the list while its picture was kept", slug)
     label = str(row.get("label") or default_label(slug))
     detail = f"{picture.width}×{picture.height} px, {_size([stored])}"
     log_entry(store, label, origin.split()[0], f"{origin}: {detail}")
@@ -1986,8 +2024,7 @@ def blueprint() -> Blueprint:
         existing = next((row for row in rows if row.get("slug") == slug), None)
         if existing is not None:
             if not existing.get("enabled"):
-                existing["enabled"] = True
-                _save_rows(plugin, rows)
+                _patch_rows(plugin, _set_row(slug, enabled=True))
                 flash(f"{existing.get('label') or default_label(slug)} is switched back on.", "ok")
             else:
                 flash(
@@ -2032,10 +2069,16 @@ def blueprint() -> Blueprint:
                 label = outcome.label or label
             else:
                 warning = str(outcome)
-        rows.append(
-            {"enabled": True, "label": label, "slug": slug, "mode": "auto", "image_url": ""}
-        )
-        _save_rows(plugin, rows)
+        new_row = {"enabled": True, "label": label, "slug": slug, "mode": "auto", "image_url": ""}
+
+        def append(current: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+            if len(current) >= MAX_STRIPS or any(r.get("slug") == slug for r in current):
+                return None
+            return [*current, new_row]
+
+        if not _patch_rows(plugin, append):
+            flash(f"{label} wasn't added: the list changed meanwhile. Try again.", "warn")
+            return _back()
         log_entry(store, label, "added", f"added to the list as {slug}")
         if warning:
             flash(f"Added {label}, but it couldn't be fetched yet: {warning}", "warn")

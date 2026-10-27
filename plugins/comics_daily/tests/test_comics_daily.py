@@ -1464,3 +1464,59 @@ def test_a_huge_picture_is_refused_before_pillow_opens_it(
     with pytest.raises(ValueError):
         images.normalise(b"BM" + b"\x00" * 64)  # a BMP: not one of the four
     assert opened == []
+
+
+def _save_strips(client: FlaskClient, slugs: list[str]) -> None:
+    rows = [
+        {"enabled": True, "label": "", "slug": slug, "mode": "auto", "image_url": ""}
+        for slug in slugs
+    ]
+    resp = client.post("/settings/plugin-comics_daily", data={"strips": json.dumps(rows)})
+    assert resp.status_code == 302
+
+
+def test_seeding_never_overwrites_a_save_that_got_in_first(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(client)
+
+    def save_meanwhile() -> None:
+        # Another request saves the settings while this one is seeding.
+        _save_strips(client, ["dilbert", "peanuts"])
+        return None
+
+    monkeypatch.setattr(module, "_first_cell_options", save_meanwhile)
+    with client.application.test_request_context():
+        settings = module.ensure_settings()
+    assert [r["slug"] for r in settings["strips"]] == ["dilbert", "peanuts"]
+    assert [r["slug"] for r in _settings(client)["strips"]] == ["dilbert", "peanuts"]
+
+
+def test_an_import_does_not_bring_back_a_strip_removed_meanwhile(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import net_guard
+
+    client.get("/plugins/comics_daily/")
+
+    def slow_download(url: str, **kw: Any) -> tuple[bytes, str]:
+        # Garfield is removed in another tab while the picture downloads.
+        _save_strips(client, ["dilbert", "calvinandhobbes"])
+        return _png((300, 100)), "image/png"
+
+    monkeypatch.setattr(net_guard, "fetch_bytes", slow_download)
+    client.post(
+        "/plugins/comics_daily/strips/garfield/import", data={"url": "https://example.org/g.png"}
+    )
+    assert [r["slug"] for r in _settings(client)["strips"]] == ["dilbert", "calvinandhobbes"]
+
+
+def test_patch_for_namespace_is_one_step(app: Any) -> None:
+    store = app.config["SETTINGS_STORE"]
+    fields = [{"name": "n", "type": "number", "default": 0}]
+    for _ in range(5):
+        store.patch_for_namespace("plugins", "toy", fields, lambda cur, stored: {"n": cur["n"] + 1})
+    assert store.get_for_runtime("plugins", "toy", fields)["n"] == 5
+    seen: list[set[str]] = []
+    store.patch_for_namespace("plugins", "toy", fields, lambda cur, stored: seen.append(stored))
+    assert seen == [{"n"}]

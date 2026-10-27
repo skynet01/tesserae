@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -256,7 +256,11 @@ class SettingsStore:
         ``manifest_settings``, and strips the ``_secret`` suffix from any
         secret-flagged field so callers see them under their declared name.
         """
-        on_disk = self._get_item(namespace, item_id)
+        return self._runtime_values(self._get_item(namespace, item_id), manifest_settings)
+
+    def _runtime_values(
+        self, on_disk: dict[str, Any], manifest_settings: Iterable[dict[str, Any]]
+    ) -> dict[str, Any]:
         out: dict[str, Any] = {}
         for field in manifest_settings:
             name = str(field["name"])
@@ -315,28 +319,64 @@ class SettingsStore:
         Secret fields whose incoming value is ``SECRET_MASK`` are kept as
         their existing on-disk value (the UI displays masks, so a re-submit
         without changes shouldn't blow the secret away)."""
-        field_index = {str(f["name"]): f for f in manifest_settings}
         with self._lock:
-            ns = self._data.setdefault(namespace, {})
-            if not isinstance(ns, dict):
-                ns = {}
-                self._data[namespace] = ns
-            existing = ns.get(item_id, {})
-            if not isinstance(existing, dict):
-                existing = {}
-            merged: dict[str, Any] = dict(existing)
-            for name, value in values.items():
-                field = field_index.get(name)
-                if field is None:
-                    continue
-                is_secret = bool(field.get("secret"))
-                disk = _disk_key(name, secret=is_secret)
-                if is_secret and value == SECRET_MASK:
-                    # User left the masked value alone, don't overwrite.
-                    continue
-                merged[disk] = self._maybe_wrap(value) if is_secret else value
-            ns[item_id] = merged
-            self._flush()
+            self._write_values(namespace, item_id, values, manifest_settings)
+
+    def patch_for_namespace(
+        self,
+        namespace: str,
+        item_id: str,
+        manifest_settings: Iterable[dict[str, Any]],
+        change: Callable[[dict[str, Any], set[str]], dict[str, Any] | None],
+    ) -> dict[str, Any]:
+        """Read, change and write ``namespace.item_id`` as one step under the
+        store's lock, so two writers can't undo each other: ``change`` gets
+        the runtime values (defaults filled, secrets readable) and the names
+        actually stored, and returns the values to write, or None to leave
+        them. Returns the runtime values after it."""
+        fields = list(manifest_settings)
+        with self._lock:
+            on_disk = self._item_unlocked(namespace, item_id)
+            stored = {key.removesuffix("_secret") for key in on_disk}
+            values = change(self._runtime_values(on_disk, fields), stored)
+            if values:
+                self._write_values(namespace, item_id, values, fields)
+            return self._runtime_values(self._item_unlocked(namespace, item_id), fields)
+
+    def _item_unlocked(self, namespace: str, item_id: str) -> dict[str, Any]:
+        ns = self._data.get(namespace, {})
+        item = ns.get(item_id, {}) if isinstance(ns, dict) else {}
+        return dict(item) if isinstance(item, dict) else {}
+
+    def _write_values(
+        self,
+        namespace: str,
+        item_id: str,
+        values: dict[str, Any],
+        manifest_settings: Iterable[dict[str, Any]],
+    ) -> None:
+        """update_for_namespace's write; the caller holds the lock."""
+        field_index = {str(f["name"]): f for f in manifest_settings}
+        ns = self._data.setdefault(namespace, {})
+        if not isinstance(ns, dict):
+            ns = {}
+            self._data[namespace] = ns
+        existing = ns.get(item_id, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        merged: dict[str, Any] = dict(existing)
+        for name, value in values.items():
+            field = field_index.get(name)
+            if field is None:
+                continue
+            is_secret = bool(field.get("secret"))
+            disk = _disk_key(name, secret=is_secret)
+            if is_secret and value == SECRET_MASK:
+                # User left the masked value alone, don't overwrite.
+                continue
+            merged[disk] = self._maybe_wrap(value) if is_secret else value
+        ns[item_id] = merged
+        self._flush()
 
     def _get_item(self, namespace: str, item_id: str) -> dict[str, Any]:
         with self._lock:
