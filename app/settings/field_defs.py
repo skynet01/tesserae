@@ -321,26 +321,28 @@ APP_FIELDS: list[dict[str, Any]] = [
     {
         "name": "quiet_hours_days",
         "type": "days",
-        "label": "Window applies on",
+        "label": "Quiet window on",
         "default": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
         "group": "quiet_hours",
         "group_role": "dependent",
         "help": (
-            "Weekdays the start/end window is in force. Each day is judged by its "
-            "own clock: on a ticked day an overnight window covers that morning up "
-            "to the end time and that evening from the start time."
+            "The days the start to end window runs. Each day is judged by its own "
+            "clock: an overnight window covers that morning up to the end time and "
+            "that evening from the start time."
         ),
     },
     {
         "name": "quiet_hours_all_day",
         "type": "days",
-        "label": "Quiet all day",
+        "label": "Paused all day on",
         "default": [],
         "group": "quiet_hours",
         "group_role": "dependent",
         "help": (
-            "Weekdays that are quiet from midnight to midnight regardless of the "
-            "window, for example the weekend in an office that is closed."
+            "No scheduled or automatic pictures from midnight to midnight on these "
+            "days, whatever the window says (the weekend in an office that is "
+            "closed, say). Displays keep what they show, and sending one yourself "
+            "still works."
         ),
     },
     {
