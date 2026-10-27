@@ -1346,7 +1346,7 @@ def _build_device_section(store: Any, device: Device) -> dict[str, Any] | None:
         # that call ``button_actions.register`` at import time
         # show up in the help text automatically.
         # A device whose kind declares ``"buttons": false`` (a Visionect
-        # sign) gets none of it.
+        # Place & Play 32") gets none of it.
         "button_map_capable": buttons,
         "button_map_json": (_button_map_stored_json(store, device.id) if buttons else ""),
         "button_map_effective": (_button_map_effective_json(store, device.id) if buttons else ""),

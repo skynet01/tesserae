@@ -990,7 +990,7 @@ def test_admin_page_lists_strips_with_status_and_tools(client: FlaskClient) -> N
     assert f"/plugins/comics_daily/img/{name}" in today
     assert "needs a look: Garfield (blocked)" in today
     nav = body[: body.index("<main")]
-    assert re.search(r'href="/plugins/comics_daily/">\s*<i[^>]*></i>Comics\s*</a>', nav)
+    assert re.search(r'href="/plugins/comics_daily/"[^>]*>\s*<i[^>]*></i>Comics\s*</a>', nav)
 
 
 @pytest.mark.parametrize(

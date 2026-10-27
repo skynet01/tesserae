@@ -519,7 +519,7 @@ class _FakeButtonService:
 
 
 def test_a_device_with_no_buttons_and_no_touch_gets_no_input_entity(tmp_path: Path) -> None:
-    """A kind declaring ``"buttons": false`` and no touch (a Visionect sign)
+    """A kind declaring ``"buttons": false`` and no touch (a Place & Play 32")
     can never produce an input event: no Input entity, and the empty retained
     config clears one a previous session published."""
     svc = _FakeButtonService()

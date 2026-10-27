@@ -30,7 +30,7 @@ Either way works:
 
 The sign reports its own screen size when it connects, and Tesserae adopts it. A Joan 6 renders at 1024×758 and the 32" at 1440×2560, whichever model you picked. **Rotation** works as for any other device. On the 32", if the image arrives upside down, pick 270°.
 
-Visionect signs take no input in Tesserae: the 32" has no buttons or touch, and the touchscreens on the Joan and 9.7" models aren't used. So a sign's device page has no Controls section (no button map or touch monitor), and Home Assistant gets no Input entity for it.
+The Place & Play 32" has no buttons or touch, so its device page has no Controls section (no button map or touch monitor) and Home Assistant gets no Input entity for it.
 
 The device page shows whether Tesserae is listening and what the sign is doing: connected and showing the latest frame, asleep until a given time, or not connected yet. Tesserae only opens the port while at least one Visionect device exists. If the port is busy (VSS still running), the device page and the Add device tab say so, and Tesserae retries every half minute.
 

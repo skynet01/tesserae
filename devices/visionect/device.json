@@ -6,7 +6,6 @@
   "description": "A Visionect e-paper frame (Place & Play 32\", Joan, the 13\" boards) driven directly, with no Visionect Software Suite. The frame dials the server address in its flash on TCP 11113; Tesserae listens there, renders a 16-level grey picture and pushes it over the frame's own protocol (pyvisionect). Point the frame at this host: run Tesserae where the old Visionect server ran, or set the address over the frame's USB console. The protocol has no authentication, so keep port 11113 on your LAN. Leave the UUID blank to bind the first unknown frame that connects within an hour. Quiet hours with sleep-through put the frame into deep sleep until the window ends.",
   "renderers": ["trmnl_png_gray16"],
   "transport": "push",
-  "buttons": false,
   "panel": {
     "w": 1440,
     "h": 2560,

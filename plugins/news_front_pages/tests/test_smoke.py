@@ -1759,7 +1759,9 @@ def test_the_admin_page_is_newspapers_and_shows_the_log(app: Flask, client: Flas
     body = client.get("/plugins/news_front_pages/").get_data(as_text=True)
     assert "Newspapers, Tesserae</title>" in body
     assert re.search(r"<h1>.*Newspapers</h1>", body)
-    assert re.search(r'href="/plugins/news_front_pages/">\s*<i[^>]*></i>Newspapers\s*</a>', body)
+    assert re.search(
+        r'href="/plugins/news_front_pages/"[^>]*>\s*<i[^>]*></i>Newspapers\s*</a>', body
+    )
     fetches = body[body.index('id="fetches"') :]
     assert "data-log-tail" in fetches
     assert "WSJ  <span" in fetches

@@ -614,13 +614,16 @@ def test_every_config_save_checks_the_sign_binding_and_adding_arms_auto_bind(
     assert not section["spare"].get("uuid")
 
 
-def test_a_visionect_device_page_has_no_button_or_touch_controls(app: Flask) -> None:
-    """Visionect signs send Tesserae no button presses and no taps: their
-    device page has no Controls section (button map, touch monitor), while a
-    device that may have buttons keeps it."""
+def test_a_place_and_play_32_device_page_has_no_button_or_touch_controls(app: Flask) -> None:
+    """The Place & Play 32" has no buttons and no touch: its device page has
+    no Controls section (button map, touch monitor), while a device that may
+    have buttons keeps it."""
     client = app.test_client()
     _sign_in(client)
-    client.post("/settings/devices/add", data={"kind": "visionect", "id": "hall", "name": "Hall"})
+    client.post(
+        "/settings/devices/add",
+        data={"kind": "visionect_place_and_play_32", "id": "hall", "name": "Hall"},
+    )
     client.post(
         "/settings/devices/add", data={"kind": "esp32_client", "id": "attic", "name": "Attic"}
     )

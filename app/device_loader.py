@@ -542,7 +542,7 @@ def discover(
 def has_buttons(device: Any) -> bool:
     """Whether the device may send Tesserae button presses. ``"buttons":
     false`` in its kind's manifest or hardware entry says it can't (a
-    Visionect sign has none, and its protocol forwards none); absent means
+    Visionect Place & Play 32" has none); absent means
     it may, which is how every other device has always been treated."""
     manifest = getattr(device, "manifest", None)
     return not (isinstance(manifest, dict) and manifest.get("buttons") is False)

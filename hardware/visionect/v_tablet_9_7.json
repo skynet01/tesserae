@@ -19,8 +19,7 @@
     "native_w": 1200,
     "native_h": 825
   },
-  "buttons": false,
   "refresh_floor_s": 60,
   "image_format": "png",
-  "notes_md": "UNVERIFIED ON HARDWARE: the protocol and this panel geometry come from pyvisionect, which was verified on the 32\" sign only. The sign reports its own display type on connect and Tesserae adopts that buffer size, so a mismatch here corrects itself. Point the sign at Tesserae on TCP 11113 (the old Visionect server's address, or over its USB console with `server_tcp_set`). Touch isn't used: this model may have a touchscreen, but Tesserae takes no touch or button input from Visionect signs, so it is treated as display-only."
+  "notes_md": "UNVERIFIED ON HARDWARE: the protocol and this panel geometry come from pyvisionect, which was verified on the 32\" sign only. The sign reports its own display type on connect and Tesserae adopts that buffer size, so a mismatch here corrects itself. Point the sign at Tesserae on TCP 11113 (the old Visionect server's address, or over its USB console with `server_tcp_set`). Tesserae doesn't read this model's button or touch presses yet."
 }

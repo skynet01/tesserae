@@ -98,10 +98,9 @@ def test_catalog_models_load_on_the_visionect_protocol(tmp_path) -> None:
         assert (kind.panel["native_w"], kind.panel["native_h"]) == (w, h), kind_id
 
 
-def test_visionect_signs_declare_no_buttons_and_take_no_input(tmp_path) -> None:
-    """No Visionect device sends Tesserae button presses or taps (the 32"
-    has neither; the others' touchscreens aren't wired up), so none gets a
-    button map or a Home Assistant Input entity."""
+def test_only_the_place_and_play_32_declares_no_buttons(tmp_path) -> None:
+    """The Place & Play 32" has no buttons or touch, so it gets no button map
+    or Home Assistant Input entity. The other models keep the default."""
     from app.device_loader import has_buttons, has_touch, takes_input
     from app.hardware_catalog import apply_to_registry, discover_hardware
 
@@ -117,11 +116,8 @@ def test_visionect_signs_declare_no_buttons_and_take_no_input(tmp_path) -> None:
     apply_to_registry(registry, entries, data_root=tmp_path)
     kinds = ["visionect"] + [e.id for e in entries if e.protocol == "visionect"]
     assert len(kinds) == 6
+    p32 = registry.get("visionect_place_and_play_32")
+    assert not has_buttons(p32) and not has_touch(p32) and not takes_input(p32)
     for kind_id in kinds:
-        kind = registry.get(kind_id)
-        assert kind is not None, kind_id
-        assert not has_buttons(kind) and not has_touch(kind) and not takes_input(kind), kind_id
-    # The Place & Play boards state it as a hardware fact.
-    assert registry.get("visionect_place_and_play_32").manifest.get("touch") is False
-    # Everything else keeps the old default: buttons possible.
-    assert has_buttons(registry.get("esp32_client"))
+        if kind_id != "visionect_place_and_play_32":
+            assert has_buttons(registry.get(kind_id)), kind_id
