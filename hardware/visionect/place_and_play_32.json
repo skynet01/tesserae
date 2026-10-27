@@ -17,6 +17,8 @@
     "native_w": 1440,
     "native_h": 2560
   },
+  "buttons": false,
+  "touch": false,
   "refresh_floor_s": 60,
   "image_format": "png",
   "notes_md": "Confirmed on real hardware: a Place & Play 32 (HardwareNameID 8, firmware 6.17.4168) drew a frame pushed by pyvisionect with no Visionect server running. The sign dials the server address stored in its flash on TCP 11113, so either run Tesserae on the host the old Visionect server used, or set the address over the sign's micro-USB console (`server_tcp_set <ip> 11113`, then `flash_save`). The protocol has no authentication: keep 11113 on your LAN. If the image arrives upside down, set Rotation to 270° on the device page."

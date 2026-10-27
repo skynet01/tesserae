@@ -68,7 +68,7 @@ from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
 from app import background_loops
-from app.device_loader import DeviceRegistry
+from app.device_loader import DeviceRegistry, takes_input
 from app.push import PushManager, PushResult
 from app.state.page_store import PageStore
 from app.transport import MqttTransport
@@ -1923,7 +1923,11 @@ class HomeAssistantDiscovery:
                     continue
                 if object_id.endswith("_notify") and self._hooks.notify_fn is None:
                     continue
-                if object_id.endswith("_input") and self._hooks.button_service is None:
+                if object_id.endswith("_input") and (
+                    self._hooks.button_service is None or not takes_input(device)
+                ):
+                    if not takes_input(device):  # no buttons, no touch: drop an old one too
+                        self._blank_config(topic.split("/")[1], object_id)
                     continue
                 self._publish_config(topic, payload)
             seen_devices.add(device.id)

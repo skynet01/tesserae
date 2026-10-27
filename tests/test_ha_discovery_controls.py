@@ -498,6 +498,28 @@ class _FakeButtonService:
         self.listeners.remove(cb)
 
 
+def test_a_device_with_no_buttons_and_no_touch_gets_no_input_entity(tmp_path: Path) -> None:
+    """A kind declaring ``"buttons": false`` and no touch (a Visionect sign)
+    can never produce an input event: no Input entity, and the empty retained
+    config clears one a previous session published."""
+    svc = _FakeButtonService()
+    sign = _FakeDevice("hall_sign", "Hall")
+    sign.manifest["buttons"] = False
+    tappable = _FakeDevice("kiosk", "Kiosk")
+    tappable.manifest.update(buttons=False, touch=True)
+    ha, client, _pm, _ = _wire(
+        tmp_path,
+        devices=_FakeRegistry([sign, tappable, _FakeDevice("lounge", "Lounge")]),
+        hooks=HaHooks(button_service=svc),
+    )
+    ha.start()
+    topic = "homeassistant/event/tesserae/dev_hall_sign_input/config"
+    published = [(p, retain) for t, p, _q, retain in client.published if t == topic]
+    assert published and all(p == b"" for p, _r in published)
+    assert _payload_for(client, "homeassistant/event/tesserae/dev_kiosk_input/config")
+    assert _payload_for(client, "homeassistant/event/tesserae/dev_lounge_input/config")
+
+
 def test_input_event_entity_publishes_non_retained_event(tmp_path: Path) -> None:
     svc = _FakeButtonService()
     ha, client, _pm, _ = _wire(

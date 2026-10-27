@@ -539,6 +539,27 @@ def discover(
     return registry
 
 
+def has_buttons(device: Any) -> bool:
+    """Whether the device may send Tesserae button presses. ``"buttons":
+    false`` in its kind's manifest or hardware entry says it can't (a
+    Visionect sign has none, and its protocol forwards none); absent means
+    it may, which is how every other device has always been treated."""
+    manifest = getattr(device, "manifest", None)
+    return not (isinstance(manifest, dict) and manifest.get("buttons") is False)
+
+
+def has_touch(device: Any) -> bool:
+    """Whether the device's panel takes taps Tesserae dispatches (``"touch":
+    true``; absent means display-only)."""
+    manifest = getattr(device, "manifest", None)
+    return isinstance(manifest, dict) and manifest.get("touch") is True
+
+
+def takes_input(device: Any) -> bool:
+    """Whether the device can produce any input event (a button or a tap)."""
+    return has_buttons(device) or has_touch(device)
+
+
 def colour_depths(kind_manifest: dict[str, Any]) -> dict[str, str]:
     """A kind's ``colour_depths`` catalog block (gamut -> renderer id),
     limited to renderers the kind offers. Empty for every kind without one."""

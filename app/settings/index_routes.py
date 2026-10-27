@@ -25,7 +25,7 @@ from app import firmware_check as firmware_check_module
 from app import install_id as install_id_module
 from app import updater as _updater_mod
 from app.button_actions import DEFAULT_BUTTON_MAP, registered_actions
-from app.device_loader import Device
+from app.device_loader import Device, has_buttons
 from app.ha_options import is_ha_addon
 from app.network import detect_local_ip, docker_bridge_ip_warning, is_docker_bridge_ip, url_host
 from app.panel import PANEL_PRESET_CHOICES, PANEL_PRESETS
@@ -1008,6 +1008,7 @@ def _build_device_section(store: Any, device: Device) -> dict[str, Any] | None:
     sid = f"device-{device.id}"
     fields = _visible_config_fields(device)
     is_instance = device.kind_of is not None
+    buttons = is_instance and has_buttons(device)
     # Picture-quality (dither / saturation / contrast) lives on the
     # clone renderer keyed ``<base_id>__<device_id>``, one clone
     # per renderer the device's kind consumes. Surface each clone's
@@ -1323,15 +1324,15 @@ def _build_device_section(store: Any, device: Device) -> dict[str, Any] | None:
         # from the runtime registry so third-party plugins
         # that call ``button_actions.register`` at import time
         # show up in the help text automatically.
-        "button_map_capable": is_instance,
-        "button_map_json": (_button_map_stored_json(store, device.id) if is_instance else ""),
-        "button_map_effective": (
-            _button_map_effective_json(store, device.id) if is_instance else ""
-        ),
-        "button_actions_available": (registered_actions() if is_instance else ()),
+        # A device whose kind declares ``"buttons": false`` (a Visionect
+        # sign) gets none of it.
+        "button_map_capable": buttons,
+        "button_map_json": (_button_map_stored_json(store, device.id) if buttons else ""),
+        "button_map_effective": (_button_map_effective_json(store, device.id) if buttons else ""),
+        "button_actions_available": (registered_actions() if buttons else ()),
         # ``page:<id>`` takes the page id, not its name (#379), so list
         # the ids next to the names they belong to.
-        "button_page_ids": (_button_page_ids() if is_instance else []),
+        "button_page_ids": (_button_page_ids() if buttons else []),
         # Per-device rotation view: every Schedule whose target
         # page binds to this device, sorted by window start.
         # Pure read view, each row deep-links to the Schedules
@@ -1393,6 +1394,9 @@ def _build_device_section(store: Any, device: Device) -> dict[str, Any] | None:
     section["touch_monitor_url"] = (
         url_for("touch_monitor.monitor", device_id=device.id) if section["touch"] else None
     )
+    # The Controls section (button map, touch monitor) only for a device
+    # that has one of them.
+    section["has_controls"] = bool(section["button_map_capable"] or section["touch_monitor_url"])
     section["push_now_endpoint"] = url_for("auth.devices_push_now", instance_id=device.id)
     section["overview"] = _device_overview(device, section)
     section["lineup_names"] = _lineup_names_for(device.id, section["timetable_entries"])

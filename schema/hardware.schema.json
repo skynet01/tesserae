@@ -85,6 +85,10 @@
       "type": "boolean",
       "description": "Whether this SKU's panel has a digitizer. A hardware fact, distinct from the firmware's touch_enabled config. Set true and Tesserae's touch dispatch and the editors' Interaction UI apply to the panel, and the device APIs report it so agents and the editor know it is tappable. Absent → not tappable."
     },
+    "buttons": {
+      "type": "boolean",
+      "description": "Whether this SKU can send Tesserae button presses. Set false for a panel with no physical buttons (or whose protocol forwards none): its device page shows no button map and Home Assistant gets no Input event entity for it. Absent → it may have buttons."
+    },
     "renderers": {
       "type": "array",
       "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },

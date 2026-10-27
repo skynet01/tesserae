@@ -540,3 +540,22 @@ def test_every_config_save_checks_the_sign_binding_and_adding_arms_auto_bind(
     assert "already bound to device &#39;hall_sign&#39;" in resp.get_data(as_text=True)
     section = app.config["SETTINGS_STORE"].get_section("devices")
     assert not section["spare"].get("uuid")
+
+
+def test_a_visionect_device_page_has_no_button_or_touch_controls(app: Flask) -> None:
+    """Visionect signs send Tesserae no button presses and no taps: their
+    device page has no Controls section (button map, touch monitor), while a
+    device that may have buttons keeps it."""
+    client = app.test_client()
+    _sign_in(client)
+    client.post("/settings/devices/add", data={"kind": "visionect", "id": "hall", "name": "Hall"})
+    client.post(
+        "/settings/devices/add", data={"kind": "esp32_client", "id": "attic", "name": "Attic"}
+    )
+    registry = app.config["DEVICE_REGISTRY"]
+    assert registry.get("attic") is not None
+    sign = client.get("/settings/devices/hall").get_data(as_text=True)
+    other = client.get("/settings/devices/attic").get_data(as_text=True)
+    assert 'id="controls"' not in sign and "Button map" not in sign
+    assert 'href="#controls"' not in sign
+    assert 'id="controls"' in other and "Button map" in other
