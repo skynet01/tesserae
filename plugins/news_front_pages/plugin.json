@@ -1,6 +1,6 @@
 {
   "tesserae_compat": "1.x",
-  "name": "News, Front Pages",
+  "name": "News, Newspapers",
   "version": "0.3.0",
   "kind": "widget",
   "admin_title": "Newspapers",

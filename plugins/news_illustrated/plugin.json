@@ -40,7 +40,7 @@
       "label": "Sources",
       "rows": 4,
       "default": "Tech | https://hnrss.org/frontpage?points=100\nBusiness | https://feeds.bbci.co.uk/news/business/rss.xml\nGlobal | https://feeds.bbci.co.uk/news/world/rss.xml",
-      "help": "One feed per line, as Label | feed address (RSS or Atom). Each feed gives one story a day: its newest. The label is the tag shown on the frame."
+      "help": "One feed per line, as Label | feed address (RSS or Atom). Each feed gives one story a day: its newest. The label is the tag shown on the frame. Feedspot (rss.feedspot.com) lists good feeds by topic."
     },
     {
       "name": "run_at",
