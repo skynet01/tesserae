@@ -7,6 +7,8 @@
 * ``state.json``: the last run (for the widget's page) and which day's
   edition is done.
 * ``cursor.json``: which story each placement showed last, for rotation.
+* ``frames.json``: the size of each placement that rendered lately, so the
+  pictures are drawn the shape of the frames that show them.
 * ``jobs.json``: a story whose run did not finish: its summary and any paid
   picture task still to collect, so the next run resumes it instead of
   paying for another.
@@ -37,6 +39,8 @@ STATE = "state.json"
 CURSOR = "cursor.json"
 LOCK = "run.lock"
 CURSOR_LOCK = "cursor.lock"
+FRAMES = "frames.json"
+FRAMES_LOCK = "frames.lock"
 JOBS = "jobs.json"
 IMAGES = "images"
 IMAGE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,80}\.jpg")
@@ -261,6 +265,65 @@ def pick(data_dir: Path, placement: str, count: int, *, advance: bool, now: floa
             with contextlib.suppress(OSError):
                 write_json(path, cursors)
         return index % count
+
+
+# ----------------------------------------------------------------------
+# Frame sizes
+# ----------------------------------------------------------------------
+
+# A placement's size is written again at most this often when unchanged, to
+# keep it from being forgotten; forgotten after FRAMES_KEEP_S unseen.
+FRAME_TOUCH_S = 86400
+FRAMES_KEEP_S = 30 * 86400
+MAX_FRAMES = 50
+
+
+def note_frame(data_dir: Path, placement: str, width: int, height: int, *, now: float) -> None:
+    """Remember that ``placement`` renders ``width`` x ``height``. Cheap when
+    nothing changed: one small read, no write."""
+    if width <= 0 or height <= 0:
+        return
+    path = Path(data_dir) / FRAMES
+    seen = _frames(path)
+    mine = seen.get(placement)
+    if (
+        isinstance(mine, dict)
+        and (mine.get("w"), mine.get("h")) == (width, height)
+        and _age(mine, now) < FRAME_TOUCH_S
+    ):
+        return
+    with FileLock(Path(data_dir) / FRAMES_LOCK):
+        seen = {k: v for k, v in _frames(path).items() if _age(v, now) < FRAMES_KEEP_S}
+        seen[placement] = {"w": int(width), "h": int(height), "at": now}
+        newest = sorted(seen.items(), key=lambda kv: float(kv[1].get("at") or 0))[-MAX_FRAMES:]
+        with contextlib.suppress(OSError):
+            write_json(path, dict(newest))
+
+
+def frame_sizes(data_dir: Path, now: float) -> list[tuple[int, int]]:
+    """The (width, height) of every placement seen in the last FRAMES_KEEP_S."""
+    out: list[tuple[int, int]] = []
+    for value in _frames(Path(data_dir) / FRAMES).values():
+        try:
+            width, height = int(value["w"]), int(value["h"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if _age(value, now) < FRAMES_KEEP_S and width > 0 and height > 0:
+            out.append((width, height))
+    return out
+
+
+def _age(value: Any, now: float) -> float:
+    """Seconds since a frame entry was written; infinite for a broken one."""
+    try:
+        return now - float(value.get("at") or 0)
+    except (AttributeError, TypeError, ValueError):
+        return float("inf")
+
+
+def _frames(path: Path) -> dict[str, Any]:
+    got = read_json(path, {})
+    return got if isinstance(got, dict) else {}
 
 
 # ----------------------------------------------------------------------
