@@ -1412,6 +1412,33 @@ def test_cookie_card_saves_encrypted_never_echoes_and_clears(client: FlaskClient
     assert "Not set" in body[body.index('id="cookies"') :]
 
 
+def test_cookie_card_shows_the_browser_check_session(client: FlaskClient) -> None:
+    """The session the built-in browser check saved shows as Saved, with
+    when it was last updated; never its value."""
+    client.get("/plugins/comics_daily/")
+    card = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    card = card[card.index('id="cookies"') :]
+    assert "None yet" in card and '<details class="dx-disclosure cx-paste" open>' in card
+    path = _store(client).root / "gocomics-cookies.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "www.gocomics.com\tFALSE\t/\tTRUE\t0\tbunny_shield_id_9\tsecretvalue\n"
+    )
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    card = body[body.index('id="cookies"') :]
+    assert "Saved</span>" in card and "last updated today at" in card
+    assert "secretvalue" not in body
+    assert '<details class="dx-disclosure cx-paste">' in card  # nothing to paste
+    # A shield cookie past its expiry reads as expired.
+    path.write_text(
+        "# Netscape HTTP Cookie File\n"
+        "www.gocomics.com\tFALSE\t/\tTRUE\t1000\tbunny_shield_id_9\tsecretvalue\n"
+    )
+    card = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    assert "Expired</span>" in card[card.index('id="cookies"') :]
+
+
 def test_renders_and_fetch_now_hand_the_cookies_to_the_worker(
     client: FlaskClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
