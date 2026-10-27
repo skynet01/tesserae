@@ -273,3 +273,58 @@ def payload(digest, base_url, *, settings):
     assert renderer is not None
     with pytest.raises(TypeError, match="url"):
         renderer.payload("abc", "http://x", settings={})
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        {
+            "name": "tokens",
+            "type": "repeater",
+            "label": "Tokens",
+            "secret": True,
+            "fields": [{"name": "token", "type": "string", "label": "Token"}],
+        },
+        {
+            "name": "tokens",
+            "type": "repeater",
+            "label": "Tokens",
+            "fields": [{"name": "token", "type": "string", "label": "Token", "secret": True}],
+        },
+        {"name": "rows", "type": "repeater", "label": "Rows", "fields": []},
+    ],
+    ids=["secret-repeater", "secret-sub-field", "no-fields"],
+)
+def test_a_bad_repeater_setting_keeps_a_renderer_from_loading(
+    tmp_path: Path, schema_path: Path, setting: dict
+) -> None:
+    """Renderer settings go through the same settings card as a widget's,
+    so a repeater declared there is checked the same way: a secret row
+    would otherwise sit in settings.json unencrypted."""
+    plugins_dir = tmp_path / "renderers"
+    plugins_dir.mkdir()
+    _write_renderer(plugins_dir, "rep_bin", {"settings": [setting]}, _VALID_BODY)
+    registry = renderer_loader.discover(
+        plugins_dir, schema_path=schema_path, data_root=tmp_path / "data"
+    )
+    assert registry.get("rep_bin") is None
+    assert any("repeater" in e.message or "fields" in e.message for e in registry.errors), [
+        e.message for e in registry.errors
+    ]
+
+
+def test_a_good_repeater_setting_loads_in_a_renderer(tmp_path: Path, schema_path: Path) -> None:
+    plugins_dir = tmp_path / "renderers"
+    plugins_dir.mkdir()
+    setting = {
+        "name": "rows",
+        "type": "repeater",
+        "label": "Rows",
+        "fields": [{"name": "host", "type": "string", "label": "Host"}],
+    }
+    _write_renderer(plugins_dir, "rep_bin", {"settings": [setting]}, _VALID_BODY)
+    registry = renderer_loader.discover(
+        plugins_dir, schema_path=schema_path, data_root=tmp_path / "data"
+    )
+    assert registry.errors == []
+    assert registry.get("rep_bin") is not None

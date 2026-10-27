@@ -2619,3 +2619,225 @@ input[type="range"].slider:focus::-moz-range-thumb {
   padding: 0;
   z-index: 1;
 }
+
+/* ----- Repeater (a list of rows of sub-fields) -----------------------
+   Drawn by ``repeater_field`` in templates/_components.html; Add, Remove
+   and the moves are wired by attachRepeaters in static/components.js.
+   Each row is a card: its sub-fields in a wrapping grid (a textarea takes
+   the full width), the row's buttons in a column on the right. */
+
+.repeater-list {
+  display: grid;
+  gap: var(--t-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.repeater-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--t-space-2);
+  padding: var(--t-space-2) var(--t-space-3);
+  background: var(--t-surface-soft);
+  border: 1px solid var(--t-border);
+  border-radius: var(--t-radius-sm);
+}
+.repeater-row-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  align-items: end;
+  gap: var(--t-space-2) var(--t-space-3);
+}
+.repeater-sub--textarea {
+  grid-column: 1 / -1;
+}
+/* Outranks the section body's input type (settings.css). */
+.field--repeater .repeater-sub textarea.is-mono {
+  font-family: var(--t-font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.repeater-row-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.repeater-btn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.field--repeater [aria-disabled="true"] {
+  opacity: 0.35;
+  cursor: default;
+  transform: none;
+}
+.repeater-empty {
+  margin: 0;
+  padding: var(--t-space-3);
+  font-size: var(--t-size-sm);
+  color: var(--t-muted);
+  background: var(--t-surface-soft);
+  border: 1px dashed var(--t-border);
+  border-radius: var(--t-radius-sm);
+  text-align: center;
+}
+.repeater-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--t-space-3);
+}
+.repeater-count {
+  font-size: var(--t-size-sm);
+  color: var(--t-muted);
+}
+/* A settings card spaces and rules off each .field; inside a row the
+   sub-fields sit in the row's grid instead. */
+.field.field--repeater .repeater-row .repeater-row-fields > .field.repeater-sub {
+  padding: 0;
+  margin: 0;
+  border-top: 0;
+}
+.field--repeater .repeater-row .repeater-sub > label {
+  margin-bottom: 4px;
+}
+.field--repeater .repeater-row .repeater-sub--boolean {
+  align-self: end;
+  padding-bottom: 6px;
+}
+@media (max-width: 640px) {
+  .repeater-row-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* List layout (``repeater_field(..., layout="list")``): one row per item,
+   hairline-divided like the Devices and Dashboards lists, under a mono
+   column head. A row shows its title, a one-line summary, its switch and a
+   caret; opening it shows the rest of its fields a shade down, with the
+   move and remove buttons the Dashboards rows use. */
+.repeater--list .repeater-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px 8px;
+  font-family: var(--t-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t-muted);
+}
+/* Ends over the switches: past the caret column (16px) and its gap. */
+.repeater--list .repeater-list-head > span + span { margin-right: 28px; }
+/* minmax(0, ...): a long title or summary ellipsises rather than widening the page. */
+.repeater--list .repeater-list { grid-template-columns: minmax(0, 1fr); gap: 0; border-top: 1px solid var(--t-border); }
+.repeater--list .repeater-row {
+  display: block;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--t-border);
+  border-radius: 0;
+  transition: background var(--t-trans-fast);
+}
+.repeater--list .repeater-row:not(.is-open):hover,
+.repeater--list .repeater-row.is-open { background: var(--t-surface-soft); }
+.repeater-row-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.repeater-row-open,
+.repeater-row-open:hover,
+.repeater-row-open:active {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  transform: none;
+  color: var(--t-fg);
+  text-align: left;
+}
+.repeater-row-open:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; box-shadow: none; }
+.repeater-row-title {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+}
+.repeater-row-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--t-font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--t-muted);
+}
+.repeater--list .repeater-row.is-off .repeater-row-title { color: var(--t-muted); }
+/* The section body styles every label in a field; the switch is not one. */
+.field--repeater .repeater-row-head .repeater-row-toggle { display: inline-block; margin: 0; }
+/* The move buttons sit left of the switch: quiet until the row is hovered
+   or focused, so a long list doesn't read as a column of arrows. */
+.repeater-row-moves { flex: none; display: inline-flex; gap: 2px; }
+.repeater-row-moves .dx-btn-icon-only { opacity: 0.55; }
+.repeater-row-head:hover .repeater-row-moves .dx-btn-icon-only,
+.repeater-row-moves .dx-btn-icon-only:focus-visible { opacity: 1; }
+.repeater-row-moves [aria-disabled="true"] { visibility: hidden; }
+.repeater-row-chev {
+  flex: none;
+  display: inline-flex;
+  font-size: 16px;
+  color: var(--t-muted);
+  transition: transform 180ms ease-out;
+}
+.repeater-row-head:hover .repeater-row-chev { color: var(--t-fg); }
+/* Without scripts every row is open and the caret can't close it. */
+:root:not(.js) .repeater-row-chev { display: none; }
+.repeater--list .repeater-row.is-open .repeater-row-chev { transform: rotate(90deg); }
+.repeater-row-body { padding: 4px 12px 16px; }
+:root.js .repeater--list .repeater-row:not(.is-open) > .repeater-row-body { display: none; }
+.repeater--list .repeater-row-fields {
+  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+  align-items: start;
+  gap: 12px 16px;
+}
+.repeater--list .repeater-sub--textarea { grid-column: auto; }
+.repeater--list .repeater-row-actions {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+}
+.repeater--list .repeater-remove { margin-left: auto; }
+.repeater--list .repeater-remove:not([aria-disabled="true"]):hover { color: var(--t-danger); }
+.repeater--list .repeater-empty { margin-top: 12px; }
+/* No rows: no column head over nothing. */
+.repeater--list:has(> .repeater-empty:not([hidden])) .repeater-list-head { display: none; }
+.repeater--list .repeater-foot { justify-content: space-between; flex-wrap: wrap; margin-top: 12px; }
+@media (max-width: 640px) {
+  .repeater--list .repeater-row-fields { grid-template-columns: minmax(0, 1fr); }
+  /* Room for the title: a closed row shows its moves only once opened. */
+  .repeater--list .repeater-row:not(.is-open) .repeater-row-moves { display: none; }
+  .repeater--list .repeater-list-head,
+  .repeater-row-head,
+  .repeater-row-body { padding-inline: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .repeater-row-chev { transition: none; }
+}

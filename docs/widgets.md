@@ -152,11 +152,94 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   titled "Melbourne" for no reason. Name the option something else
   (`title`) if it isn't a place.
 * **`settings`**, plugin-wide knobs (one set across all cells using
-  this widget). Surfaces in `/settings/plugins/<id>`. `secret: true`
+  this widget). Surfaces in `/settings/plugins`. A widget with its own admin
+  page can export `ADMIN_SETTINGS = True` from `server.py` and render the
+  shared `_plugin_admin_settings.html` partial with
+  `section=app.plugin_admin.settings_section(plugin)`, loading
+  `static/pages/settings.js` (the unsaved-changes bar) in its `head_extra`
+  block. Its settings then live under Widgets > Admin pages, drawn as the
+  same card Settings > Widgets draws, and the existing settings save endpoint
+  returns there. `settings_section` takes keys that fit the card to the page:
+  `title`, `blurb`, `icon`, `fold="closed"` (or `"open"`) to make the card a
+  disclosure, and `repeater_layout="list"` to draw a repeater as one row per
+  item (title, one-line summary and switch, opened for the rest). A page can
+  add its own content to those rows: set `repeater_row_extra` to a macro
+  `(row, part)` before including the partial (`part` is `"head"`, beside the
+  switch, or `"body"`, under the fields) and `repeater_foot_extra` to one
+  drawn in the list's foot; comics_daily uses them for each strip's status,
+  upload and import, and its Add strip box. A setting's `group` puts a small
+  heading over it and the settings after it, and consecutive settings with
+  the same `row` value sit side by side. Wrap the page's cards in
+  `<div class="settings-section-list">` for the Settings spacing. The same
+  masking, validation and storage rules apply. `secret: true`
   stores under `<name>_secret` in `settings.json` so an on-disk grep
   for `secret` reveals every sensitive value. `advanced: true` folds a
   setting into the card's "More options" section, as on cell options.
+* **`repeater` settings**, a list of rows the operator adds, removes and
+  moves up and down, each row a small fixed set of sub-fields. Settings
+  only (not `cell_options`), and no nesting:
+
+  ```json
+  {
+    "name": "feeds", "type": "repeater", "label": "Feeds",
+    "add_label": "Add feed", "row_label": "Feed", "max_rows": 20,
+    "fields": [
+      { "name": "enabled", "type": "boolean", "label": "On", "default": true },
+      { "name": "url", "type": "string", "label": "URL", "required": true, "unique": true },
+      { "name": "limit", "type": "number", "label": "Items", "min": 1, "max": 50, "default": 5 },
+      { "name": "notes", "type": "textarea", "label": "Notes", "max_length": 500 }
+    ],
+    "default": [{ "enabled": true, "url": "https://example.com/rss", "limit": 5, "notes": "" }]
+  }
+  ```
+
+  Sub-field types are `string`, `textarea`, `boolean`, `number` and
+  `select` (with inline `choices`). A sub-field may set `required`,
+  `unique` (string or select; compared ignoring case and surrounding
+  spaces), `max_length` (string 500 and textarea 5000 by default),
+  `pattern` with a `pattern_hint` (string; see below), `min` / `max` / `step`
+  (number), `rows` and `monospace` (textarea), `placeholder` and `help`.
+  The repeater itself takes `min_rows`, `max_rows` (50 by default, at most
+  200), `add_label` and `row_label`. `secret`, `show_if` and
+  `choices_from` aren't supported inside one, and the loader refuses a
+  declaration that uses them, names a sub-field twice or has a `default`
+  that doesn't fit.
+
+  A `pattern` is checked in the browser and again on save, and Python's
+  regex engine can't be given a time limit, so it is held to a subset with
+  no backtracking: literal characters, `.` and `[classes]` (ranges, `^`,
+  `\d`, `\w`), each optionally counted (`*`, `+`, `?`, `{n}`, `{n,}`,
+  `{n,m}`), with at most one part varying in length and no groups,
+  alternation or anchors (the whole value is matched anyway). That covers
+  `[A-Za-z0-9_\-]+`, `[A-Z]{2}_[A-Z0-9]+` or `#[0-9a-fA-F]{6}`. Inside a
+  class, write a literal `-` or `/` as `\-` and `\/`, as the browser
+  requires. A sub-field's `default` has to pass the same checks as a typed
+  value, exactly as it would be stored.
+
+  The value is a JSON list of objects, one per row, each carrying exactly
+  the declared sub-fields. A save whose rows don't fit (too many, a blank
+  `required`, a repeated `unique`, an out-of-range number) is refused as a
+  whole with a message naming the row, and the stored rows stay as they
+  were. `fetch()` gets the stored list; validate what your widget relies
+  on, since an older or hand-edited settings file can hold anything.
+
+  An optional `"list"` object says how the list layout draws the rows:
+  `title` (string sub-fields tried in turn for a row's title; the first
+  string one by default), `summary` (the sub-field shown beside it; the
+  first textarea by default), `fixed` (`{"slug": ["dilbert"]}`: rows
+  holding one of those values can't be removed and that sub-field is
+  read-only in them) and `add: false` (no Add button, for a page that adds
+  rows its own way).
+
+  Changing an existing setting into a repeater: export
+  `legacy_rows(name, value)` from `server.py`. When the stored value isn't
+  a list, the settings card asks it for rows to show (return a list of row
+  objects, or `None`), and the next save stores them. Until then the old
+  value is what `fetch()` gets, so read both shapes.
 * **`icon`**, Phosphor name used in the editor's widget picker.
+* **`admin_title`**, optional: what the Widgets menu's Admin pages list calls
+  the widget's admin page, when that should differ from `name` (News, Front
+  Pages has its admin page listed as "Newspapers"). Defaults to `name`.
 * **`name`**, shown in the widget picker. Widgets that belong to a family
   are named `Family, Item` ("Weather, Now", "GitHub, Streak"), and the
   picker shows the item in bold after the muted family. A widget on its own
@@ -168,6 +251,9 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   without it the picker guesses from the family in the name and otherwise
   files the widget under Utility. Older servers ignore the field.
 * **`render.needs_network`**, hint for the renderer (not enforced).
+* **`render.per_placement`**, fetch separately for each canvas element and its
+  dimensions when the payload depends on its fit or rotation. By default,
+  elements with the same widget and resolved options share one data fetch.
 * **`updates.on_change`**, optional data-change sources this widget knows how
   to consume. Declaring one only exposes a host-owned, per-placement **Refresh
   when this widget's data changes** switch; it does not enable refreshes by
@@ -435,7 +521,8 @@ def blueprint() -> Blueprint:
 Templates live under `templates/<plugin_id>/` (the folder namespacing
 keeps Flask from colliding with the host's `templates/index.html`).
 Extend `_base.html` for visual consistency with the rest of the
-admin UI; the `card_head` macro + `card` class wrap content.
+admin UI; the `section_card` macro (the Settings pages' card) or the
+`card_head` macro + `card` class wrap content.
 
 ### Serving your own media, `RENDER_SAFE_ENDPOINTS`
 

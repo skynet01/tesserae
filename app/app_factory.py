@@ -1348,6 +1348,9 @@ def create_app(
 
     app.jinja_env.globals["option_visible"] = _option_visible
     app.jinja_env.globals["option_sections"] = _option_sections
+    from app.repeater import view as _repeater_view
+
+    app.jinja_env.globals["repeater_view"] = _repeater_view
 
     def _choice_image(src: Any) -> str:
         """A select choice's picture (``choices[].image``) as the browser
@@ -1440,7 +1443,7 @@ def create_app(
             "online_features_unanswered": online_unanswered,
             "nav_admin_plugins": sorted(
                 (p for p in registry.plugins.values() if p.has_admin),
-                key=lambda p: p.name.lower(),
+                key=lambda p: p.admin_title.lower(),
             ),
             "nav_batteries": _collect_battery_status(app),
             # Heard-but-unregistered devices; lights the topbar chip that

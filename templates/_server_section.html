@@ -10,18 +10,34 @@
    Broker has an extra wrinkle: the external (host/port/username/
    password) and embedded_* fields render in two grouped blocks the
    existing JS shows/hides off the ``embedded_enabled`` switch.
-   Preserved here as-is. #}
+   Preserved here as-is.
 
-{% from "_components.html" import auto_field, options_more_open, options_more_close with context %}
+   A widget's admin page draws its settings with this card too
+   (_plugin_admin_settings.html, app/plugin_admin.py). Two keys only it
+   sets: ``fold`` ("open" or "closed") makes the head a disclosure that
+   shows and hides the fields, the save bar staying outside it so unsaved
+   changes are never folded away; ``repeater_layout`` ("list") draws a
+   repeater as one row per item, passing on the page's
+   ``repeater_row_extra`` / ``repeater_foot_extra`` macros when it defines
+   them (see ``repeater_field``). A setting's ``group`` puts a small
+   heading over it and the settings after it, until the next group. #}
+
+{% from "_components.html" import auto_field, repeater_field, options_more_open, options_more_close with context %}
 
 {% set icon_name = section.icon or KIND_ICONS.get(section.kind, 'gear-six') %}
+{% set fold = section.get('fold') %}
 
 <section class="dx-section-card{% if section.kind == 'panel' %} panel-section{% endif %}"
          id="{{ section.id }}">
   <form method="post" action="{{ section.endpoint }}"
         class="form dx-legacy-server-form" data-dirty-form>
 
+    {% if fold %}
+    <details class="dx-section-fold" data-fold{% if fold == 'open' %} open{% endif %}>
+    <summary class="dx-section-head">
+    {% else %}
     <header class="dx-section-head">
+    {% endif %}
       <span class="dx-section-icon" aria-hidden="true">
         <i class="ph ph-{{ icon_name }}"></i>
       </span>
@@ -45,7 +61,12 @@
         {% endif %}
       {% endfor %}
       {% endif %}
+    {% if fold %}
+      <span class="dx-section-chev" aria-hidden="true"><i class="ph ph-caret-right"></i></span>
+    </summary>
+    {% else %}
     </header>
+    {% endif %}
 
     <div class="dx-section-body">
 
@@ -73,12 +94,23 @@
          the existing show/hide JS keeps working. #}
       {#- A widget's own settings can mark fine-tuning ``advanced`` the same
          way its cell options do: those render last, inside "More options". -#}
-      {% set ns = namespace(group=none) %}
+      {#- Consecutive settings that share a ``row`` value sit side by side
+         (short numbers like a set of gaps); a narrow screen stacks them. -#}
+      {% set ns = namespace(group=none, heading=none, row=none) %}
       {% set opt_sections = option_sections(section.fields, section.state) if section.kind == 'plugin' else none %}
       {% for field in (opt_sections.basic + opt_sections.advanced if opt_sections else section.fields) %}
-        {% if opt_sections and opt_sections.advanced and loop.index0 == opt_sections.basic|length %}{{ options_more_open() }}{% endif %}
+        {% set more_starts = opt_sections and opt_sections.advanced and loop.index0 == opt_sections.basic|length %}
+        {% set this_row = field.get('row') if field.type not in ('switch', 'repeater') else none %}
+        {% if ns.row and (this_row != ns.row or more_starts or (field.get('group') and field.group != ns.heading)) %}
+          </div>{% set ns.row = none %}
+        {% endif %}
+        {% if more_starts %}{{ options_more_open() }}{% endif %}
         {% set value = section.state.get(field.name, field.get('default', '')) %}
         {% set field_id = section.id ~ '-' ~ field.name %}
+        {% if field.get('group') and field.group != ns.heading %}
+          <p class="device-subhead dx-section-group">{{ field.group }}</p>
+          {% set ns.heading = field.group %}
+        {% endif %}
 
         {% set this_group = none %}
         {% if section.kind == 'broker' %}
@@ -93,6 +125,9 @@
           {% if this_group == 'external' %}<div class="external-broker-fields">
           {% elif this_group == 'embedded' %}<div class="embedded-broker-fields">{% endif %}
           {% set ns.group = this_group %}
+        {% endif %}
+        {% if this_row and this_row != ns.row %}
+          <div class="dx-field-row">{% set ns.row = this_row %}
         {% endif %}
 
         {% if field.type == 'switch' %}
@@ -109,16 +144,21 @@
               </span>
             </label>
           </div>
+        {% elif field.type == 'repeater' and section.get('repeater_layout') and repeater_view(field, value).usable %}
+          {{ repeater_field(field_id, field.name, field.label, field, value, field.get('help'), layout=section.repeater_layout,
+                            row_extra=repeater_row_extra|default(none), foot_extra=repeater_foot_extra|default(none)) }}
         {% elif section.kind == 'panel' and field.name in ('panel_w', 'panel_h') %}
           <div class="panel-custom-fields">{{ auto_field(field_id, field.name, field, value) }}</div>
         {% else %}
           {{ auto_field(field_id, field.name, field, value) }}
         {% endif %}
       {% endfor %}
+      {% if ns.row %}</div>{% endif %}
       {% if ns.group %}</div>{% endif %}
       {% if opt_sections and opt_sections.advanced %}{{ options_more_close() }}{% endif %}
 
     </div>{# /dx-section-body #}
+    {% if fold %}</details>{% endif %}
 
     <div class="dx-save-bar dx-save-bar--server" data-save-bar hidden>
       <span class="dx-save-bar-msg">You have unsaved changes</span>
@@ -130,5 +170,7 @@
         </button>
       </div>
     </div>
+    {# The bar above shows only once a script sees a change. #}
+    <noscript><div class="actions"><button type="submit" class="primary">Save changes</button></div></noscript>
   </form>
 </section>

@@ -44,6 +44,7 @@ from flask import (
 )
 from werkzeug.wrappers import Response
 
+from app import repeater
 from app.capabilities import Capabilities, set_delegate_resolver
 from app.capabilities import parse as _parse_capabilities
 
@@ -57,6 +58,9 @@ _ALLOWED_ASSETS: frozenset[str] = frozenset({"client.js", "client.css"})
 _ALLOWED_ASSET_PREFIXES: tuple[str, ...] = ("static/", "files/")
 
 _COMPAT_RE = re.compile(r"^(\d+)\.(x|\d+)")
+
+# schema/plugin.schema.json's ``admin_title`` maxLength.
+ADMIN_TITLE_MAX = 60
 
 # Matches schema/plugin.schema.json's `locales` item pattern exactly.
 # This is the point that turns the value into a
@@ -154,6 +158,17 @@ class Plugin:
         name = self.manifest["name"]
         assert isinstance(name, str)
         return name
+
+    @property
+    def admin_title(self) -> str:
+        """What the Widgets menu and the admin page call the plugin's admin
+        page: the manifest's ``admin_title`` (the schema caps it at 60
+        characters), else its name. Anything but a non-blank string, which
+        only a manifest that skipped the schema can carry, is the name."""
+        title = self.manifest.get("admin_title")
+        if not isinstance(title, str) or not title.strip():
+            return self.name
+        return " ".join(title.split())[:ADMIN_TITLE_MAX]
 
     @property
     def supported_sizes(self) -> list[str]:
@@ -473,6 +488,15 @@ def _scan_plugin_dir(
             field_path = ".".join(str(p) for p in err.absolute_path) or "<root>"
             registry.errors.append(
                 LoaderError(plugin_id, child, f"manifest schema [{field_path}]: {err.message}")
+            )
+            continue
+
+        # What the schema can't say about a repeater setting: unique
+        # sub-field names, min_rows <= max_rows, a default that parses.
+        repeater_problems = repeater.manifest_errors(manifest)
+        if repeater_problems:
+            registry.errors.append(
+                LoaderError(plugin_id, child, f"manifest {repeater_problems[0]}")
             )
             continue
 

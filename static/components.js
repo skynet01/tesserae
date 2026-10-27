@@ -993,6 +993,283 @@
       .replace(/'/g, "&#39;");
   }
 
+  // A repeater setting (``repeater_field`` in _components.html): rows of
+  // sub-field controls with Add, Remove and Move up / down. The row
+  // controls have no ``name``; the one hidden input that does carries the
+  // rows as JSON, rewritten on every edit and once more on submit, so what
+  // is saved is what the rows show. Structural edits (add, remove, move)
+  // fire ``input`` on that hidden input, which is what the settings page's
+  // unsaved-changes bar listens for. A form reset (the bar's Discard)
+  // rebuilds the rows the page was served with: a hidden input has no
+  // separate default value to fall back to once it has been written.
+  function attachRepeaters(root) {
+    root.querySelectorAll("[data-repeater]:not([data-repeater-bound])").forEach((box) => {
+      const storage = box.querySelector("[data-repeater-storage]");
+      const list = box.querySelector("[data-repeater-list]");
+      const tpl = box.querySelector("template[data-repeater-template]");
+      const addBtn = box.querySelector("[data-repeater-add]");
+      // No Add button is fine: a list-layout page may add rows its own way.
+      if (!storage || !list || !tpl) return;
+      box.dataset.repeaterBound = "1";
+      const empty = box.querySelector("[data-repeater-empty]");
+      const count = box.querySelector("[data-repeater-count]");
+      const status = box.querySelector("[data-repeater-status]");
+      const min = Math.max(0, parseInt(box.dataset.repeaterMin || "0", 10) || 0);
+      const max = Math.max(1, parseInt(box.dataset.repeaterMax || "50", 10) || 50);
+      const rowLabel = box.dataset.repeaterRowLabel || "Row";
+      const fieldId = box.dataset.repeaterId || "repeater";
+      const served = storage.value;
+      const servedRows = Array.from(list.children)
+        .filter((el) => el.matches("[data-repeater-row]"))
+        .map((row) => row.cloneNode(true));
+      let serial = 0;
+
+      const rows = () =>
+        Array.from(list.children).filter((el) => el.matches("[data-repeater-row]"));
+      const controls = (row) => Array.from(row.querySelectorAll("[data-repeater-key]"));
+
+      function readRow(row) {
+        const out = {};
+        controls(row).forEach((el) => {
+          const key = el.dataset.repeaterKey;
+          const type = el.dataset.repeaterType;
+          if (type === "boolean") out[key] = el.checked;
+          else if (type === "number") out[key] = el.value === "" ? null : Number(el.value);
+          else out[key] = el.value;
+        });
+        return out;
+      }
+
+      function fillRow(row, data) {
+        controls(row).forEach((el) => {
+          const value = data ? data[el.dataset.repeaterKey] : undefined;
+          if (value === undefined) return; // keep the template's default
+          if (el.dataset.repeaterType === "boolean") el.checked = Boolean(value);
+          else el.value = value === null ? "" : String(value);
+        });
+      }
+
+      // Disabled buttons drop focus mid-keypress, so an unavailable move is
+      // marked aria-disabled and ignored instead.
+      function setOff(btn, off) {
+        if (!btn) return;
+        if (off) btn.setAttribute("aria-disabled", "true");
+        else btn.removeAttribute("aria-disabled");
+      }
+
+      // A list-layout row's head says what its fields hold: the title (the
+      // first filled of its title fields), the summary (on one line) and the
+      // switch's name for a screen reader; a row switched off is dimmed.
+      function describe(row) {
+        const title = row.querySelector("[data-repeater-title]");
+        if (!title) return;
+        const valueOf = (key) => {
+          const el = Array.from(controls(row)).find((c) => c.dataset.repeaterKey === key);
+          return el ? String(el.value).replace(/\s+/g, " ").trim() : "";
+        };
+        const keys = (title.dataset.titleKeys || "").split(" ").filter(Boolean);
+        const text = keys.map(valueOf).find(Boolean);
+        title.textContent = text || `New ${rowLabel.toLowerCase()}`;
+        const meta = row.querySelector("[data-repeater-meta]");
+        if (meta && meta.dataset.summaryKey) meta.textContent = valueOf(meta.dataset.summaryKey);
+        const toggle = row.querySelector(".repeater-row-toggle input");
+        if (toggle) {
+          const label = toggle.closest("[data-repeater-toggle-label]");
+          const name = label ? label.dataset.repeaterToggleLabel : "";
+          toggle.setAttribute("aria-label", name ? `${title.textContent}: ${name}` : title.textContent);
+          row.classList.toggle("is-off", !toggle.checked);
+        }
+      }
+
+      // CSS shows a list-layout row's body while it is ``is-open`` (and
+      // every body when scripts don't run).
+      function setOpen(row, open) {
+        const btn = row.querySelector("[data-repeater-open]");
+        if (!btn) return;
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        row.classList.toggle("is-open", open);
+      }
+
+      function refresh() {
+        const all = rows();
+        all.forEach((row, i) => {
+          row.setAttribute("aria-label", `${rowLabel} ${i + 1} of ${all.length}`);
+          setOpen(row, row.classList.contains("is-open"));
+          describe(row);
+          setOff(row.querySelector("[data-repeater-up]"), i === 0);
+          setOff(row.querySelector("[data-repeater-down]"), i === all.length - 1);
+          setOff(
+            row.querySelector("[data-repeater-remove]"),
+            all.length <= min || row.hasAttribute("data-repeater-fixed"),
+          );
+        });
+        setOff(addBtn, all.length >= max);
+        if (empty) empty.hidden = all.length > 0;
+        if (count) count.textContent = `${all.length} of at most ${max}`;
+      }
+
+      function serialise(notify) {
+        const value = JSON.stringify(rows().map(readRow));
+        const changed = storage.value !== value;
+        storage.value = value;
+        refresh();
+        if (notify && changed) storage.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      function announce(text) {
+        if (status) status.textContent = text;
+      }
+
+      function newRow(data) {
+        const frag = tpl.content.cloneNode(true);
+        const row = frag.querySelector("[data-repeater-row]");
+        if (!row) return null;
+        serial += 1;
+        const stem = `${fieldId}-__i__-`;
+        const fresh = `${fieldId}-n${serial}-`;
+        row.querySelectorAll("[id], label[for], [aria-controls]").forEach((el) => {
+          if (el.id) el.id = el.id.replace(stem, fresh);
+          ["for", "aria-controls"].forEach((attr) => {
+            const target = el.getAttribute(attr);
+            if (target) el.setAttribute(attr, target.replace(stem, fresh));
+          });
+        });
+        fillRow(row, data);
+        return row;
+      }
+
+      // Discard puts back the rows the page was served with: copies of their
+      // own markup, taken before any edit, so what the server drew into a
+      // row (a status, an upload button, a row that can't be removed) comes
+      // back with it. Rows rebuilt from the empty template would lose it.
+      function restoreServed() {
+        list.replaceChildren(...servedRows.map((row) => row.cloneNode(true)));
+        storage.value = served;
+        refresh();
+      }
+
+      // ``invalid`` does not bubble; capture it so a field in a closed
+      // list-layout row is shown before the browser focuses and flags it.
+      list.addEventListener(
+        "invalid",
+        (ev) => {
+          const row = ev.target.closest("[data-repeater-row]");
+          if (row) setOpen(row, true);
+        },
+        true,
+      );
+      list.addEventListener("input", () => serialise(false));
+      list.addEventListener("change", () => serialise(false));
+
+      if (addBtn) addBtn.addEventListener("click", () => {
+        if (rows().length >= max) {
+          announce(`At most ${max}.`);
+          return;
+        }
+        const row = newRow(null);
+        if (!row) return;
+        list.appendChild(row);
+        setOpen(row, true);
+        serialise(true);
+        const first =
+          row.querySelector("input:not([type=checkbox]), textarea, select") ||
+          row.querySelector("[data-repeater-key]");
+        if (first) first.focus();
+        announce(`${rowLabel} ${rows().length} added.`);
+      });
+
+      list.addEventListener("click", (ev) => {
+        // A list-layout row opens and closes from its caret button or from
+        // a click anywhere else on its head, bar the switch and the moves.
+        const head = ev.target.closest(".repeater-row-head");
+        if (
+          head &&
+          list.contains(head) &&
+          !ev.target.closest(".repeater-row-toggle, .repeater-row-moves")
+        ) {
+          const row = head.closest("[data-repeater-row]");
+          setOpen(row, !row.classList.contains("is-open"));
+          return;
+        }
+        const btn = ev.target.closest(
+          "[data-repeater-up], [data-repeater-down], [data-repeater-remove]"
+        );
+        if (!btn || !list.contains(btn) || btn.getAttribute("aria-disabled") === "true") return;
+        const row = btn.closest("[data-repeater-row]");
+        if (!row) return;
+        if (btn.hasAttribute("data-repeater-remove")) {
+          if (rows().length <= min) return;
+          const all = rows();
+          const at = all.indexOf(row);
+          const next = all[at + 1] || all[at - 1] || null;
+          row.remove();
+          serialise(true);
+          const focusTo = next
+            ? next.querySelector("[data-repeater-open], [data-repeater-remove]")
+            : addBtn;
+          if (focusTo) focusTo.focus();
+          announce(`${rowLabel} ${at + 1} removed.`);
+          return;
+        }
+        // Move the neighbour rather than the row itself, so the focused
+        // button stays put in the DOM and keeps focus for the next press.
+        if (btn.hasAttribute("data-repeater-up")) {
+          const prev = row.previousElementSibling;
+          if (!prev) return;
+          list.insertBefore(prev, row.nextElementSibling);
+        } else {
+          const next = row.nextElementSibling;
+          if (!next) return;
+          list.insertBefore(next, row);
+        }
+        serialise(true);
+        announce(`${rowLabel} moved to ${rows().indexOf(row) + 1} of ${rows().length}.`);
+      });
+
+      const form = storage.form;
+      if (form) {
+        form.addEventListener("submit", () => serialise(false));
+        form.addEventListener("reset", () => setTimeout(restoreServed, 0));
+      }
+      refresh();
+    });
+  }
+
+  // A folding settings card (``fold`` in _server_section.html): opened
+  // when a field inside fails validation, or when the URL's hash names the
+  // card or something in it (a save comes back to ``#<card id>``), so
+  // neither lands on fields folded away.
+  function attachFolds(root) {
+    root.querySelectorAll("details[data-fold]").forEach((fold) => {
+      if (fold.dataset.foldBound) return;
+      fold.dataset.foldBound = "1";
+      fold.addEventListener("invalid", () => { fold.open = true; }, true);
+    });
+    let id = "";
+    try {
+      id = decodeURIComponent((window.location.hash || "").slice(1));
+    } catch {
+      return;
+    }
+    const target = id && document.getElementById(id);
+    if (!target) return;
+    const fold = target.closest("details[data-fold]") || target.querySelector("details[data-fold]");
+    if (fold && root.contains(fold)) fold.open = true;
+  }
+
+  // A log in a disclosure (``pre[data-log-tail]``) opens on its newest
+  // lines, at the bottom.
+  function attachLogTails(root) {
+    root.querySelectorAll("pre[data-log-tail]").forEach((pre) => {
+      const details = pre.closest("details");
+      if (!details || details.dataset.logTailBound) return;
+      details.dataset.logTailBound = "1";
+      details.addEventListener("toggle", () => {
+        if (details.open) pre.scrollTop = pre.scrollHeight;
+      });
+    });
+  }
+
   // Initial attach on DOMContentLoaded; re-attach when the editor reloads
   // its preview iframe (a side-effect of a save).
   function init() {
@@ -1003,7 +1280,10 @@
     attachTextareaPresets(document);
     attachLocationSearch(document);
     attachMultiSelect(document);
+    attachRepeaters(document);
     attachShowIf(document);
+    attachFolds(document);
+    attachLogTails(document);
     attachLightbox();
     publishTopbarHeight();
   }
@@ -1292,6 +1572,7 @@
     attachPresetNumbers,
     attachLocationSearch,
     attachMultiSelect,
+    attachRepeaters,
     attachShowIf,
     fitPreview,
   };

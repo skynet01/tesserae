@@ -6,6 +6,28 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- Widget settings can be a `repeater`: a list of rows the operator adds,
+  removes and moves up and down on the widget's settings card, each row a
+  few sub-fields (text, multi-line text, switch, number or choice). The
+  rows are stored as a JSON list. A save with a row that doesn't fit is
+  refused with a message naming the row, leaving the saved rows as they
+  were. A widget changing an existing setting into a repeater can export
+  `legacy_rows(name, value)` so the old value shows as rows. See
+  docs/widgets.md.
+- A widget with an admin page can keep its settings card there instead of
+  under Settings > Widgets (`ADMIN_SETTINGS = True` in server.py, then
+  `app.plugin_admin.settings_section()` and `_plugin_admin_settings.html`).
+  A save returns to the admin page. `admin_title` in plugin.json names the
+  page in the Admin pages menu when it should differ from the widget name.
+- Settings cards take a few layout keys: `fold` draws a card as a
+  disclosure, `repeater_layout: "list"` draws repeater rows as one compact
+  row each, and settings sharing a `row` value sit side by side.
+- `app.media_lifecycle`: one retry, backoff and cleanup policy for widgets
+  that keep downloaded pictures on disk, which never deletes a picture a
+  page still uses.
+
 ## [0.483.2], 2026-10-27
 
 ### Changed

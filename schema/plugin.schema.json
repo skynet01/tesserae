@@ -25,6 +25,12 @@
     "description": {
       "type": "string"
     },
+    "admin_title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60,
+      "description": "What the Widgets menu's Admin pages list and the admin page itself call the plugin's admin page, when that should differ from name (e.g. 'Newspapers' for 'News, Front Pages'). Defaults to name."
+    },
     "icon": {
       "type": "string",
       "description": "Phosphor icon class (e.g. 'ph-list-checks').",
@@ -175,6 +181,75 @@
             "description": "As on cell_options: render this setting last, inside the collapsed \"More options\" section of the widget's settings card."
           },
           "default": {}
+        },
+        "if": { "properties": { "type": { "const": "repeater" } }, "required": ["type"] },
+        "then": {
+          "description": "A repeater: a list of rows, each with the sub-fields in 'fields', added, removed and reordered in the settings card. Stored as a JSON list of objects keyed by sub-field name. See docs/widgets.md.",
+          "required": ["fields"],
+          "properties": {
+            "fields": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 12,
+              "items": {
+                "type": "object",
+                "required": ["name", "type", "label"],
+                "properties": {
+                  "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" },
+                  "type": {
+                    "enum": ["string", "textarea", "boolean", "number", "select"],
+                    "description": "No nesting: a repeater can't hold another repeater."
+                  },
+                  "label": { "type": "string", "minLength": 1 },
+                  "help": { "type": "string" },
+                  "default": {},
+                  "placeholder": { "type": "string" },
+                  "required": { "type": "boolean", "description": "A row can't be saved with this blank." },
+                  "unique": { "type": "boolean", "description": "string or select: no two rows may share a value (compared ignoring case and surrounding spaces)." },
+                  "max_length": { "type": "integer", "minimum": 1, "maximum": 20000, "description": "string or textarea; defaults to 500 and 5000." },
+                  "pattern": { "type": "string", "maxLength": 200, "description": "string only: what the whole (trimmed) value must look like, in a small regex subset matched without backtracking: literal characters, . and [classes] (ranges, ^, \\d, \\w), each with an optional count (* + ? {n} {n,} {n,m}), at most one part varying in length, no groups, alternation or anchors. Inside a class write a literal - or / as \\- and \\/." },
+                  "format": {
+                    "enum": ["url"],
+                    "description": "string only: \"url\" takes only an http(s) address with a host (or nothing)."
+                  },
+                  "pattern_hint": { "type": "string", "description": "What the pattern asks for, in words, shown when a value doesn't match." },
+                  "rows": { "type": "integer", "minimum": 1, "maximum": 20 },
+                  "monospace": { "type": "boolean", "description": "textarea: a fixed-width font, for code." },
+                  "min": { "type": "number" },
+                  "max": { "type": "number" },
+                  "step": { "type": "number" },
+                  "choices": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "required": ["value", "label"],
+                      "properties": {
+                        "value": { "type": ["string", "number"] },
+                        "label": { "type": "string" }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "min_rows": { "type": "integer", "minimum": 0, "maximum": 200 },
+            "max_rows": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Defaults to 50." },
+            "add_label": { "type": "string", "maxLength": 40, "description": "The add button's text. Defaults to \"Add row\"." },
+            "row_label": { "type": "string", "maxLength": 40, "description": "What one row is called, for screen readers (\"Paper 2 of 4\"). Defaults to \"Row\"." },
+            "list": {
+              "type": "object",
+              "description": "How an admin page drawing this repeater as a list (repeater_layout=\"list\") shows its rows: title (sub-field names tried in turn for the row title), summary (a sub-field shown beside it), fixed ({sub-field: [values]}: rows that can't be removed) and add (false drops the Add button). See app/repeater.py list_options.",
+              "properties": {
+                "title": { "type": "array", "items": { "type": "string" } },
+                "summary": { "type": "string" },
+                "fixed": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+                "add": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            },
+            "default": { "type": "array", "items": { "type": "object" } }
+          }
         }
       }
     },
@@ -215,6 +290,7 @@
       "properties": {
         "dither": { "enum": ["none", "floyd-steinberg", "ordered"] },
         "full_bleed": { "type": "boolean" },
+        "per_placement": { "type": "boolean", "description": "Fetch data separately for each canvas placement and its dimensions instead of sharing by plugin and options." },
         "needs_network": { "type": "boolean" }
       }
     },

@@ -1,0 +1,8 @@
+{#- A widget's settings on its own admin page (widgets that set
+    ADMIN_SETTINGS, app/plugin_admin.py): the card Settings > Widgets draws
+    for it, titled for the page by the keys ``settings_section`` was given.
+    Its unsaved-changes bar needs static/pages/settings.js, which the page
+    loads in ``head_extra``: a script here would sit between the page's
+    cards and break their spacing. -#}
+{% set KIND_ICONS = {'plugin': 'puzzle-piece'} %}
+{% include "_server_section.html" %}

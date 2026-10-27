@@ -20,7 +20,13 @@ from flask import current_app, flash, redirect, render_template, request, sessio
 from werkzeug.wrappers import Response
 
 from app import backup as _backup_mod
-from app import device_service, device_timetable, palette_profiles, test_patterns
+from app import (
+    device_service,
+    device_timetable,
+    palette_profiles,
+    repeater,
+    test_patterns,
+)
 from app import firmware_check as firmware_check_module
 from app import install_id as install_id_module
 from app import updater as _updater_mod
@@ -29,6 +35,7 @@ from app.device_loader import Device
 from app.ha_options import is_ha_addon
 from app.network import detect_local_ip, docker_bridge_ip_warning, is_docker_bridge_ip, url_host
 from app.panel import PANEL_PRESET_CHOICES, PANEL_PRESETS
+from app.plugin_admin import settings_in_admin, settings_section
 from app.state.settings_store import SECRET_MASK
 
 from ._shared import (
@@ -44,7 +51,6 @@ from ._shared import (
     discovery_cache,
     format_discovered,
     format_relative,
-    mark_unreadable_secrets,
     note_refresh_floor,
     plugins,
     render_for_admin,
@@ -967,7 +973,9 @@ def _build_sections(kinds: set[str] | None = None) -> list[dict[str, Any]]:
                 "title": f"Renderer: {renderer.name}",
                 "blurb": blurb,
                 "fields": fields,
-                "state": render_for_admin("renderers", renderer.id, fields),
+                "state": repeater.prepare_state(
+                    fields, render_for_admin("renderers", renderer.id, fields)
+                ),
                 "endpoint": url_for("auth.settings_update", section_kind=sid),
                 "enabled": bool(is_enabled),
                 "supports_toggle": True,
@@ -994,23 +1002,8 @@ def _build_sections(kinds: set[str] | None = None) -> list[dict[str, Any]]:
             sections.append(section)
 
     for plugin in plugins().plugins.values() if wanted("plugin") else ():
-        fields = mark_unreadable_secrets(
-            list(plugin.manifest.get("settings", [])), "plugins", plugin.id
-        )
-        if not fields:
-            continue
-        sid = f"plugin-{plugin.id}"
-        sections.append(
-            {
-                "id": sid,
-                "kind": "plugin",
-                "title": f"Plugin: {plugin.name}",
-                "blurb": plugin.manifest.get("description") or "",
-                "fields": fields,
-                "state": render_for_admin("plugins", plugin.id, fields),
-                "endpoint": url_for("auth.settings_update", section_kind=sid),
-            }
-        )
+        if plugin.manifest.get("settings") and not settings_in_admin(plugin):
+            sections.append(settings_section(plugin))
 
     return sections
 
