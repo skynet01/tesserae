@@ -253,3 +253,43 @@ def test_a_sliver_of_a_cell_says_it_is_too_small_rather_than_clip(
         browser.close()
     assert normal == {"small": "", "inside": True}
     assert sliver["small"] == "Too small a space for a comic."
+
+
+def test_the_screen_dropdown_swaps_the_preview_without_a_reload(
+    live: tuple[str, Flask],
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, _ = live
+    shown = """() => [...document.querySelectorAll('.cx-screen[data-screen]')]
+        .filter((f) => !f.hidden && f.getBoundingClientRect().height > 0)
+        .map((f) => f.dataset.screen)"""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1440, "height": 900})
+        page.goto(f"{base}/plugins/comics_daily/", wait_until="networkidle")
+        page.evaluate("window.__stay = 1")
+        # No screen of the user's shows comics: the first reference screen.
+        first = page.evaluate(shown)
+        label = page.locator("#cx-screen-pick option:checked").inner_text()
+        page.select_option("#cx-screen-pick", label="7.5-inch (800×480)")
+        after = page.evaluate(shown)
+        stayed = page.evaluate("window.__stay === 1")
+        # Beside the list on a desktop, kept in view while the list scrolls.
+        aside = page.evaluate(
+            """() => { const a = document.querySelector('.cx-onscreen').getBoundingClientRect();
+                const l = document.querySelector('.cx-preview').getBoundingClientRect();
+                return {left: a.right <= l.left, sticky: getComputedStyle(
+                  document.querySelector('.cx-onscreen')).position === 'sticky'}; }"""
+        )
+        # On a phone the two stack, the preview first.
+        page.set_viewport_size({"width": 420, "height": 900})
+        stacked = page.evaluate(
+            """() => document.querySelector('.cx-onscreen').getBoundingClientRect().bottom
+                <= document.querySelector('.cx-preview').getBoundingClientRect().top"""
+        )
+        browser.close()
+    assert label == "32-inch portrait (1440×2560)" and first == ["0"]
+    assert after == ["2"] and stayed
+    assert aside == {"left": True, "sticky": True}
+    assert stacked

@@ -2129,3 +2129,148 @@ def test_disabled_sources_still_clean_up_removed_pictures(
     assert (store.image_dir / kept).exists()
     assert not (store.image_dir / orphan).exists()
     assert store.prune_if_due({"manual:garfield"}, later + 60) is None
+
+
+# ----------------------------------------------------------------------
+# The admin page's preview: which screens, and which it opens on
+# ----------------------------------------------------------------------
+
+
+def _device(device_id: str, name: str, w: int, h: int, *, kind: bool = False) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        id=device_id,
+        display_name=name,
+        kind_of=None if kind else "visionect_place_and_play_32",
+        panel={"w": w, "h": h},
+    )
+
+
+def _grid_page(page_id: str, device_ids: list[str], *cells: tuple[str, int, int]) -> Any:
+    from app.state.page_store import Cell, Page
+
+    return Page(
+        id=page_id,
+        name=page_id.title(),
+        device_ids=device_ids,
+        cells=[
+            Cell(id=f"c{n}", x=0, y=0, w=w, h=h, plugin=plugin)
+            for n, (plugin, w, h) in enumerate(cells)
+        ],
+    )
+
+
+REFERENCE_NAMES = [name for name, _, _ in screen.SCREENS]
+
+
+def test_the_preview_opens_on_the_screen_that_shows_comics() -> None:
+    kitchen = _device("kitchen", "Kitchen", 800, 480)
+    frame = _device("frame", "Visionect frame", 1440, 2560)
+    builtin = _device("visionect", "Visionect (kind)", 1600, 1200, kind=True)
+    pages_list = [
+        _grid_page("clock", ["kitchen"], ("clock", 800, 480)),
+        _grid_page("comics", ["frame"], ("comics_daily", 1440, 2560)),
+    ]
+    screens, default = srv.preview_screens(pages_list, [kitchen, frame, builtin])
+    # Its own screens first (the one showing comics leads), then the
+    # reference screens; a built-in kind is not a screen anyone has.
+    assert [(s["name"], s["w"], s["h"], s["group"]) for s in screens] == [
+        ("Visionect frame", 1440, 2560, srv.MINE),
+        ("Kitchen", 800, 480, srv.MINE),
+        *[(n, w, h, srv.REFERENCE) for n, w, h in screen.SCREENS],
+    ]
+    assert default == 0
+
+
+def test_a_comics_cell_smaller_than_its_screen_previews_at_its_own_size() -> None:
+    frame = _device("frame", "Visionect frame", 1440, 2560)
+    half = _grid_page("half", ["frame"], ("clock", 1440, 1280), ("comics_daily", 1440, 1280))
+    screens, default = srv.preview_screens([half], [frame])
+    assert (screens[default]["name"], screens[default]["w"], screens[default]["h"]) == (
+        "Visionect frame, comics cell",
+        1440,
+        1280,
+    )
+    # Laid out at another size: scaled to the device's panel.
+    from app.state.page_store import Panel
+
+    small = _grid_page("small", ["frame"], ("comics_daily", 720, 640))
+    small = small.model_copy(update={"panel": Panel(w=720, h=1280)})
+    screens, default = srv.preview_screens([small], [frame])
+    assert (screens[default]["w"], screens[default]["h"]) == (1440, 1280)
+
+
+def test_a_canvas_comics_element_counts_too() -> None:
+    from types import SimpleNamespace
+
+    frame = _device("frame", "Visionect frame", 1440, 2560)
+    element = SimpleNamespace(kind="widget", widget="comics_daily", w=1440, h=2540)
+    page = SimpleNamespace(
+        name="Comics",
+        layout_kind="canvas",
+        canvas=SimpleNamespace(w=1440, h=2560, els=[element]),
+        device_ids=["frame"],
+    )
+    screens, default = srv.preview_screens([page], [frame])
+    assert (screens[default]["name"], screens[default]["w"]) == ("Visionect frame", 1440)
+    assert screens[default]["h"] == 2560  # within a few pixels: the whole screen
+
+
+def test_without_a_screen_showing_comics_the_preview_opens_on_the_first_reference() -> None:
+    kitchen = _device("kitchen", "Kitchen", 800, 480)
+    screens, default = srv.preview_screens([], [kitchen])
+    assert [s["name"] for s in screens] == ["Kitchen", *REFERENCE_NAMES]
+    assert screens[default]["name"] == REFERENCE_NAMES[0]
+    screens, default = srv.preview_screens([], [])
+    assert [s["name"] for s in screens] == REFERENCE_NAMES and default == 0
+
+
+def _app_with_frame(tmp_path: Path) -> Any:
+    from app.main import REPO_ROOT, create_app
+
+    (tmp_path / "devices").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "devices" / "frame.json").write_text(
+        json.dumps(
+            {
+                "id": "frame",
+                "kind": "visionect_place_and_play_32",
+                "name": "Visionect frame",
+                "transport": "push",
+                "panel": {"w": 1440, "h": 2560, "orientation": "portrait_flipped"},
+            }
+        )
+    )
+    return create_app(testing=True, data_root=tmp_path, plugins_dir=REPO_ROOT / "plugins")
+
+
+def test_the_admin_page_picks_the_users_frame_in_the_screen_dropdown(tmp_path: Path) -> None:
+    app = _app_with_frame(tmp_path)
+    client = app.test_client()
+    app.config["PAGE_STORE"].save(_grid_page("comics", ["frame"], ("comics_daily", 1440, 2560)))
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    picker = body[body.index('id="cx-screen-pick"') : body.index("</select>")]
+    options = re.findall(r'<option value="(\d+)"( selected)?>([^<]*)</option>', picker)
+    assert [(label, bool(on)) for _, on, label in options] == [
+        ("Visionect frame (1440×2560)", True),
+        *[(f"{n} ({w}×{h})", False) for n, w, h in screen.SCREENS],
+    ]
+    assert '<optgroup label="Your screens">' in picker
+    assert '<optgroup label="Reference screens">' in picker
+    # Every screen is drawn; only the picked one shows.
+    figures = re.findall(r'<figure class="cx-screen" data-screen="(\d+)"( hidden)?>', body)
+    assert figures == [("0", ""), ("1", " hidden"), ("2", " hidden"), ("3", " hidden")]
+    # The preview no longer sits in the list of comics.
+    assert "On other screens" not in body
+
+
+def test_the_layout_card_names_the_space_between_comics(client: FlaskClient) -> None:
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    layout = body[body.index('id="layout"') : body.index('id="log"')]
+    assert "On small screens" in layout
+    assert re.search(r"<legend[^>]*>Space between comics", layout)
+    labels = re.findall(r'<label for="plugin-comics_daily-(gap(?:_min|_max)?)">(\w+)', layout)
+    assert labels == [("gap_min", "Smallest"), ("gap", "Usual"), ("gap_max", "Largest")]
+    assert "Out-of-date note" in layout
+    for old in ("When they don", "Smallest gap", "Usual gap", "Largest gap", "Status note"):
+        assert old not in layout

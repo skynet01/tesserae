@@ -1925,11 +1925,112 @@ def cookie_view(store: Any, tz: Any, today: str) -> dict[str, Any]:
     return {"set": True, "chip": chip, "tone": tone, "line": line}
 
 
+MINE = "Your screens"
+REFERENCE = "Reference screens"
+MAX_OWN_SCREENS = 8
+
+
+def _dims(value: Any) -> tuple[int, int] | None:
+    """An object's (w, h) when both are positive ints, else None."""
+    try:
+        width, height = int(value.w), int(value.h)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _comics_cells(page: Any) -> tuple[tuple[int, int] | None, list[tuple[int, int]]]:
+    """A page's layout size (None when it takes its device's) and the size
+    of each comics cell on it, grid or canvas."""
+    if getattr(page, "layout_kind", "grid") == "canvas":
+        canvas = getattr(page, "canvas", None)
+        cells = [
+            el
+            for el in getattr(canvas, "els", None) or []
+            if el.kind == "widget" and el.widget == PLUGIN_ID
+        ]
+        base = _dims(canvas)
+    else:
+        cells = [c for c in getattr(page, "cells", None) or [] if c.plugin == PLUGIN_ID]
+        base = _dims(getattr(page, "panel", None))
+    return base, [size for size in map(_dims, cells) if size]
+
+
+def preview_screens(pages: list[Any], devices: list[Any]) -> tuple[list[dict[str, Any]], int]:
+    """The screens the admin page previews and which one it opens on.
+
+    First the user's own: each device a page with a comics cell is sent
+    to, at the cell's real size (the panel's when the cell fills it),
+    then their other devices at full panel size. Then the reference
+    screens (screen.SCREENS). It opens on the first device that shows
+    comics, else the first reference screen."""
+    panels = {}
+    for device in devices:
+        panel = device.panel if getattr(device, "kind_of", None) else None
+        if panel:
+            panels[device.id] = (device.display_name, int(panel["w"]), int(panel["h"]))
+    showing: list[dict[str, Any]] = []
+    for page in pages:
+        base, cells = _comics_cells(page)
+        for device_id in getattr(page, "device_ids", None) or []:
+            if device_id not in panels:
+                continue
+            name, pw, ph = panels[device_id]
+            bw, bh = base or (pw, ph)
+            for cw, ch in cells:
+                width, height = round(cw * pw / bw), round(ch * ph / bh)
+                if width >= 0.95 * pw and height >= 0.95 * ph:
+                    width, height = pw, ph
+                label = name if (width, height) == (pw, ph) else f"{name}, comics cell"
+                showing.append({"name": label, "w": width, "h": height, "device": device_id})
+        if not getattr(page, "device_ids", None):
+            for cw, ch in cells:
+                showing.append({"name": f"Comics cell on {page.name}", "w": cw, "h": ch})
+    seen: set[tuple[str, int, int]] = set()
+    own: list[dict[str, Any]] = []
+    shown_on = {s.get("device") for s in showing}
+    others = [
+        {"name": name, "w": w, "h": h}
+        for device_id, (name, w, h) in panels.items()
+        if device_id not in shown_on
+    ]
+    for entry in showing + others:
+        key = (entry["name"], entry["w"], entry["h"])
+        if key not in seen and len(own) < MAX_OWN_SCREENS:
+            seen.add(key)
+            own.append({"name": entry["name"], "w": entry["w"], "h": entry["h"], "group": MINE})
+    reference = [{"name": n, "w": w, "h": h, "group": REFERENCE} for n, w, h in screen.SCREENS]
+    return own + reference, 0 if showing else len(own)
+
+
+def _your_screens() -> tuple[list[dict[str, Any]], int]:
+    """preview_screens() from the app's pages and devices (just the
+    reference screens without an app to ask)."""
+    try:
+        page_store = current_app.config.get("PAGE_STORE")
+        registry = current_app.config.get("DEVICE_REGISTRY")
+        pages = page_store.list_active() if page_store is not None else []
+        devices = registry.all() if registry is not None else []
+    except Exception:
+        pages, devices = [], []
+    try:
+        return preview_screens(pages, devices)
+    except Exception:
+        logger.warning("comics_daily: couldn't list the user's screens", exc_info=True)
+        return preview_screens([], [])
+
+
 def screens_view(
-    config: Config, farside: dict[str, Any] | None, preview: list[dict[str, Any]]
+    config: Config,
+    farside: dict[str, Any] | None,
+    preview: list[dict[str, Any]],
+    screens: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """What each reference screen (screen.SCREENS) shows on its first turn,
-    and in words how the rest take turns, for the admin page's preview."""
+    """What each screen shows on its first turn, and in words how the rest
+    take turns, for the admin page's preview. ``screens`` defaults to the
+    reference screens (screen.SCREENS)."""
+    if screens is None:
+        screens = [{"name": n, "w": w, "h": h, "group": REFERENCE} for n, w, h in screen.SCREENS]
     pictures: list[tuple[str, list[dict[str, Any]]]] = []
     if farside and farside.get("pictures"):
         pictures.append(("The Far Side", farside["pictures"]))
@@ -1943,7 +2044,8 @@ def screens_view(
         for n, (label, pics) in enumerate(pictures)
     ]
     out = []
-    for name, width, height in screen.SCREENS:
+    for n, sc in enumerate(screens):
+        name, width, height = sc["name"], sc["w"], sc["h"]
         turns = screen.turns(
             width,
             height,
@@ -1966,7 +2068,9 @@ def screens_view(
             text = f"Takes turns, one refresh each: {'; then '.join(steps)}."
         out.append(
             {
+                "id": n,
                 "name": name,
+                "group": sc.get("group", REFERENCE),
                 "w": width,
                 "h": height,
                 "text": text,
@@ -2040,6 +2144,8 @@ def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
     if attempts and max(attempts) > 0:
         lede.append(f"Last fetch {_when(max(attempts), tz, today)}.")
 
+    screens, default_screen = _your_screens()
+
     # The log, oldest first, as columns: when, source, outcome, what.
     log = []
     for entry in store.log():
@@ -2058,7 +2164,8 @@ def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
         )
     return {
         "lede": " ".join(lede),
-        "screens": screens_view(config, farside, preview),
+        "screens": screens_view(config, farside, preview, screens),
+        "screen_default": default_screen,
         "cookies": cookie_view(store, tz, today),
         "session": session_view(store, tz, today),
         "running": bool(busy),

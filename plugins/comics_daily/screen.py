@@ -12,8 +12,8 @@ send prepared ahead of time and its follow-ups show the same comics).
 the heights the way client.js draws them; client.js still measures, so an
 estimate a little off only changes how the gap is spread.
 
-How many share the screen is the operator's choice (the "When they don't
-all fit" setting): as many as fit, or one at a time.
+How many share the screen is the operator's choice (the "On small screens"
+setting): as many as fit, or one at a time.
 """
 
 from __future__ import annotations
