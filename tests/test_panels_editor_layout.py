@@ -32,7 +32,7 @@ def _sign_in(client: FlaskClient) -> None:
 
 def _editor(app: Flask, client: FlaskClient) -> str:
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     resp = client.get(f"/pages/canvas/c/{cid}")
     assert resp.status_code == 200
     return resp.get_data(as_text=True)

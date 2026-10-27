@@ -18,11 +18,19 @@ from pathlib import Path
 import pytest
 from flask import Flask, jsonify, url_for
 
+from app import auth
 from app.main import REPO_ROOT, create_app
+
+_EXTRA_PROXIES = "2001:db8:1234::/48,100.64.0.0/10"
 
 
 @pytest.fixture
-def app(tmp_path: Path) -> Flask:
+def app(tmp_path: Path, monkeypatch, request) -> Flask:
+    monkeypatch.setenv("TESSERAE_SECRET_KEY", "00" * 32)
+    monkeypatch.delenv("TESSERAE_TRUSTED_NETWORKS", raising=False)
+    monkeypatch.delenv("TESSERAE_TRUSTED_PROXIES", raising=False)
+    if hasattr(request, "param"):
+        monkeypatch.setenv("TESSERAE_TRUSTED_PROXIES", request.param)
     a = create_app(
         testing=False,
         data_root=tmp_path,
@@ -85,6 +93,149 @@ def test_no_forwarded_headers_falls_back_to_request_host(app: Flask) -> None:
     )
     url = resp.get_json()["url"]
     assert url.startswith("http://tesserae.local:8765"), url
+
+
+@pytest.mark.parametrize("peer", ["203.0.113.9", "2001:db8::9"])
+def test_untrusted_peer_cannot_rewrite_external_urls(app: Flask, peer: str) -> None:
+    response = app.test_client().get(
+        "/healthz/external_url",
+        environ_overrides={"REMOTE_ADDR": peer},
+        headers={
+            "X-Forwarded-Host": "attacker.test",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Port": "8443",
+            "X-Forwarded-Prefix": "/forged",
+            "X-Ingress-Path": "/forged-ingress",
+        },
+    )
+    assert response.get_json()["url"] == "http://localhost/healthz"
+
+
+@pytest.mark.parametrize(
+    "app,peer,trusted",
+    [
+        (_EXTRA_PROXIES, "2001:db8:1234::10", True),
+        (_EXTRA_PROXIES, "100.100.1.2", True),
+        (_EXTRA_PROXIES, "127.0.0.1", True),
+        (_EXTRA_PROXIES, "192.168.1.2", True),
+        (_EXTRA_PROXIES, "2001:db8:5678::10", False),
+        (_EXTRA_PROXIES, "100.128.1.2", False),
+        ("invalid,0.0.0.0/0,::/0", "203.0.113.9", False),
+        ("invalid,0.0.0.0/0,::/0", "2001:db8::9", False),
+    ],
+    indirect=["app"],
+)
+def test_configured_proxy_cidrs_control_forwarded_origins(app, peer, trusted) -> None:
+    response = app.test_client().get(
+        "/healthz/external_url",
+        environ_overrides={"REMOTE_ADDR": peer},
+        headers={"X-Forwarded-Host": "paper.test:8443", "X-Forwarded-Proto": "https"},
+    )
+    expected = "https://paper.test:8443/healthz" if trusted else "http://localhost/healthz"
+    assert response.json["url"] == expected
+
+
+@pytest.mark.parametrize("source", ["environment", "settings"])
+def test_client_trusted_networks_do_not_grant_proxy_trust(app, source) -> None:
+    if source == "environment":
+        app.config["TRUSTED_NETWORKS"] = "203.0.113.0/24"
+    else:
+        auth.set_trusted_networks(app.config["SETTINGS_STORE"], "203.0.113.0/24")
+    response = app.test_client().get(
+        "/healthz/external_url",
+        environ_overrides={"REMOTE_ADDR": "203.0.113.9"},
+        headers={"X-Forwarded-Host": "attacker.test", "X-Forwarded-Proto": "https"},
+    )
+    assert response.json["url"] == "http://localhost/healthz"
+
+
+@pytest.mark.parametrize("app", [_EXTRA_PROXIES], indirect=True)
+@pytest.mark.parametrize("peer", ["2001:db8:1234::10", "100.100.1.2"])
+def test_proxy_trust_does_not_authorise_the_peer_as_a_client(app, peer) -> None:
+    auth.set_password_disabled(app.config["SETTINGS_STORE"], True)
+    response = app.test_client().get("/settings/system", environ_overrides={"REMOTE_ADDR": peer})
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("app", [_EXTRA_PROXIES], indirect=True)
+@pytest.mark.parametrize("peer", ["2001:db8:1234::10", "100.100.1.2"])
+@pytest.mark.parametrize("client_ip,status", [("192.168.1.50", 200), ("203.0.113.50", 403)])
+def test_configured_proxy_forwards_the_actual_client_for_authorisation(
+    app, peer, client_ip, status
+) -> None:
+    auth.set_password_disabled(app.config["SETTINGS_STORE"], True)
+    response = app.test_client().get(
+        "/settings/system",
+        environ_overrides={"REMOTE_ADDR": peer},
+        headers={"X-Forwarded-For": client_ip},
+    )
+    assert response.status_code == status
+
+
+@pytest.mark.parametrize("app", [_EXTRA_PROXIES], indirect=True)
+def test_proxy_trust_uses_the_direct_peer_not_a_forwarded_address(app) -> None:
+    response = app.test_client().get(
+        "/healthz/external_url",
+        environ_overrides={"REMOTE_ADDR": "203.0.113.9"},
+        headers={
+            "X-Forwarded-For": "2001:db8:1234::10",
+            "X-Forwarded-Host": "attacker.test",
+            "X-Forwarded-Proto": "https",
+        },
+    )
+    assert response.json["url"] == "http://localhost/healthz"
+
+
+@pytest.mark.parametrize("app", [_EXTRA_PROXIES], indirect=True)
+@pytest.mark.parametrize("peer", ["2001:db8:1234::10", "100.100.1.2"])
+def test_configured_proxy_origin_can_submit_a_same_origin_form(app, peer) -> None:
+    response = app.test_client().post(
+        "/setup",
+        environ_overrides={"REMOTE_ADDR": peer},
+        headers={
+            "Origin": "https://paper.test:8443",
+            "X-Forwarded-Host": "paper.test:8443",
+            "X-Forwarded-Proto": "https",
+        },
+        data={"password": "test-password", "password_confirm": "test-password"},
+    )
+    assert response.status_code == 302
+    assert auth.password_is_set(app.config["SETTINGS_STORE"])
+
+
+@pytest.mark.parametrize("app", [_EXTRA_PROXIES], indirect=True)
+@pytest.mark.parametrize(
+    "peer,status", [("2001:db8:1234::10", 200), ("100.100.1.2", 200), ("203.0.113.9", 302)]
+)
+def test_ingress_uses_configured_proxy_trust(app, peer, status) -> None:
+    app.config["HA_INGRESS_MODE"] = True
+    auth.set_password(app.config["SETTINGS_STORE"], "test-password")
+    response = app.test_client().get(
+        "/settings/system",
+        environ_overrides={"REMOTE_ADDR": peer},
+        headers={"X-Ingress-Path": "/api/hassio_ingress/test-prefix"},
+    )
+    assert response.status_code == status
+
+
+def test_trusted_proxy_preserves_the_configured_hop_count(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TESSERAE_FORWARDED_HOPS", "2")
+    app = create_app(testing=True, data_root=tmp_path)
+
+    @app.get("/external")
+    def external():
+        return jsonify(url=url_for("healthz", _external=True))
+
+    response = app.test_client().get(
+        "/external",
+        environ_overrides={"REMOTE_ADDR": "192.168.1.2"},
+        headers={
+            "X-Forwarded-Host": "paper.test, inner-proxy",
+            "X-Forwarded-Proto": "https, http",
+            "X-Forwarded-Port": "8443, 8765",
+        },
+    )
+    assert response.get_json()["url"] == "https://paper.test:8443/healthz"
 
 
 # -- v0.49.4: operator-supplied Public URL override --------------------

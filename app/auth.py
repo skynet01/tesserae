@@ -420,13 +420,22 @@ def _is_loopback() -> bool:
     return ip is not None and ip.is_loopback
 
 
-def peer_may_forward(addr: str | None) -> bool:
-    """Whether a direct peer at ``addr`` is allowed to tell us who the real
-    client is via ``X-Forwarded-For``: only a proxy on this machine or the
-    local network. A peer on a public address could otherwise claim to be a
-    LAN client and walk past the network checks below."""
+def peer_may_forward(addr: str | None, extra_cidrs: str = "") -> bool:
+    """Trust the direct proxy peer using private defaults plus explicit CIDRs.
+
+    ``extra_cidrs`` comes from the separate TRUSTED_PROXIES app config. This
+    runs before a Flask context exists and never uses client-authorisation
+    networks. Invalid or universal CIDRs are ignored by the shared parser.
+    """
     ip = _canonical_ip(addr)
-    return ip is not None and any(ip in net for net in _PRIVATE_NETWORKS)
+    if ip is None:
+        return False
+    if any(ip in net for net in _PRIVATE_NETWORKS):
+        return True
+    entries = tuple(
+        part.strip() for part in extra_cidrs.replace(",", "\n").splitlines() if part.strip()
+    )
+    return any(ip in net for net in _parsed_networks(entries))
 
 
 def _is_private_client() -> bool:

@@ -93,6 +93,29 @@ def test_remote_with_bad_token_401(app: Flask) -> None:
     assert resp.status_code == 401
 
 
+@pytest.mark.parametrize("header", ["Authorization", "X-Tesserae-Token"])
+@pytest.mark.parametrize(
+    "presented,stored",
+    [
+        ("café", "s3cret-token"),
+        ("café", "café"),
+        ("s3cret-token", "café"),
+        ("", "s3cret-token"),
+        ("wrong", "s3cret-token"),
+    ],
+)
+def test_malformed_or_non_ascii_credentials_are_unauthorised(
+    app: Flask, header: str, presented: str, stored: str
+) -> None:
+    _enable(app)
+    _set_token(app, stored)
+    value = f"Bearer {presented}" if header == "Authorization" else presented
+    response = app.test_client().get(
+        "/api/mcp/catalog", headers={header: value}, environ_overrides=_REMOTE
+    )
+    assert response.status_code == 401
+
+
 # -- agent docs (served to the bridge) ----------------------------------
 
 

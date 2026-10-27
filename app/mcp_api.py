@@ -191,14 +191,28 @@ def _direct_loopback() -> bool:
     return _is_loopback()
 
 
+def token_is_authorised() -> bool:
+    """Whether an explicit MCP credential authenticates this request.
+
+    Shared with CSRF protection: loopback alone cannot exempt a browser's
+    cross-origin request, even though it authenticates a native local agent.
+    """
+    stored = mcp_token(_settings())
+    presented = _presented_token(request)
+    # compare_digest accepts only ASCII strings, including a hand-edited key.
+    return bool(
+        stored
+        and presented
+        and stored.isascii()
+        and presented.isascii()
+        and secrets.compare_digest(presented, stored)
+    )
+
+
 def _authorised() -> bool:
     """A direct loopback caller is trusted (a co-located agent needs zero
     config); anything else presents the stored MCP token as a bearer token."""
-    if _direct_loopback():
-        return True
-    stored = mcp_token(_settings())
-    presented = _presented_token(request)
-    return bool(stored and presented and secrets.compare_digest(presented, stored))
+    return _direct_loopback() or token_is_authorised()
 
 
 def _err(status: int, message: str, **extra: Any) -> Response:

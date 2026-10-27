@@ -48,6 +48,56 @@ The installer:
 When it finishes, start the server with `./run.sh` (or `.\run.ps1`) from the
 install dir and open `http://localhost:8765/`.
 
+## Browser request protection
+
+Unsafe admin requests (POST, PUT, PATCH and DELETE), including cookie-free setup
+and login submissions, must have `Sec-Fetch-Site: same-origin` or `none` when
+that header is present.
+In its absence, `Origin`, or otherwise `Referer`, must match the request's scheme,
+host and port. Cross-port requests are refused with a clear 403. The actual
+request origin, resolved through proxy middleware, and the configured Public
+URL origin are both accepted, so direct LAN forms keep working with a Public
+URL configured. Proxies must preserve the browser's provenance headers and
+supply the correct forwarded scheme, host and port.
+Forwarded client, host, scheme, port and prefix headers, including HA's ingress
+header, are accepted only from trusted proxy peers. The defaults remain loopback
+(`127.0.0.0/8`, `::1/128`), private IPv4 (`10.0.0.0/8`, `172.16.0.0/12`,
+`192.168.0.0/16`), link-local (`169.254.0.0/16`, `fe80::/10`) and IPv6 ULA
+(`fc00::/7`). `TESSERAE_FORWARDED_HOPS` still controls how many proxy hops are read.
+
+Add public IPv6, CGNAT or VPN proxies with the separate comma-separated
+`TESSERAE_TRUSTED_PROXIES` environment variable, set before starting the server
+(or in the container's environment). For example:
+
+```sh
+export TESSERAE_TRUSTED_PROXIES='2001:db8::10/128,100.64.1.2/32'
+```
+
+These CIDRs add to the defaults; empty or unset adds nothing. Invalid CIDRs and
+universal `/0` ranges are ignored with a warning. Trust is matched against the
+direct connection peer before forwarded headers are read. This option trusts
+proxy metadata only: it does not authorise clients. The Authentication setting
+**Trusted networks** and `TESSERAE_TRUSTED_NETWORKS` remain separate client
+authorisation rules and never grant proxy trust.
+
+For compatibility, requests with all three provenance headers missing are
+allowed. Their provenance cannot be checked; when a session cookie is present,
+only its SameSite protection remains. Without Fetch Metadata, an explicit `Origin: null`
+or malformed origin is refused. Explicit API exemptions let cookie-free device,
+companion and webhook requests continue through their independent
+authentication. MCP requests are exempt only with an explicit valid token
+(`Authorization: Bearer` or `X-Tesserae-Token`). Token-free loopback MCP calls
+still check browser provenance, so a page on another localhost port cannot
+create or edit dashboards. Native Claude/Codex MCP bridges that send no Origin
+or Fetch Metadata keep their existing loopback access.
+Session-only API actions, such as issuing a device pairing
+code, are protected. Device-authenticated reads and OTA downloads are unchanged.
+Dashboard creation is POST-only. The legacy `/pages/new` and empty
+`/pages/canvas/` GET routes open the existing creation form; the latter
+preselects Freeform canvas. An existing canvas can still be opened with GET.
+Rejections are logged once per route per server process, without request URLs
+or tokens.
+
 ## Manual install
 
 If you'd rather do it by hand (or already cloned the repo):
