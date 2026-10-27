@@ -154,57 +154,57 @@
     {
       "name": "small_screens",
       "type": "select",
-      "label": "When they don't all fit",
+      "label": "On small screens",
       "default": "fit",
       "choices": [
         {
           "value": "fit",
-          "label": "Show as many as fit, taking turns with the rest"
+          "label": "As many as fit, taking turns with the rest"
         },
         {
           "value": "one",
-          "label": "Show one at a time, taking turns"
+          "label": "One at a time, taking turns"
         }
       ],
-      "help": "On a small or landscape screen not every comic fits at a size you can read. Rather than shrink them or cut one off, the comics take turns: each refresh shows the next ones. The admin page's preview shows what each screen gets.",
+      "help": "When a screen is too small (or too wide) to show every comic at a size you can read. Comics never shrink or get cut off; instead they take turns, a new set each refresh. The preview at the top shows what each screen gets.",
       "group": "Layout"
     },
     {
       "name": "gap_min",
       "type": "number",
-      "label": "Smallest gap",
+      "label": "Smallest space",
       "row": "gaps",
       "default": 6,
       "min": 0,
       "max": 200,
-      "help": "How far the gap shrinks to fit one more strip before the last one is left out."
+      "help": "The space between comics shrinks down to this to fit one more comic."
     },
     {
       "name": "gap",
       "type": "number",
-      "label": "Usual gap",
+      "label": "Usual space",
       "row": "gaps",
       "default": 32,
       "min": 0,
       "max": 200,
-      "help": "The space between rows, in pixels on a 1440 px wide panel; narrower cells scale it down."
+      "help": "The space between comics, in pixels on a 1440 px wide screen. Narrower cells scale it down."
     },
     {
       "name": "gap_max",
       "type": "number",
-      "label": "Largest gap",
+      "label": "Largest space",
       "row": "gaps",
       "default": 48,
       "min": 0,
       "max": 400,
-      "help": "How far the gap grows when there is spare height."
+      "help": "The space between comics grows up to this when there's height to spare."
     },
     {
       "name": "status_note",
       "type": "switch",
-      "label": "Status note",
+      "label": "Out-of-date note",
       "default": true,
-      "help": "A small line at the foot of the page naming any comic that couldn't be updated today."
+      "help": "A small line at the foot of the comics naming any that couldn't be updated today."
     }
   ],
   "render": {
