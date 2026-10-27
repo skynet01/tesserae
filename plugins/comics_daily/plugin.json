@@ -1,7 +1,7 @@
 {
   "tesserae_compat": "1.x",
   "name": "Comics, Daily",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "kind": "widget",
   "locales": [
     "en"
@@ -177,6 +177,23 @@
       "default": 48,
       "min": 0,
       "max": 400
+    },
+    {
+      "name": "small_screens",
+      "type": "select",
+      "label": "When they don't all fit",
+      "default": "fit",
+      "choices": [
+        {
+          "value": "fit",
+          "label": "Show as many as fit, taking turns with the rest"
+        },
+        {
+          "value": "one",
+          "label": "Show one at a time, taking turns"
+        }
+      ],
+      "help": "On a small or landscape screen not every comic fits at a size you can read. Rather than shrink them or cut one off, the comics take turns: each refresh shows the next ones. The admin page's preview shows what each screen gets."
     },
     {
       "name": "status_note",

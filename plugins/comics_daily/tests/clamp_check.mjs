@@ -3,7 +3,7 @@
 //
 // The layout maths behind the comics page: which rows fit, and the gap.
 import assert from "node:assert/strict";
-import { farSideColumns, gapsFor, noteText, planRows, scaleFor } from "../client.js";
+import { farSideColumns, gapsFor, noteText, planRows, scaleFor, shrinkFor } from "../client.js";
 
 const gaps = { gap: 32, min: 6, max: 48 };
 
@@ -57,3 +57,8 @@ assert.equal(
 );
 
 console.log("comics_daily clamp_check: ok");
+
+// A row taller than its space is drawn smaller to fit, never cut.
+assert.equal(shrinkFor(900, 600), 0.666);
+assert.equal(shrinkFor(500, 600), 1);
+assert.equal(shrinkFor(0, 600), 1);

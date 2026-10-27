@@ -467,8 +467,9 @@ def test_widget_renders(
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert 'data-plugin="comics_daily"' in body
-    assert "/plugins/comics_daily/img/gocomics-garfield-" in body
-    assert "nervous little dogs" in body
+    # A test cell is small: the comics take turns, so this render shows the
+    # Far Side or a strip, not necessarily both (see the screen tests).
+    assert "/plugins/comics_daily/img/" in body
 
     # Pictures are served read-only from data_dir.
     data_dir = Path(plugin.data_dir)
@@ -1719,3 +1720,137 @@ def test_cleanup_keeps_the_folder_under_budget_but_never_what_is_shown(tmp_path:
     gone = store.prune(wanted={"gocomics:garfield"}, max_bytes=0)
     assert gone == spare[2:]
     assert (store.image_dir / shown).exists()  # over budget, still never deleted
+
+
+# -- the screen: what fits, and taking turns (screen.py) ---------------------------
+
+screen = srv.screen
+FARSIDE_ITEM = screen.Item(
+    "farside",
+    ((950, 1123),) * 4,
+    ("While their owners sleep, nervous little dogs prepare for their day.", "", "Hal.", ""),
+)
+STRIP_ITEMS = [screen.Item("strip", ((1200, 380),)) for _ in range(4)]
+ALL_ITEMS = [FARSIDE_ITEM, *STRIP_ITEMS]
+
+
+def _plan(w: int, h: int, *, one: bool = False, start: int = 0) -> Any:
+    return screen.plan(
+        w,
+        h,
+        ALL_ITEMS,
+        far_side_count=4,
+        captions=True,
+        note=True,
+        gap_min=6,
+        one_at_a_time=one,
+        start=start,
+    )
+
+
+def test_the_big_portrait_panel_shows_everything_as_before() -> None:
+    chosen = _plan(1440, 2560)
+    assert chosen.show == (0, 1, 2, 3, 4) and not chosen.rotating
+    assert _plan(1440, 2560, one=True).show == (0, 1, 2, 3, 4)  # it all fits
+
+
+def test_a_small_landscape_screen_takes_turns_and_never_cuts_a_strip() -> None:
+    turns = screen.turns(
+        800,
+        480,
+        ALL_ITEMS,
+        far_side_count=4,
+        captions=True,
+        note=True,
+        gap_min=6,
+        one_at_a_time=False,
+    )
+    assert [t.show for t in turns] == [(0,), (1,), (2,), (3,), (4,)]
+    assert all(t.rotating for t in turns)
+    # Each strip shown fits whole: its height at the cell's width is under
+    # the room left.
+    room = screen.available_height(800, 480, True)
+    heights = screen.heights(800, ALL_ITEMS, 4, True)
+    assert all(heights[i] <= room for t in turns[1:] for i in t.show)
+
+
+def test_a_13_inch_screen_shows_as_many_as_fit_or_one_at_a_time() -> None:
+    turns = screen.turns(
+        1600,
+        1200,
+        ALL_ITEMS,
+        far_side_count=4,
+        captions=True,
+        note=True,
+        gap_min=6,
+        one_at_a_time=False,
+    )
+    # The Far Side's row of four and a strip fit together; the last turn
+    # fills its room by coming round to the top again.
+    assert [t.show for t in turns] == [(0, 1), (2, 3), (4, 0)]
+    one = screen.turns(
+        1600,
+        1200,
+        ALL_ITEMS,
+        far_side_count=4,
+        captions=True,
+        note=True,
+        gap_min=6,
+        one_at_a_time=True,
+    )
+    assert [t.show for t in one] == [(0,), (1,), (2,), (3,), (4,)]
+
+
+def test_narrow_cells_show_fewer_far_side_panels() -> None:
+    wide = screen.heights(1440, [FARSIDE_ITEM], 4, False)[0]
+    narrow = screen.heights(600, [FARSIDE_ITEM], 4, False)[0]
+    # 600 px holds 2 panels of at least 260 px: each is drawn bigger
+    # relative to the cell than 4 across would be.
+    assert narrow / 600 > wide / 1440
+
+
+def test_a_turn_moves_on_once_per_hold_and_previews_never_move_it(tmp_path: Path) -> None:
+    store = images.Store(tmp_path)
+
+    def decide(start: int) -> Any:
+        return _plan(800, 480, start=start)
+
+    now = 1_000_000.0
+    assert store.take_turn("cell", 5, decide, advance=True, now=now).show == (0,)
+    # A follow-up inside the hold shows the same; so does a preview later.
+    assert store.take_turn("cell", 5, decide, advance=True, now=now + 60).show == (0,)
+    assert store.take_turn("cell", 5, decide, advance=False, now=now + 999).show == (0,)
+    assert store.take_turn("cell", 5, decide, advance=True, now=now + 300).show == (1,)
+    # Another placement has its own turn.
+    assert store.take_turn("other", 5, decide, advance=True, now=now + 300).show == (0,)
+    for step in range(2, 6):
+        shown = store.take_turn("cell", 5, decide, advance=True, now=now + 300 * step).show
+    assert shown == (0,)  # round again
+
+
+def test_fetch_sends_only_this_turns_comics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(srv, "_today", lambda: TODAY)
+    monkeypatch.setattr(srv, "_enqueue", lambda *a, **k: None)
+    store = images.Store(tmp_path)
+    ok = {"fetched_on": TODAY.isoformat(), "last_success": time.time(), "error": None}
+    for key in ("gocomics:garfield", "gocomics:peanuts"):
+        name = store.add(key, images.normalise(_png((1200, 380))))
+        store.update(
+            key,
+            lambda e, name=name: e.update(
+                pictures=[{"file": name, "w": 1200, "h": 380}], edition=TODAY.isoformat(), **ok
+            ),
+        )
+    settings = {
+        "far_side": False,
+        "strips": [{"slug": "garfield"}, {"slug": "peanuts"}],
+    }
+    small = {"data_dir": str(tmp_path), "cell_w": 800, "cell_h": 300, "cell_id": "a"}
+    out = srv.fetch({}, settings, ctx=small)
+    assert [s["id"] for s in out["strips"]] == ["garfield"]
+    assert out["turns"] == {"showing": 1, "of": 2}
+    big = {"data_dir": str(tmp_path), "cell_w": 1440, "cell_h": 2560, "cell_id": "b"}
+    out = srv.fetch({}, settings, ctx=big)
+    assert [s["id"] for s in out["strips"]] == ["garfield", "peanuts"] and "turns" not in out

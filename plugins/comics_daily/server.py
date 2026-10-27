@@ -105,6 +105,7 @@ bunny_shield = _load_sibling("bunny_shield")
 pages = _load_sibling("pages")
 images = _load_sibling("images")
 cookies = _load_sibling("cookies")
+screen = _load_sibling("screen")
 
 from app import media_lifecycle as lifecycle  # noqa: E402
 
@@ -511,6 +512,7 @@ class Config:
     gap: int = 32
     gap_min: int = 6
     gap_max: int = 48
+    small_screens: str = "fit"  # "fit" (as many as fit) | "one" (one at a time)
 
     def layout(self) -> dict[str, Any]:
         """The cell options client.js reads, as the settings say."""
@@ -534,6 +536,7 @@ def _common(values: dict[str, Any]) -> dict[str, Any]:
         "gap": _count(values.get("gap"), 32, 0, 200),
         "gap_min": _count(values.get("gap_min"), 6, 0, 200),
         "gap_max": _count(values.get("gap_max"), 48, 0, 400),
+        "small_screens": "one" if values.get("small_screens") == "one" else "fit",
     }
 
 
@@ -1497,6 +1500,57 @@ def fetch(
     published = published_edition(datetime.now(UTC), today_iso)
     payload = _payload(wanted, problems, records, busy, config, store, today_iso, published)
     payload["layout"] = config.layout()
+    return fit_screen(payload, config, store, ctx, now)
+
+
+def fit_screen(
+    payload: dict[str, Any], config: Config, store: Any, ctx: dict[str, Any], now: float
+) -> dict[str, Any]:
+    """Keep only what this cell shows (screen.py): everything when it fits,
+    else the comics whose turn it is. A settled render (a push, a warm-ahead)
+    moves the placement's turn on, at most once per screen.HOLD_S; a preview
+    shows the turn without moving it."""
+    farside = payload.get("farside") or []
+    strips = payload.get("strips") or []
+    items = []
+    if farside:
+        items.append(
+            screen.Item(
+                "farside",
+                tuple((int(p["w"]), int(p["h"])) for p in farside),
+                tuple(str(p.get("caption") or "") for p in farside),
+            )
+        )
+    items += [screen.Item("strip", ((int(s["w"]), int(s["h"])),)) for s in strips]
+    if len(items) < 2:
+        return payload
+    settled = bool(ctx.get("settled", not ctx.get("preview")))
+    placement = str(ctx.get("cell_id") or "default")
+
+    def decide(start: int) -> Any:
+        return screen.plan(
+            ctx.get("cell_w"),
+            ctx.get("cell_h"),
+            items,
+            far_side_count=config.far_side_count,
+            captions=config.captions,
+            note=config.status_note and bool(payload.get("notes")),
+            gap_min=config.gap_min,
+            one_at_a_time=config.small_screens == "one",
+            start=start,
+        )
+
+    chosen = store.take_turn(placement, len(items), decide, advance=settled, now=now)
+    if not chosen.rotating:
+        return payload
+    shown = set(chosen.show)
+    offset = 1 if farside else 0
+    payload["farside"] = farside if 0 in shown and farside else []
+    payload["strips"] = [strip for i, strip in enumerate(strips) if (i + offset) in shown]
+    # The order they take their turn in, the first shown on top.
+    order = {index: n for n, index in enumerate(chosen.show)}
+    payload["strips"].sort(key=lambda s: order.get(strips.index(s) + offset, 0))
+    payload["turns"] = {"showing": len(chosen.show), "of": chosen.total}
     return payload
 
 
@@ -1823,6 +1877,60 @@ def cookie_view(store: Any, tz: Any, today: str) -> dict[str, Any]:
     return {"set": True, "chip": chip, "tone": tone, "line": line}
 
 
+def screens_view(
+    config: Config, farside: dict[str, Any] | None, preview: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """What each reference screen (screen.SCREENS) shows on its first turn,
+    and in words how the rest take turns, for the admin page's preview."""
+    pictures: list[tuple[str, list[dict[str, Any]]]] = []
+    if farside and farside.get("pictures"):
+        pictures.append(("The Far Side", farside["pictures"]))
+    pictures += [(item["label"], item["pictures"][:1]) for item in preview if item.get("pictures")]
+    items = [
+        screen.Item(
+            "farside" if label == "The Far Side" and n == 0 and farside else "strip",
+            tuple((int(p["w"]), int(p["h"])) for p in pics),
+            tuple(str(p.get("caption") or "") for p in pics),
+        )
+        for n, (label, pics) in enumerate(pictures)
+    ]
+    out = []
+    for name, width, height in screen.SCREENS:
+        turns = screen.turns(
+            width,
+            height,
+            items,
+            far_side_count=config.far_side_count,
+            captions=config.captions,
+            note=False,
+            gap_min=config.gap_min,
+            one_at_a_time=config.small_screens == "one",
+        )
+        chosen = turns[0] if turns else screen.Plan((), False, 0)
+        shown = [pictures[i] for i in chosen.show]
+        names = ", ".join(label for label, _ in shown)
+        if not items:
+            text = "Nothing to show yet."
+        elif not chosen.rotating:
+            text = f"Everything at once: {names}."
+        else:
+            steps = [" and ".join(pictures[i][0] for i in turn.show) for turn in turns]
+            text = f"Takes turns, one refresh each: {'; then '.join(steps)}."
+        out.append(
+            {
+                "name": name,
+                "w": width,
+                "h": height,
+                "text": text,
+                "shown": [
+                    {"label": label, "pictures": pics, "farside": label == "The Far Side"}
+                    for label, pics in shown
+                ],
+            }
+        )
+    return out
+
+
 def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
     """Everything the admin page shows besides the settings form."""
     today = _today().isoformat()
@@ -1892,6 +2000,7 @@ def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
         log.append(f"{when}  {source_name:<{width}}  {outcome:<8} {entry['text']}")
     return {
         "lede": " ".join(lede),
+        "screens": screens_view(config, farside, preview),
         "cookies": cookie_view(store, tz, today),
         "running": bool(busy),
         "farside": farside,

@@ -60,6 +60,12 @@ export function gapsFor(opts, scale = 1) {
   return { gap: gap * scale, min: min * scale, max: max * scale };
 }
 
+// How much to shrink a row that is taller than the space it has.
+export function shrinkFor(height, available) {
+  if (!(height > 0) || !(available > 0) || height <= available) return 1;
+  return Math.floor((available / height) * 1000) / 1000;
+}
+
 // Which rows to keep and the gap between them, given each row's height and
 // the height available. A row taller than the whole box can never show, so
 // it is passed over (a short landscape cell still gets its strips when the
@@ -197,10 +203,17 @@ function fit(shadow, opts, wantedPanels) {
   rows.forEach((row) => { row.hidden = false; });
   const heights = rows.map((row) => row.getBoundingClientRect().height);
   const plan = planRows(heights, available, gapsFor(opts, scaleFor(width)));
-  // Nothing fits at all (a sliver of a cell): show the first row, clipped,
-  // rather than an empty card.
+  // Nothing fits whole (one row taller than the cell: the server sends one
+  // comic a turn on a small screen): draw the first row smaller so it fits,
+  // never cut off.
   const keep = new Set(plan.keep.length ? plan.keep : [0]);
-  rows.forEach((row, i) => { row.hidden = !keep.has(i); });
+  rows.forEach((row, i) => {
+    row.hidden = !keep.has(i);
+    row.style.zoom = "";
+  });
+  if (!plan.keep.length && rows[0] && heights[0] > available) {
+    rows[0].style.zoom = String(Math.max(0.1, shrinkFor(heights[0], available)));
+  }
   box.style.gap = `${plan.gap}px`;
 }
 

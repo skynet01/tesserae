@@ -43,6 +43,7 @@ from app import media_lifecycle as lifecycle
 STATE_FILE = "state.json"
 LOG_FILE = "log.json"
 COOKIE_STATUS_FILE = "gocomics-cookie-status.json"
+ROTATION_FILE = "turns.json"
 IMAGE_DIR = "images"
 # The admin page's log keeps this many lines.
 LOG_LINES = 150
@@ -271,6 +272,47 @@ class Store:
             sources = self.sources()
             if sources.pop(key, None) is not None:
                 self._save(sources)
+
+    # -- whose turn it is, per placement (screen.py) --------------------------
+
+    def take_turn(
+        self, placement: str, count: int, decide: Callable[[int], Any], *, advance: bool, now: float
+    ) -> Any:
+        """The plan ``decide(start)`` gives for this placement's turn, under
+        the store lock. With ``advance``, a placement whose comics have been
+        up for HOLD_S moves on past the ones it showed; a preview never
+        moves it. Placements unseen for FORGET_AFTER_S are dropped."""
+        from_hold = 4 * 60
+        with _LOCK:
+            path = self.root / ROTATION_FILE
+            try:
+                turns = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                turns = {}
+            turns = turns if isinstance(turns, dict) else {}
+            mine = turns.get(placement) if isinstance(turns.get(placement), dict) else {}
+            start = int(mine.get("start") or 0) if mine else 0
+            shown = int(mine.get("shown") or 0) if mine else 0
+            at = float(mine.get("at") or 0) if mine else 0.0
+            moved = False
+            if advance and mine and shown and now - at >= from_hold:
+                start = (start + shown) % max(1, count)
+                moved = True
+            chosen = decide(start)
+            if not mine or moved or len(chosen.show) != shown:
+                turns = {
+                    k: v
+                    for k, v in turns.items()
+                    if isinstance(v, dict) and now - float(v.get("at") or 0) < FORGET_AFTER_S
+                }
+                turns[placement] = {
+                    "start": start,
+                    "shown": len(chosen.show),
+                    "at": now if (moved or not mine) else at,
+                }
+                self.root.mkdir(parents=True, exist_ok=True)
+                _write_atomic(path, json.dumps(turns).encode("utf-8"))
+            return chosen
 
     # -- the pasted GoComics cookies' status --------------------------------
     # When they were pasted, when they expire, how many, and how the last
