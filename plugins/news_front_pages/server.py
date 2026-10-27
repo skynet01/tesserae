@@ -66,7 +66,7 @@ Layout under ``data_dir``::
     pages/<CODE>_<YYYYMMDD>.jpg   one validated page per paper and edition (the
                                   PDF drawn at panel width, or the JPEG)
     state.json                    paper shown, since when and the order it came from;
-                                  download attempts and failures
+                                  download attempts and failures; the fetch log
     directory.json                Freedom Forum's paper list, for the editor's picker
 
 A downloaded edition is kept until it is more than ``KEEP_DAYS`` old, a newer
@@ -76,6 +76,7 @@ download fails keeps showing its last good page, up to ``LAST_GOOD_MAX_DAYS``.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import contextvars
 import functools
@@ -106,7 +107,18 @@ from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from flask import Blueprint, abort, current_app, render_template, send_from_directory
+from flask import (
+    Blueprint,
+    abort,
+    current_app,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    url_for,
+)
 from PIL import Image
 from werkzeug.wrappers import Response
 
@@ -268,6 +280,9 @@ def _shared(name: str, factory: Callable[[], Any]) -> Any:
 _LOCK: threading.Lock = _shared("state_lock", threading.Lock)
 # Guards the worker registry below.
 _RUNS_LOCK: threading.Lock = _shared("runs_lock", threading.Lock)
+# One Verify check at a time per process: each may draw a PDF (a child
+# process of up to RASTER_MEMORY_BYTES), so a burst of clicks can't stack them.
+_VERIFY_LOCK: threading.Lock = _shared("verify_lock", threading.Lock)
 # The last page each placement got under the lock, for a render that can't
 # have the lock in time: (data dir, pinned code or "") -> (wall time, payload).
 _LAST_CLAIMED: dict[tuple[str, str], tuple[float, dict[str, Any]]] = _shared("last_claimed", dict)
@@ -1402,10 +1417,10 @@ def _refresh(data_dir: Path, job: _Job) -> None:
     )
     if current and not sharpen:
         return
-    notes: list[tuple[float, str]] = []
+    notes: list[Note] = []
 
-    def note(text: str) -> None:
-        notes.append((_wall(), text))
+    def note(text: str, outcome: str = "") -> None:
+        notes.append((_wall(), text, outcome))
 
     if sharpen and have is not None:
         tries = _pdf_retry(state, job.code, have.day)[0]
@@ -1425,14 +1440,14 @@ def _refresh(data_dir: Path, job: _Job) -> None:
             body = download_edition(job.code, day, deadline, pdf_only=sharpen, trace=trace)
         except Exception as err:  # CdnUnreachable, or the host refusing the egress
             logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
-            note(f"{day}: Freedom Forum unreachable ({_short(err)})")
+            note(f"{day}: Freedom Forum unreachable ({_short(err)})", "error")
             failure = "unreachable"
             break
         if body is not None:
             saved = (day, body)
             saved_how = (trace, max(0.0, _clock() - started))
             break
-        note(f"{day}: {_not_found(trace, pdf_only=sharpen)}")
+        note(f"{day}: {_not_found(trace, pdf_only=sharpen)}", "missing")
     size = page_size(saved[1]) if saved is not None else None
     # The edition left on its JPEG by this job, whose PDF is asked for again
     # later: a JPEG saved in its place, or a redraw that came to nothing
@@ -1453,7 +1468,7 @@ def _refresh(data_dir: Path, job: _Job) -> None:
                 _write_atomic(edition_path(pages, job.code, saved[0]), saved[1])
             except OSError as err:
                 logger.warning("%s: could not save %s: %s", PLUGIN_ID, job.code, err)
-                note(f"{saved[0]}: downloaded, but couldn't be saved ({_short(err)})")
+                note(f"{saved[0]}: downloaded, but couldn't be saved ({_short(err)})", "error")
                 saved = None
                 blurry_day = sharp_day = None
             else:
@@ -1468,12 +1483,12 @@ def _refresh(data_dir: Path, job: _Job) -> None:
                     if isinstance(when, (int, float)) and now - when < ORPHAN_AFTER_S
                 }
                 prune(pages, job.today, now, wanted if tracked and wanted else None)
-                note(f"{saved[0]}: {_saved_line(saved[1], size, saved_how, redraw=sharpen)}")
+                note(f"{saved[0]}: {_saved_line(saved[1], size, saved_how, redraw=sharpen)}", "ok")
         if saved is None and not sharpen:
             if have is not None:
                 note(f"keeping the {have.day} page")
             elif failure == "missing":
-                note(f"no page in the last {LOOKBACK_DAYS} days")
+                note(f"no page in the last {LOOKBACK_DAYS} days", "missing")
         state = _read_json(state_path)
         state["checked"] = {
             code: when
@@ -1539,11 +1554,18 @@ def _refresh(data_dir: Path, job: _Job) -> None:
 # The admin page shows what the worker did, newest last: per paper, the
 # editions it asked for, where each saved page came from (the PDF drawn at
 # panel width, or the JPEG fallback), its size and how long it took, the PDF
-# retries and the failures. The lines live in state.json, at most LOG_LINES
-# of them. They hold paper codes, dates and what Freedom Forum or the network
+# retries and the failures, plus the admin page's own Verify checks and
+# Fetch now presses. Each line carries an outcome ("ok", "missing" for an
+# edition that isn't there, "error" for an outage or a page that couldn't be
+# saved, "" for a note). The lines live in state.json, at most LOG_LINES of
+# them. They hold paper codes, dates and what Freedom Forum or the network
 # answered; the widget has no secrets to leak into them.
 
 LOG_LINES = 150
+LOG_OUTCOMES = ("ok", "missing", "error")
+
+# One log line: when, what, and its outcome (see LOG_OUTCOMES, "" for a note).
+Note = tuple[float, str, str]
 
 
 def _not_found(trace: Trace, *, pdf_only: bool) -> str:
@@ -1589,22 +1611,31 @@ def _log_entries(raw: Any) -> list[dict[str, Any]]:
     ]
 
 
-def _append_log(state: dict[str, Any], code: str, notes: list[tuple[float, str]]) -> None:
+def _append_log(state: dict[str, Any], code: str, notes: list[Note]) -> None:
     """Add ``notes`` to the state's log for ``code``, keeping the newest
     ``LOG_LINES``. Callers hold ``_LOCK``."""
     if not notes:
         return
     entries = _log_entries(state.get("log"))
-    entries += [{"at": at, "code": code, "text": text} for at, text in notes]
+    for at, text, outcome in notes:
+        entry: dict[str, Any] = {"at": at, "code": code, "text": text}
+        if outcome in LOG_OUTCOMES:
+            entry["outcome"] = outcome
+        entries.append(entry)
     state["log"] = entries[-LOG_LINES:]
+
+
+def log_line(data_dir: Path, code: str, text: str, outcome: str = "") -> None:
+    """Add one line to the log from outside the worker (the admin page)."""
+    with contextlib.suppress(Exception), _LOCK:
+        state = _read_json(data_dir / STATE_FILE)
+        _append_log(state, code, [(_wall(), text, outcome)])
+        _write_json(data_dir / STATE_FILE, state)
 
 
 def _log_stop(data_dir: Path, err: BaseException) -> None:
     """Note in the log that the worker stopped on an error (a bug)."""
-    with contextlib.suppress(Exception), _LOCK:
-        state = _read_json(data_dir / STATE_FILE)
-        _append_log(state, "", [(_wall(), f"The download worker stopped: {type(err).__name__}")])
-        _write_json(data_dir / STATE_FILE, state)
+    log_line(data_dir, "", f"The download worker stopped: {type(err).__name__}", "error")
 
 
 # ----- widget contract: fetch ------------------------------------------------
@@ -1875,6 +1906,123 @@ def choices(name: str) -> list[dict[str, str]]:
     return rows
 
 
+# ----- Verify: try a paper code from the admin page ----------------------------
+#
+# The paper row's Verify button posts the code as typed (saved or not) and
+# gets back what a download of it would show: the newest edition in the last
+# LOOKBACK_DAYS, fetched through download_edition (the PDF drawn at panel
+# width, or the JPEG), in the widget's own network scope and within
+# VERIFY_BUDGET_S. Nothing is saved but a log line: the frame's pages are
+# the worker's to fetch, and Fetch now asks it to.
+
+VERIFY_BUDGET_S = 45.0
+THUMB_WIDTH_PX = 160
+
+
+def _thumbnail(body: bytes) -> str | None:
+    """A small JPEG of the page's top as a data: URL, for the result."""
+    try:
+        with Image.open(io.BytesIO(body)) as opened:
+            img = opened.convert("L")
+            height = round(img.height * THUMB_WIDTH_PX / img.width)
+            small = img.resize((THUMB_WIDTH_PX, height), Image.Resampling.LANCZOS)
+            small = small.crop((0, 0, THUMB_WIDTH_PX, min(height, THUMB_WIDTH_PX * 4 // 3)))
+            out = io.BytesIO()
+            small.save(out, "JPEG", quality=70)
+    except Exception:  # Pillow raises a zoo of types for a broken file
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(out.getvalue()).decode("ascii")
+
+
+def verify_code(data_dir: Path, code: str, today: date | None = None) -> dict[str, Any]:
+    """Try ``code`` (already through ``clean_code``) the way the worker
+    would, without saving the page. The answer: ``ok``, ``tone`` and
+    ``chip`` for the result's tag, ``message`` in words, ``thumb`` (a data:
+    URL) when a page came, and ``name``, the paper's name when Freedom
+    Forum's list has it. Logged like a fetch."""
+    today = today or _edition_today()
+    try:
+        names = directory(data_dir)
+    except Exception:  # the list is a nicety; the download decides
+        names = dict(FALLBACK_DIRECTORY)
+    name = names.get(code, "")
+    who = f"{name} ({code})" if name else code
+    deadline = _clock() + VERIFY_BUDGET_S
+    started = _clock()
+    got: tuple[date, bytes, Trace] | None = None
+    misses: list[str] = []
+    try:
+        for back in range(LOOKBACK_DAYS):
+            day = today - timedelta(days=back)
+            trace = Trace()
+            body = download_edition(code, day, deadline, trace=trace)
+            if body is not None:
+                got = (day, body, trace)
+                break
+            misses.append(f"{day}: {_not_found(trace, pdf_only=False)}")
+    except Exception as err:  # CdnUnreachable, or the host refusing the egress
+        reason = _short(err)
+        log_line(data_dir, code, f"Verify: Freedom Forum unreachable ({reason})", "error")
+        return {
+            "ok": False,
+            "tone": "bad",
+            "chip": "Error",
+            "name": name,
+            "message": f"Couldn't reach Freedom Forum ({reason}), so {code} wasn't checked. "
+            "Try again in a minute.",
+        }
+    took = _clock() - started
+    if got is None:
+        odd = "; ".join(m for m in misses if not m.endswith("not out yet"))
+        log_line(
+            data_dir,
+            code,
+            f"Verify: no page in the last {LOOKBACK_DAYS} days{f' ({odd})' if odd else ''}",
+            "missing",
+        )
+        if name:
+            message = (
+                f"Freedom Forum lists {who}, but has no front page for it in the last "
+                f"{LOOKBACK_DAYS} days. It may have stopped sending pages."
+            )
+        else:
+            message = (
+                f"No paper with the code {code}: Freedom Forum has no front page for it in "
+                f"the last {LOOKBACK_DAYS} days, and it isn't in Freedom Forum's paper list. "
+                "Check the code (like NY_NYT), or pick the paper on a cell to see them all."
+            )
+        if odd:
+            message += f" What came back: {odd}."
+        return {"ok": False, "tone": "bad", "chip": "Not found", "name": name, "message": message}
+    day, body, trace = got
+    size = page_size(body)
+    detail = _saved_line(body, size, (trace, took), redraw=False)
+    log_line(data_dir, code, f"Verify: {day}: {detail}", "ok")
+    if day == today:
+        chip, tone, which = "Works", "ok", f"today's page ({day:%b %d})"
+    else:
+        chip, tone = "Works", "warn"
+        which = f"the {day:%b %d} page; today's isn't out yet"
+    return {
+        "ok": True,
+        "tone": tone,
+        "chip": chip,
+        "name": name,
+        "message": f"{who}: downloaded {which}. {detail[0].upper()}{detail[1:]}.",
+        "thumb": _thumbnail(body),
+    }
+
+
+def _scope(plugin: Any) -> Any:
+    """The widget's own network scope (its ``requires:`` hosts), for work an
+    admin request starts, as a render's runs in."""
+    try:
+        from app.capabilities import capability_scope
+    except ImportError:  # an older Tesserae: no egress allowlist to apply
+        return contextlib.nullcontext()
+    return capability_scope(plugin.capabilities)
+
+
 # ----- the admin page ----------------------------------------------------------
 
 
@@ -1888,19 +2036,44 @@ def _timezone() -> tzinfo | None:
         return None
 
 
-def downloads_view(
+_OUTCOME_LABELS = {"ok": "OK", "missing": "MISSING", "error": "ERROR"}
+
+
+def _saved_pages(pages: Path, today: date) -> dict[str, tuple[date, int | None]]:
+    """Each paper's newest saved edition young enough to show, and its width
+    (read from the header, no decode), from the file names alone: the admin
+    page must not decode a page per paper. ``newest_page`` is what judges a
+    page for a render."""
+    oldest = today - timedelta(days=LAST_GOOD_MAX_DAYS)
+    newest: dict[str, tuple[date, Path]] = {}
+    with contextlib.suppress(OSError):
+        for path in pages.glob("*.jpg"):
+            parsed = _page_day(path.name)
+            if parsed is None or not oldest <= parsed[1] <= today:
+                continue
+            code, day = parsed
+            if code not in newest or day > newest[code][0]:
+                newest[code] = (day, path)
+    return {code: (day, _saved_width(path)) for code, (day, path) in newest.items()}
+
+
+def fetches_view(
     data_dir: Path,
     tz: tzinfo | None,
     papers: list[str] | None = None,
     today: date | None = None,
 ) -> dict[str, Any]:
-    """The admin page's Downloads card: what the worker is doing now, the
-    PDF retries that will really run (today's edition of a listed paper,
-    still on its JPEG, with a rasteriser to draw the PDF) or have run out,
-    the listed papers with no page, and its log, oldest line first. Records
-    the worker no longer acts on (an earlier edition's retry, a paper taken
-    off the list) are summed up as history. ``papers`` are the codes in the
-    setting; None counts every code the state names."""
+    """The admin page's Fetches card and the paper rows' status.
+
+    ``status``: what the worker is doing now (or when it last did
+    something), the PDF retries that will really run (today's edition of a
+    listed paper, still on its JPEG, with a rasteriser to draw the PDF) or
+    have run out, and the listed papers with no page. ``log``: the log,
+    oldest first, one dict per line (``when``, ``code``, ``outcome`` label
+    and ``tone``, ``text``). ``papers``: per listed code, a ``chip`` and
+    ``tone`` for its row's head and a ``line`` saying what it shows.
+    ``papers`` (the argument) are the codes in the setting; None counts
+    every code the state names."""
 
     def when(ts: float, fmt: str) -> str:
         try:
@@ -1917,12 +2090,10 @@ def downloads_view(
     line, _ = _line(data_dir)
     if line:
         more = f", {len(line) - 1} more waiting" if len(line) > 1 else ""
-        status.append(f"Downloading {line[0]} now{more}.")
+        status.append(f"Fetching {line[0]} now{more}. Reload to see how it went.")
     elif entries:
-        status.append(f"Last activity {when(entries[-1]['at'], '%b %d, %H:%M')}.")
-    else:
-        status.append("Nothing downloaded yet: a render that needs a page asks for it.")
-    waiting, spent, history = [], [], []
+        status.append(f"Last fetch {when(entries[-1]['at'], '%b %d, %H:%M')}.")
+    waiting, spent = [], []
     for code, entry in sorted(_section(state, "pdf_retry").items()):
         if not isinstance(entry, dict) or not isinstance(entry.get("day"), str):
             continue
@@ -1939,37 +2110,74 @@ def downloads_view(
             < SHARP_MIN_WIDTH_PX
         )
         if not current:
-            history.append(f"{code}'s PDF retry for {entry['day']}")
-        elif tries < PDF_MAX_TRIES:
-            waiting.append(
-                f"{code} (try {tries + 1} of {PDF_MAX_TRIES}, after {when(after, '%H:%M')})"
-            )
+            continue  # an earlier edition's, or a paper taken off the list
+        if tries < PDF_MAX_TRIES:
+            waiting.append(f"{code} at {when(after, '%H:%M')} (try {tries + 1} of {PDF_MAX_TRIES})")
         else:
             spent.append(code)
     if waiting:
-        status.append(f"Waiting to ask for the PDF again: {', '.join(waiting)}.")
+        status.append(f"Asking again for the sharper PDF: {', '.join(waiting)}.")
     if spent:
-        status.append(f"Out of PDF tries, keeping the JPG: {', '.join(spent)}.")
+        status.append(f"Out of PDF tries for today, showing the smaller JPG: {', '.join(spent)}.")
     reasons = {
         "unreachable": "Freedom Forum unreachable",
         "missing": f"none in the last {LOOKBACK_DAYS} days",
     }
-    failed = []
-    for code, why in sorted(_section(state, "failed").items()):
-        if listed is None or code in listed:
-            failed.append(f"{code} ({reasons.get(str(why), str(why))})")
-        else:
-            history.append(f"{code}'s failed download")
-    if failed:
-        status.append(f"No page yet for {', '.join(failed)}.")
-    if history:
-        status.append(f"History, no longer acted on: {', '.join(history)}.")
-    width = max((len(e["code"]) for e in entries), default=0)
-    log = [
-        f"{when(e['at'], '%b %d %H:%M:%S')}  {e['code'] or '-':<{width}}  {e['text']}"
-        for e in entries
+    failed = _section(state, "failed")
+    no_page = [
+        f"{code} ({reasons.get(str(why), str(why))})"
+        for code, why in sorted(failed.items())
+        if listed is None or code in listed
     ]
-    return {"status": status, "log": log}
+    if no_page:
+        status.append(f"No page for {', '.join(no_page)}.")
+
+    width = max((len(e["code"]) for e in entries), default=0)
+    log: list[dict[str, str]] = []
+    for e in entries:
+        outcome = str(e.get("outcome") or "")
+        log.append(
+            {
+                "when": when(e["at"], "%b %d %H:%M:%S"),
+                "code": f"{e['code'] or '-':<{width}}",
+                "outcome": f"{_OUTCOME_LABELS.get(outcome, ''):<7}",
+                "tone": {"ok": "ok", "missing": "warn", "error": "bad"}.get(outcome, ""),
+                "text": e["text"],
+            }
+        )
+
+    saved = _saved_pages(pages, today)
+    last_seen: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        if e.get("outcome") in LOG_OUTCOMES:
+            last_seen[e["code"]] = e
+    rows: dict[str, dict[str, str]] = {}
+    for code in papers if papers is not None else sorted(saved):
+        chip, tone = "Not fetched yet", ""
+        parts: list[str] = []
+        if code in saved:
+            day, px = saved[code]
+            chip, tone = ("Today", "ok") if day == today else (f"{day:%b %d}", "")
+            how = (
+                "the PDF drawn at full width"
+                if (px or 0) >= SHARP_MIN_WIDTH_PX
+                else "the smaller JPG, blurrier"
+            )
+            parts.append(f"Shows the {day:%b %d} page, from {how}.")
+        elif code in failed:
+            chip, tone = "No page", "bad"
+            parts.append(f"No page: {reasons.get(str(failed[code]), str(failed[code]))}.")
+        else:
+            parts.append("Fetched the first time a frame shows it.")
+        if code in line:
+            chip, tone = "Fetching", ""
+        last = last_seen.get(code)
+        if last is not None and last.get("outcome") == "ok":
+            parts.append(f"Last fetched {when(last['at'], '%b %d at %H:%M')}.")
+        elif last is not None:
+            parts.append(f"Last checked {when(last['at'], '%b %d at %H:%M')}: {last['text']}.")
+        rows[code] = {"chip": chip, "tone": tone, "line": " ".join(parts)}
+    return {"status": status, "log": log, "running": bool(line), "papers": rows}
 
 
 # ----- page images -----------------------------------------------------------
@@ -1983,6 +2191,13 @@ RENDER_SAFE_ENDPOINTS: tuple[str, ...] = (f"{PLUGIN_ID}.serve_page",)
 
 # Settings and controls belong together under Widgets > Admin pages > Newspapers.
 ADMIN_SETTINGS = True
+
+
+def _json(payload: dict[str, Any], status: int) -> Response:
+    response = jsonify(payload)
+    response.status_code = status
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def blueprint() -> Blueprint:
@@ -2008,12 +2223,78 @@ def blueprint() -> Blueprint:
         return render_template(
             "news_front_pages/index.html",
             section=section,
-            downloads=downloads_view(
+            view=fetches_view(
                 Path(plugin.data_dir),
                 _timezone(),
                 [p.code for p in parse_papers(_settings().get("papers", DEFAULT_PAPERS))],
             ),
+            recheck_min=RECHECK_S // 60,
         )
+
+    @bp.post("/verify")
+    def verify() -> Response:
+        plugin = _plugin()
+        if plugin is None:
+            abort(404)
+        raw = str(request.form.get("code") or "")[:200]
+        code = clean_code(raw)
+        if code is None:
+            hint = "letters, digits, _ and - only, like NY_NYT"
+            message = (
+                f"Type a paper code first: {hint}."
+                if not raw.strip()
+                else f"'{raw.strip()[:60]}' isn't a paper code: {hint}."
+            )
+            return _json({"ok": False, "tone": "bad", "chip": "Bad code", "message": message}, 400)
+        if not _VERIFY_LOCK.acquire(blocking=False):
+            return _json(
+                {
+                    "ok": False,
+                    "tone": "warn",
+                    "chip": "Busy",
+                    "message": "Another check is running. Try again when it's done.",
+                },
+                409,
+            )
+        try:
+            with _scope(plugin):
+                result = verify_code(Path(plugin.data_dir), code)
+        finally:
+            _VERIFY_LOCK.release()
+        return _json({**result, "code": code}, 200)
+
+    @bp.post("/fetch")
+    def fetch_now() -> Response:
+        plugin = _plugin()
+        if plugin is None:
+            abort(404)
+        data_dir = Path(plugin.data_dir)
+        papers = [p.code for p in parse_papers(_settings().get("papers", DEFAULT_PAPERS))]
+        if not papers:
+            flash("No papers to fetch: add a paper code first.", "warn")
+            return redirect(url_for(f"{PLUGIN_ID}.index", _anchor="fetches"))
+        today = _edition_today()
+        pages = data_dir / PAGES_DIR
+        sharp = rasteriser_available()
+        done = [
+            code
+            for code in papers
+            if (width := _saved_width(edition_path(pages, code, today))) is not None
+            and (width >= SHARP_MIN_WIDTH_PX or not sharp)
+        ]
+        due = [code for code in papers if code not in done]
+        if not due:
+            flash("Every paper already has today's page.", "ok")
+            return redirect(url_for(f"{PLUGIN_ID}.index", _anchor="fetches"))
+        with _scope(plugin):
+            _enqueue(data_dir, due, today, force=True)
+        log_line(data_dir, "", f"Fetch now: asked for {', '.join(due)}")
+        flash(
+            f"Fetching {', '.join(due)} now. The log below fills in as each one lands; "
+            "reload to see it.",
+            "ok",
+        )
+        return redirect(url_for(f"{PLUGIN_ID}.index", _anchor="fetches"))
 
     @bp.get("/page/<name>")
     def serve_page(name: str) -> Response:

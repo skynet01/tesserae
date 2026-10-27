@@ -1641,13 +1641,14 @@ def test_the_log_tells_the_jpeg_from_the_pdf_and_follows_the_retries(
 def test_the_log_keeps_only_the_newest_lines() -> None:
     state: dict[str, Any] = {"log": [{"junk": True}, "x"]}
     for i in range(server.LOG_LINES + 5):
-        server._append_log(state, "WSJ", [(float(i), f"line {i}")])
+        server._append_log(state, "WSJ", [(float(i), f"line {i}", "ok" if i % 2 else "odd")])
     assert len(state["log"]) == server.LOG_LINES
-    assert state["log"][0] == {"at": 5.0, "code": "WSJ", "text": "line 5"}
+    assert state["log"][0] == {"at": 5.0, "code": "WSJ", "text": "line 5", "outcome": "ok"}
+    assert "outcome" not in state["log"][1]  # not an outcome the page knows
     assert state["log"][-1]["text"] == f"line {server.LOG_LINES + 4}"
 
 
-def test_the_downloads_card_sums_up_the_state_and_lists_the_log(
+def test_the_fetches_card_sums_up_the_state_and_lists_the_log(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(server, "rasteriser_available", lambda: True)
@@ -1662,8 +1663,16 @@ def test_the_downloads_card_sums_up_the_state_and_lists_the_log(
                     "at": at,
                     "code": "WSJ",
                     "text": "2026-10-25: PDF, 1440\u00d72794 px, 812 KB in 4.2 s",
+                    "outcome": "ok",
                 },
-                {"at": at + 2, "code": "AZ_ADS", "text": "no page in the last 3 days"},
+                {"at": at + 1, "code": "WSJ", "text": "a note"},
+                {
+                    "at": at + 2,
+                    "code": "AZ_ADS",
+                    "text": "no page in the last 3 days",
+                    "outcome": "missing",
+                },
+                {"at": at + 3, "code": "", "text": "worker stopped", "outcome": "error"},
                 {"at": "soon", "code": "WSJ", "text": "a hand-edited line"},
             ],
             "pdf_retry": {
@@ -1678,34 +1687,51 @@ def test_the_downloads_card_sums_up_the_state_and_lists_the_log(
             "failed": {"AZ_ADS": "missing", "OLD": "unreachable"},
         },
     )
-    listed = ["NY_NYT", "WSJ", "USAT", "AZ_ADS"]
-    view = server.downloads_view(tmp_path, UTC, listed, today=TODAY)
+    listed = ["NY_NYT", "WSJ", "USAT", "AZ_ADS", "CA_LAT"]
+    view = server.fetches_view(tmp_path, UTC, listed, today=TODAY)
     assert view["status"] == [
-        "Last activity Oct 25, 14:03.",
-        "Waiting to ask for the PDF again: USAT (try 3 of 6, after 15:03).",
-        "Out of PDF tries, keeping the JPG: NY_NYT.",
-        "No page yet for AZ_ADS (none in the last 3 days).",
-        "History, no longer acted on: LAT's PDF retry for 2026-10-25, "
-        "WSJ's PDF retry for 2026-10-24, OLD's failed download.",
+        "Last fetch Oct 25, 14:03.",
+        "Asking again for the sharper PDF: USAT at 15:03 (try 3 of 6).",
+        "Out of PDF tries for today, showing the smaller JPG: NY_NYT.",
+        "No page for AZ_ADS (none in the last 3 days).",
     ]
-    assert view["log"] == [
-        "Oct 25 14:03:12  WSJ     2026-10-25: PDF, 1440\u00d72794 px, 812 KB in 4.2 s",
-        "Oct 25 14:03:14  AZ_ADS  no page in the last 3 days",
+    assert [(e["when"], e["code"], e["outcome"], e["tone"], e["text"]) for e in view["log"]] == [
+        (
+            "Oct 25 14:03:12",
+            "WSJ   ",
+            "OK     ",
+            "ok",
+            "2026-10-25: PDF, 1440\u00d72794 px, 812 KB in 4.2 s",
+        ),
+        ("Oct 25 14:03:13", "WSJ   ", "       ", "", "a note"),
+        ("Oct 25 14:03:14", "AZ_ADS", "MISSING", "warn", "no page in the last 3 days"),
+        ("Oct 25 14:03:15", "-     ", "ERROR  ", "bad", "worker stopped"),
     ]
-    # Today's page redrawn sharp since: its retry is history too, and with
-    # no rasteriser nothing would ever redraw it.
-    _seed(tmp_path, "USAT_20261025.jpg", _jpeg(1440, 2700))
-    assert "USAT (try" not in " ".join(
-        server.downloads_view(tmp_path, UTC, listed, today=TODAY)["status"]
-    )
-    monkeypatch.setattr(server, "rasteriser_available", lambda: False)
-    status = server.downloads_view(tmp_path, UTC, listed, today=TODAY)["status"]
-    assert not any(line.startswith(("Waiting", "Out of")) for line in status)
-    empty = server.downloads_view(tmp_path / "none", UTC, today=TODAY)
-    assert empty == {
-        "status": ["Nothing downloaded yet: a render that needs a page asks for it."],
-        "log": [],
+    assert not view["running"]
+    papers = view["papers"]
+    assert list(papers) == listed
+    assert papers["NY_NYT"]["chip"] == "Today" and papers["NY_NYT"]["tone"] == "ok"
+    assert papers["NY_NYT"]["line"] == "Shows the Oct 25 page, from the smaller JPG, blurrier."
+    assert papers["WSJ"]["chip"] == "Oct 24" and papers["WSJ"]["tone"] == ""
+    assert papers["WSJ"]["line"].endswith("Last fetched Oct 25 at 14:03.")
+    assert papers["AZ_ADS"] == {
+        "chip": "No page",
+        "tone": "bad",
+        "line": "No page: none in the last 3 days. "
+        "Last checked Oct 25 at 14:03: no page in the last 3 days.",
     }
+    assert papers["CA_LAT"]["chip"] == "Not fetched yet"
+    # Today's page redrawn sharp since: its retry is done, and with no
+    # rasteriser nothing would ever redraw it.
+    _seed(tmp_path, "USAT_20261025.jpg", _jpeg(1440, 2700))
+    sharp = server.fetches_view(tmp_path, UTC, listed, today=TODAY)
+    assert "USAT at" not in " ".join(sharp["status"])
+    assert "from the PDF drawn at full width" in sharp["papers"]["USAT"]["line"]
+    monkeypatch.setattr(server, "rasteriser_available", lambda: False)
+    status = server.fetches_view(tmp_path, UTC, listed, today=TODAY)["status"]
+    assert not any(line.startswith(("Asking", "Out of")) for line in status)
+    empty = server.fetches_view(tmp_path / "none", UTC, today=TODAY)
+    assert empty == {"status": [], "log": [], "running": False, "papers": {}}
 
 
 @needs_pdfium
@@ -1718,7 +1744,7 @@ def test_an_earlier_editions_jpeg_gets_no_pdf_retry(tmp_path: Path, pdf: FakeCdn
     assert _log(tmp_path)[-1] == (
         "WSJ 2026-10-24: keeping the JPG, an earlier edition's PDF isn't asked for again"
     )
-    status = server.downloads_view(tmp_path, None, ["WSJ"], today=TODAY)["status"]
+    status = server.fetches_view(tmp_path, None, ["WSJ"], today=TODAY)["status"]
     assert not any("PDF again" in line for line in status)
 
 
@@ -1734,9 +1760,254 @@ def test_the_admin_page_is_newspapers_and_shows_the_log(app: Flask, client: Flas
     assert "Newspapers, Tesserae</title>" in body
     assert re.search(r"<h1>.*Newspapers</h1>", body)
     assert re.search(r'href="/plugins/news_front_pages/">\s*<i[^>]*></i>Newspapers\s*</a>', body)
-    downloads = body[body.index('id="downloads"') :]
-    assert "data-log-tail" in downloads
-    assert "WSJ  2026-10-25: JPG, 700 px &lt;b&gt;" in downloads
+    fetches = body[body.index('id="fetches"') :]
+    assert "data-log-tail" in fetches
+    assert "WSJ  <span" in fetches
+    assert "2026-10-25: JPG, 700 px &lt;b&gt;" in fetches
+    assert "<details" not in fetches  # the log is open
+    assert "Pages aren&#39;t fetched on a timer" in body
+
+
+def test_each_log_line_says_how_it_went(tmp_path: Path, cdn: FakeCdn) -> None:
+    cdn.pages = {_url("WSJ", 24): PAGE}
+    _fetch_settled(tmp_path, paper="WSJ")
+    cdn.down = True
+    _fetch_settled(tmp_path, paper="USAT")
+    outcomes = [(e["code"], e.get("outcome", "")) for e in _state(tmp_path)["log"]]
+    assert outcomes == [
+        ("WSJ", "missing"),  # today's not out yet
+        ("WSJ", "ok"),  # yesterday's saved
+        ("WSJ", ""),  # the retry note
+        ("USAT", "error"),
+        ("USAT", ""),
+    ]
+
+
+def test_the_admin_page_shows_each_papers_state_and_verify(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(app)
+    monkeypatch.setattr(module, "_edition_today", lambda: TODAY)
+    _seed(Path(app.config["PLUGIN_REGISTRY"].get("news_front_pages").data_dir), "WSJ_20261025.jpg")
+    body = client.get("/plugins/news_front_pages/").get_data(as_text=True)
+    settings = body[: body.index('id="fetches"')]
+    # One per saved row, and one in the template that equips rows added on the page.
+    assert body.count("data-nx-verify-btn>") == len(server.DEFAULT_PAPERS) + 1
+    assert 'id="nx-verify-template"' in body
+    assert re.search(r"tg--ok nx-chip\">Today<", settings)
+    assert settings.count(">Not fetched yet<") == len(server.DEFAULT_PAPERS) - 1
+    assert "Shows the Oct 25 page, from the smaller JPG, blurrier." in settings
+    assert "No fetches yet." in body
+
+
+# ----- Verify and Fetch now, on the admin page ----------------------------------
+
+
+def _verify(
+    app: Flask,
+    client: FlaskClient,
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    pages: dict[str, bytes | _Resp] | None = None,
+    *,
+    down: bool = False,
+) -> tuple[int, dict[str, Any], FakeCdn]:
+    module = _app_module(app)
+    monkeypatch.setattr(module, "_edition_today", lambda: TODAY)
+    monkeypatch.setattr(module, "rasteriser_available", lambda: False)
+    fake = FakeCdn(pages)
+    fake.down = down
+    with patch("urllib.request.urlopen", fake):
+        resp = client.post("/plugins/news_front_pages/verify", data={"code": code})
+    assert resp.mimetype == "application/json"
+    assert resp.headers["Cache-Control"] == "no-store"
+    return resp.status_code, resp.get_json(), fake
+
+
+def _app_dir(app: Flask) -> Path:
+    return Path(app.config["PLUGIN_REGISTRY"].get("news_front_pages").data_dir)
+
+
+def test_verify_downloads_todays_page_without_saving_it(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, data, fake = _verify(app, client, monkeypatch, " ny_nyt ", {_url("NY_NYT", 25): PAGE})
+    assert status == 200
+    assert data["ok"] is True
+    assert (data["chip"], data["tone"], data["code"]) == ("Works", "ok", "NY_NYT")
+    assert data["name"] == "The New York Times"
+    assert data["message"].startswith(
+        "The New York Times (NY_NYT): downloaded today's page (Oct 25). JPG, 700\u00d71342 px"
+    )
+    thumb = data["thumb"]
+    assert thumb.startswith("data:image/jpeg;base64,")
+    import base64
+
+    with Image.open(io.BytesIO(base64.b64decode(thumb.split(",", 1)[1]))) as img:
+        assert img.size[0] == server.THUMB_WIDTH_PX
+    assert _url("NY_NYT", 25) in fake.calls
+    assert not list((_app_dir(app) / "pages").glob("*"))  # nothing saved
+    last = _state(_app_dir(app))["log"][-1]
+    assert last["code"] == "NY_NYT" and last["outcome"] == "ok"
+    assert last["text"].startswith("Verify: 2026-10-25: JPG, 700\u00d71342 px")
+
+
+def test_verify_falls_back_to_the_newest_edition(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, data, _ = _verify(app, client, monkeypatch, "WSJ", {_url("WSJ", 24): PAGE})
+    assert status == 200 and data["ok"] is True
+    assert data["tone"] == "warn"
+    assert "downloaded the Oct 24 page; today's isn't out yet." in data["message"]
+
+
+def test_verify_says_an_unknown_code_is_no_paper(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, data, fake = _verify(app, client, monkeypatch, "ZZ_NOPE")
+    assert status == 200
+    assert (data["ok"], data["chip"], data["tone"]) == (False, "Not found", "bad")
+    assert data["message"].startswith("No paper with the code ZZ_NOPE: ")
+    assert "thumb" not in data
+    asked = [u for u in fake.calls if "ZZ_NOPE" in u]
+    assert asked == [_url("ZZ_NOPE", d) for d in (25, 24, 23)]
+    last = _state(_app_dir(app))["log"][-1]
+    assert (last["code"], last["outcome"]) == ("ZZ_NOPE", "missing")
+
+
+def test_verify_says_a_listed_paper_has_no_recent_page(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, data, _ = _verify(app, client, monkeypatch, "AZ_ADS")
+    assert status == 200 and data["ok"] is False
+    assert data["message"].startswith(
+        "Freedom Forum lists Arizona Daily Star (AZ_ADS), but has no front page for it"
+    )
+
+
+def test_verify_reports_what_came_back_when_it_wasnt_a_page(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, data, _ = _verify(app, client, monkeypatch, "WSJ", {_url("WSJ", 25): b"<html>hi</html>"})
+    assert data["ok"] is False
+    assert "What came back: 2026-10-25: JPG not an image." in data["message"]
+
+
+def test_verify_reports_an_outage(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, data, _ = _verify(app, client, monkeypatch, "WSJ", down=True)
+    assert status == 200
+    assert (data["ok"], data["chip"], data["tone"]) == (False, "Error", "bad")
+    assert data["message"].startswith(
+        "Couldn't reach Freedom Forum (connection refused), so WSJ wasn't checked."
+    )
+    last = _state(_app_dir(app))["log"][-1]
+    assert (last["outcome"], last["text"]) == (
+        "error",
+        "Verify: Freedom Forum unreachable (connection refused)",
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "said"),
+    [
+        ("", "Type a paper code first"),
+        ("   ", "Type a paper code first"),
+        ("NY NYT", "'NY NYT' isn't a paper code"),
+        ("<script>", "'<script>' isn't a paper code"),
+        ("../state.json", "isn't a paper code"),
+        ("X" * 41, "isn't a paper code"),
+    ],
+)
+def test_verify_refuses_what_isnt_a_code(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch, code: str, said: str
+) -> None:
+    status, data, fake = _verify(app, client, monkeypatch, code)
+    assert status == 400
+    assert data["ok"] is False and data["chip"] == "Bad code"
+    assert said in data["message"]
+    assert fake.calls == []
+    assert not (_app_dir(app) / "state.json").exists()
+
+
+def test_verify_runs_one_check_at_a_time(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock = _app_module(app)._VERIFY_LOCK
+    assert lock.acquire(blocking=False)
+    try:
+        status, data, fake = _verify(app, client, monkeypatch, "WSJ")
+    finally:
+        lock.release()
+    assert status == 409 and data["chip"] == "Busy"
+    assert fake.calls == []
+
+
+def test_verify_runs_in_the_widgets_network_scope(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import capabilities
+
+    seen: list[Any] = []
+    fake = FakeCdn({_url("WSJ", 25): PAGE})
+
+    def urlopen(req: Any, timeout: float | None = None) -> _Resp:
+        seen.append(capabilities._active.get())
+        return fake(req, timeout)
+
+    module = _app_module(app)
+    monkeypatch.setattr(module, "_edition_today", lambda: TODAY)
+    monkeypatch.setattr(module, "rasteriser_available", lambda: False)
+    with patch("urllib.request.urlopen", urlopen):
+        assert (
+            client.post("/plugins/news_front_pages/verify", data={"code": "WSJ"}).status_code == 200
+        )
+    plugin = app.config["PLUGIN_REGISTRY"].get("news_front_pages")
+    assert seen and all(scope is plugin.capabilities for scope in seen)
+
+
+def test_fetch_now_asks_for_the_papers_without_todays_page(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(app)
+    monkeypatch.setattr(module, "_edition_today", lambda: TODAY)
+    monkeypatch.setattr(module, "rasteriser_available", lambda: False)
+    data_dir = _app_dir(app)
+    _seed(data_dir, "NY_NYT_20261025.jpg")
+    fake = FakeCdn({_url("WSJ", 25): PAGE})
+    with patch("urllib.request.urlopen", fake):
+        resp = client.post("/plugins/news_front_pages/fetch")
+        assert module._join_worker(data_dir, 10)
+    assert resp.status_code == 302
+    assert resp.headers["Location"].endswith("/plugins/news_front_pages/#fetches")
+    assert not any("NY_NYT" in u for u in fake.calls)
+    assert _url("WSJ", 25) in fake.calls
+    assert _url("AZ_ADS", 25) in fake.calls  # switched off, but still in the list
+    assert (data_dir / "pages" / "WSJ_20261025.jpg").exists()
+    log = _state(data_dir)["log"]
+    assert log[0] == {
+        "at": log[0]["at"],
+        "code": "",
+        "text": "Fetch now: asked for WSJ, USAT, AZ_ADS",
+    }
+    page = client.get("/plugins/news_front_pages/").get_data(as_text=True)
+    assert "Fetching WSJ, USAT, AZ_ADS now." in page
+
+
+def test_fetch_now_with_every_page_in_asks_for_nothing(
+    app: Flask, client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(app)
+    monkeypatch.setattr(module, "_edition_today", lambda: TODAY)
+    monkeypatch.setattr(module, "rasteriser_available", lambda: False)
+    for row in server.DEFAULT_PAPERS:
+        _seed(_app_dir(app), f"{row['code']}_20261025.jpg")
+    fake = FakeCdn()
+    with patch("urllib.request.urlopen", fake):
+        resp = client.post("/plugins/news_front_pages/fetch", follow_redirects=True)
+    assert fake.calls == []
+    assert "Every paper already has today&#39;s page." in resp.get_data(as_text=True)
 
 
 # ----- retries and cleanup (app.media_lifecycle) -----------------------------
