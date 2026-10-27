@@ -6,6 +6,11 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Quiet-hours sleep ends at the first real opening across DST gaps and repeated
+  hours, and devices remain quiet throughout the configured end minute.
+
 ## [0.480.1], 2026-10-26
 
 ### Fixed
