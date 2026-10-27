@@ -1882,3 +1882,17 @@ def test_fetch_sends_only_this_turns_comics(
     big = {"data_dir": str(tmp_path), "cell_w": 1440, "cell_h": 2560, "cell_id": "b"}
     out = srv.fetch({}, settings, ctx=big)
     assert [s["id"] for s in out["strips"]] == ["garfield", "peanuts"] and "turns" not in out
+
+
+def test_an_incomplete_far_side_set_counts_as_a_failed_try(tmp_path: Path) -> None:
+    store = images.Store(tmp_path)
+    now = time.time()
+    partial = srv.Fetched([(_jpeg(), "a"), (_jpeg(), "b")], expected=4)
+    for _ in range(srv.lifecycle.TRIES_PER_DAY):
+        srv.record_fetch(store, srv.FARSIDE, partial, TODAY, now)
+    record = store.sources()["farside"]
+    assert record["retry"]["tries"] == srv.lifecycle.TRIES_PER_DAY
+    assert record["partial"] is True and len(record["pictures"]) == 2  # still shown
+    # Out of tries for today, however long it waits.
+    assert not srv.is_due(srv.FARSIDE, record, TODAY.isoformat(), now + 20 * 3600)
+    assert srv.is_due(srv.FARSIDE, record, "2026-10-26", now + 20 * 3600)

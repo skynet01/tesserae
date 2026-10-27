@@ -1390,6 +1390,9 @@ def _succeeded(
             if not cached or (entry.get("partial") and len(stored) > len(cached)):
                 entry.update(pictures=stored, edition=fetched.edition, partial=True)
             entry["error"] = f"Only {len(stored)} of {expected} pictures came through."
+            # An incomplete set is a failed try: the same backoff and daily
+            # limit as any other.
+            entry["retry"] = lifecycle.failed(entry.get("retry"), today, time.time())
             return
         entry.pop("retry", None)
         entry.update(
