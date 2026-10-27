@@ -556,6 +556,10 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
             "wifi": "home-wifi",
             "param_error": "",
             "action": {"kind": "refresh", "at": _time.time()},
+            "exchanges": [
+                (_time.time(), "out", "picture abc123"),
+                (_time.time(), "in", "ack: picture"),
+            ],
         },
         request_action=request_action,
         on_push=lambda *_a: None,
@@ -575,6 +579,9 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
         assert text in page, text
     for action in ("status", "refresh", "reboot"):
         assert f"/settings/devices/hall/visionect/{action}" in page
+    # The frame log replaces the diagnostics that only repeated the report.
+    assert "Frame log" in page and "→  picture abc123" in page and "←  ack: picture" in page
+    assert "Advanced diagnostics" not in page
     resp = client.post("/settings/devices/hall/visionect/reboot", follow_redirects=True)
     assert asked == [("hall", "reboot")]
     assert "Sent Hall a reboot" in resp.get_data(as_text=True)
