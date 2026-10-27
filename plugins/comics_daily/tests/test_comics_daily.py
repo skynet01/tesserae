@@ -1209,7 +1209,9 @@ def test_fetch_now_queues_every_fetched_source_forced(
     monkeypatch.setattr(
         module,
         "_enqueue",
-        lambda root, sources, today, force=False: queued.append(([s.key for s in sources], force)),
+        lambda root, sources, today, force=False, **_: queued.append(
+            ([s.key for s in sources], force)
+        ),
     )
     client.get("/plugins/comics_daily/")
     rows = _settings(client)["strips"]
@@ -1279,3 +1281,134 @@ def test_the_admin_page_shows_the_log(client: FlaskClient) -> None:
     settings = body.index('id="plugin-comics_daily"')
     assert body.index('id="today"') < settings < body.index('id="log"')
     assert '<details class="dx-section-fold" data-fold>' in body[settings:]
+
+
+# -- GoComics cookies pasted on the Comics page --------------------------------
+
+cookies_mod = srv.cookies
+SHIELD = "bunny_shield_id_9=abc#sig#1893456000"
+
+
+@pytest.mark.parametrize(
+    "paste",
+    [
+        # Netscape cookies.txt (Get cookies.txt Locally, Copy All)
+        "# Netscape HTTP Cookie File\n"
+        "#HttpOnly_.gocomics.com\tTRUE\t/\tTRUE\t1893456000\tbunny_shield_id_9\tabc#sig#1893456000\n"
+        ".gocomics.com\tTRUE\t/\tFALSE\t0\tsession\txyz\n"
+        ".example.com\tTRUE\t/\tFALSE\t0\tother\tnope\n",
+        # A JSON export
+        json.dumps(
+            [
+                {
+                    "name": "bunny_shield_id_9",
+                    "value": "abc#sig#1893456000",
+                    "domain": ".gocomics.com",
+                },
+                {"name": "session", "value": "xyz", "domain": "www.gocomics.com"},
+                {"name": "other", "value": "nope", "domain": "example.com"},
+            ]
+        ),
+        # A Cookie header
+        "Cookie: bunny_shield_id_9=abc#sig#1893456000; session=xyz",
+    ],
+    ids=["netscape", "json", "header"],
+)
+def test_cookie_paste_formats(paste: str) -> None:
+    pasted = cookies_mod.parse_paste(paste)
+    assert pasted.header() == "bunny_shield_id_9=abc#sig#1893456000; session=xyz"
+    assert pasted.expires_at == 1893456000
+
+
+@pytest.mark.parametrize(
+    ("paste", "message"),
+    [
+        ("", "Paste the cookies first"),
+        ("session=xyz", "No bunny_shield cookie"),
+        ("bunny_shield_x=a\r\nInjected: yes", "isn't a name=value cookie"),
+        ('bunny_shield_x="a b"', "characters a cookie can't hold"),
+        ("[1, 2", "doesn't read as JSON"),
+        ('{"cookies": 3}', "isn't a list of cookies"),
+        ("x" * 30000, "far more than"),
+    ],
+)
+def test_cookie_paste_refusals(paste: str, message: str) -> None:
+    with pytest.raises(cookies_mod.PasteError, match=message):
+        cookies_mod.parse_paste(paste)
+
+
+def test_pasted_cookies_skip_the_check_and_stay_out_of_the_session_file(
+    web: FakeWeb, tmp_path: Path
+) -> None:
+    _gocomics_routes(web)
+    gc = srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY, pasted=SHIELD + "; session=xyz")
+    fetched = gc.strip("garfield", "Garfield")
+    assert fetched.edition == "2026-10-25"
+    sent = [r for r in web.requests if "gocomics.com/garfield/" in r.full_url]
+    assert len(sent) == 1  # no warm-up page: the pasted session was used
+    assert "bunny_shield_id_9=abc#sig#1893456000" in sent[0].get_header("Cookie")
+    assert gc.pasted_result == "worked"
+    saved = (tmp_path / srv.COOKIE_FILE).read_text()
+    assert "abc#sig" not in saved and "xyz" not in saved
+
+
+def test_turned_away_cookies_fall_back_to_the_solver(
+    web: FakeWeb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _all_routes(web)
+    page = web.routes[("GET", f"{GC}/garfield/2026/10/25")][0]
+    web.routes[("GET", f"{GC}/garfield/2026/10/25")] = [_html(CHALLENGE_PAGE, 403), page]
+    gc = srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY, pasted=SHIELD)
+    assert gc.strip("garfield", "Garfield").edition == "2026-10-25"
+    assert gc.pasted_result == "turned away"
+    assert f"{GC}/garfield/2026/10/18" in web.urls()  # set up its own session
+
+
+def test_cookie_card_saves_encrypted_never_echoes_and_clears(client: FlaskClient) -> None:
+    client.get("/plugins/comics_daily/")
+    secret = "bunny_shield_id_9=topsecret#sig#1893456000; session=hush"
+    client.post("/plugins/comics_daily/cookies", data={"cookies": secret})
+    assert any("Saved 2 GoComics cookies" in m for m in _messages(client))
+    module = _app_module(client)
+    with client.application.test_request_context():
+        assert module.saved_cookie_header() == secret
+    disk = Path(client.application.config["SETTINGS_STORE"]._path).read_text()
+    assert "gocomics_cookies_secret" in disk and "topsecret" not in disk
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    assert "topsecret" not in body and "hush" not in body
+    card = body[body.index('id="cookies"') :]
+    assert "Set</span>" in card and "2 cookies" in card and "Clear" in card
+    assert "topsecret" not in json.dumps(_store(client).log())
+    # A failed paste changes nothing.
+    client.post("/plugins/comics_daily/cookies", data={"cookies": "nope=1"})
+    with client.application.test_request_context():
+        assert module.saved_cookie_header() == secret
+    # How the last session did shows on the card.
+    _store(client).update_cookie_status(
+        lambda st: st.update(result="turned away", used_at=time.time())
+    )
+    card = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    assert "Turned away" in card and "Paste fresh ones" in card
+    client.post("/plugins/comics_daily/cookies/clear")
+    with client.application.test_request_context():
+        assert module.saved_cookie_header() == ""
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    assert "Not set" in body[body.index('id="cookies"') :]
+
+
+def test_renders_and_fetch_now_hand_the_cookies_to_the_worker(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(client)
+    handed: list[Any] = []
+    monkeypatch.setattr(
+        module,
+        "_enqueue",
+        lambda root, sources, today, force=False, pasted=None: handed.append(pasted),
+    )
+    client.get("/plugins/comics_daily/")
+    client.post("/plugins/comics_daily/cookies", data={"cookies": SHIELD})
+    client.post("/plugins/comics_daily/fetch")
+    with client.application.test_request_context():
+        module.fetch({}, {}, ctx={"data_dir": _plugin(client).data_dir})
+    assert handed == [SHIELD, SHIELD]

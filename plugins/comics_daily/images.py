@@ -4,6 +4,7 @@ Layout inside the widget's ``data_dir``::
 
     state.json          per source: pictures, edition, last success / attempt, error
     log.json            the newest LOG_LINES fetches, uploads and imports, for the admin page
+    gocomics-cookie-status.json  when the pasted GoComics cookies were set and how they did
     images/<name>       the pictures, named by content hash
     gocomics-cookies.txt  the Bunny Shield session (written by server.py)
 
@@ -39,6 +40,7 @@ from PIL import Image, ImageOps
 
 STATE_FILE = "state.json"
 LOG_FILE = "log.json"
+COOKIE_STATUS_FILE = "gocomics-cookie-status.json"
 IMAGE_DIR = "images"
 # The admin page's log keeps this many lines.
 LOG_LINES = 150
@@ -215,6 +217,30 @@ class Store:
             sources = self.sources()
             if sources.pop(key, None) is not None:
                 self._save(sources)
+
+    # -- the pasted GoComics cookies' status --------------------------------
+    # When they were pasted, when they expire, how many, and how the last
+    # GoComics session that used them did. Never the cookies themselves.
+
+    def cookie_status(self) -> dict[str, Any]:
+        try:
+            data = json.loads((self.root / COOKIE_STATUS_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def update_cookie_status(self, change: Callable[[dict[str, Any]], None] | None) -> None:
+        """Change the status under the store lock; ``None`` forgets it."""
+        with _LOCK:
+            path = self.root / COOKIE_STATUS_FILE
+            if change is None:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                return
+            status = self.cookie_status()
+            change(status)
+            self.root.mkdir(parents=True, exist_ok=True)
+            _write_atomic(path, json.dumps(status, indent=1).encode("utf-8"))
 
     # -- the log --------------------------------------------------------------
 

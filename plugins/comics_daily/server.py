@@ -103,6 +103,7 @@ def _load_sibling(name: str) -> ModuleType:
 bunny_shield = _load_sibling("bunny_shield")
 pages = _load_sibling("pages")
 images = _load_sibling("images")
+cookies = _load_sibling("cookies")
 
 logger = logging.getLogger(__name__)
 
@@ -704,6 +705,35 @@ def ensure_settings(hint: dict[str, Any] | None = None) -> dict[str, Any] | None
     return result
 
 
+# The GoComics cookies pasted on the Comics page: kept with the widget's
+# settings as an encrypted value under a field of its own, which the settings
+# card doesn't draw, so it is never sent back to a browser.
+COOKIE_FIELD: dict[str, Any] = {"name": "gocomics_cookies", "type": "string", "secret": True}
+
+
+def saved_cookie_header() -> str:
+    """The pasted cookies as a Cookie header, "" when none or no host."""
+    host = _host_settings()
+    if host is None:
+        return ""
+    store, _ = host
+    try:
+        value = store.get_for_runtime("plugins", PLUGIN_ID, [COOKIE_FIELD]).get(
+            COOKIE_FIELD["name"]
+        )
+    except Exception:  # a key that no longer decrypts reads as none
+        return ""
+    return value if isinstance(value, str) else ""
+
+
+def save_cookie_header(header: str) -> None:
+    host = _host_settings()
+    if host is None:
+        raise RuntimeError("no settings store")
+    store, _ = host
+    store.update_for_namespace("plugins", PLUGIN_ID, {COOKIE_FIELD["name"]: header}, [COOKIE_FIELD])
+
+
 def resolve_config(options: dict[str, Any], settings: dict[str, Any]) -> Config:
     """What a render shows: the settings (seeded on first use), or with no
     host to ask, ``settings`` when they carry strips, else the cell's own
@@ -742,7 +772,9 @@ class GoComics:
     per refresh: if the site still challenges after that, it is blocking us.
     """
 
-    def __init__(self, cookie_file: Path, today: date, warm_name: str = "") -> None:
+    def __init__(
+        self, cookie_file: Path, today: date, warm_name: str = "", pasted: str = ""
+    ) -> None:
         self._cookie_file = cookie_file
         self._jar = MozillaCookieJar()
         self._today = today
@@ -756,7 +788,23 @@ class GoComics:
         with contextlib.suppress(OSError, LoadError):
             if cookie_file.is_file():
                 self._jar.load(str(cookie_file), ignore_discard=True)
+        # Cookies pasted on the Comics page (cookies.py) go first, over any
+        # saved session of the same name; they are never written to the
+        # session file. If GoComics still challenges, the session falls back
+        # to the built-in browser check. ``pasted_result`` says how they did
+        # in this session: "worked", "turned away" or None (not used).
+        found = cookies.from_header(pasted) if pasted else None
+        self._pasted = cookies.jar_cookies(found) if found else []
+        self.pasted_result: str | None = None
+        names = {c.name for c in self._pasted}
+        for old in [c for c in self._jar if c.name in names]:
+            self._jar.clear(old.domain, old.path, old.name)
+        for cookie in self._pasted:
+            self._jar.set_cookie(cookie)
         self._web = Web(self._jar)
+
+    def _using_pasted(self) -> bool:
+        return any(c.name == p.name and c.value == p.value for c in self._jar for p in self._pasted)
 
     def strip(self, name: str, label: str) -> Fetched:
         self._warm_name = self._warm_name or name
@@ -793,9 +841,15 @@ class GoComics:
         return True
 
     def _page(self, url: str) -> Reply:
+        pasted = self._using_pasted()
         reply = self._web.get(url)
         if not self._challenged(reply):
+            if pasted and self.pasted_result is None:
+                self.pasted_result = "worked"
             return reply
+        if pasted:
+            self.pasted_result = "turned away"
+            logger.info("comics_daily: GoComics turned the pasted cookies away")
         if self._warmed:
             raise SourceError("GoComics is blocking automatic downloads right now.")
         # The saved session has gone stale. Start over on a page this refresh
@@ -862,8 +916,12 @@ class GoComics:
         self._cookie_file.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".cookies.", suffix=".tmp", dir=self._cookie_file.parent)
         os.close(fd)
+        session = MozillaCookieJar()
+        for cookie in self._jar:
+            if not any(cookie.name == p.name and cookie.value == p.value for p in self._pasted):
+                session.set_cookie(cookie)
         try:
-            self._jar.save(tmp, ignore_discard=True)
+            session.save(tmp, ignore_discard=True)
             os.chmod(tmp, 0o600)
             os.replace(tmp, self._cookie_file)
         except OSError:
@@ -974,6 +1032,9 @@ class _Run:
     finished: int = 0
     failed: int = 0
     thread: threading.Thread | None = None
+    # The GoComics cookies pasted on the Comics page, as the latest render
+    # or admin request read them (the worker has no settings to read).
+    pasted: str = ""
 
     def keys(self) -> set[str]:
         keys = {s.key for s, _ in self.queue}
@@ -991,7 +1052,14 @@ _RUNS: dict[str, _Run] = images.shared("runs", dict)
 _RUNS_LOCK: threading.Lock = images.shared("runs_lock", threading.Lock)
 
 
-def _enqueue(data_dir: Path, sources: list[Source], today: date, *, force: bool = False) -> _Run:
+def _enqueue(
+    data_dir: Path,
+    sources: list[Source],
+    today: date,
+    *,
+    force: bool = False,
+    pasted: str | None = None,
+) -> _Run:
     """Queue ``sources`` on the running refresh, starting one if none runs.
 
     A run whose thread has died without finishing is replaced, not reused.
@@ -1005,6 +1073,8 @@ def _enqueue(data_dir: Path, sources: list[Source], today: date, *, force: bool 
             run = _Run(data_dir=data_dir, today=today)
             _RUNS[str(data_dir)] = run
         assert run is not None
+        if pasted is not None:
+            run.pasted = pasted
         known = run.keys() | (set() if force else run.completed)
         run.queue.extend((s, force) for s in sources if s.key not in known)
         if start:
@@ -1074,7 +1144,7 @@ def _work(run: _Run) -> None:
                 continue
             _report(run, source)
             if source.kind == "gocomics" and gocomics is None:
-                gocomics = GoComics(run.data_dir / COOKIE_FILE, run.today)
+                gocomics = GoComics(run.data_dir / COOKIE_FILE, run.today, pasted=run.pasted)
             if not refresh_source(store, source, run.today, web=web, gocomics=gocomics):
                 run.failed += 1
             run.finished += 1
@@ -1086,9 +1156,21 @@ def _work(run: _Run) -> None:
         with _RUNS_LOCK:
             run.active = None
             run.done = True
+        if gocomics is not None:
+            note_pasted_result(store, gocomics)
         with contextlib.suppress(Exception):
             store.prune()
         _finish_job(run, crashed)
+
+
+def note_pasted_result(store: Any, gocomics: GoComics) -> None:
+    """Keep how the pasted cookies did in this session, for the Comics page."""
+    result = gocomics.pasted_result
+    if result is None:
+        return
+    with contextlib.suppress(Exception):
+        store.update_cookie_status(lambda status: status.update(result=result, used_at=time.time()))
+        log_entry(store, "GoComics cookies", "ok" if result == "worked" else "blocked", result)
 
 
 def _fetch_source(source: Source, today: date, web: Web, gocomics: GoComics | None) -> Fetched:
@@ -1329,7 +1411,8 @@ def fetch(
     due = [
         s for s in wanted if s.fetched and (force or is_due(s, records.get(s.key), today_iso, now))
     ]
-    run = _enqueue(store.root, due, today, force=force) if due else None
+    pasted = saved_cookie_header() if any(s.kind == "gocomics" for s in due) else None
+    run = _enqueue(store.root, due, today, force=force, pasted=pasted) if due else None
     if run is not None and not any(_pictures(records.get(s.key) or {}, store) for s in wanted):
         # Nothing to show yet: give a quick source the chance to land in this
         # render rather than painting "fetching" and waiting for the repaint.
@@ -1618,7 +1701,50 @@ def source_status(
         "line": line,
         "warning": warning,
         "pictures": pictures,
+        # A GoComics strip the site is blocking: pasted cookies may help.
+        "cookies_help": chip == "Blocked" and source.kind == "gocomics",
     }
+
+
+def cookie_view(store: Any, tz: Any, today: str) -> dict[str, Any]:
+    """The pasted GoComics cookies' state for the Comics page: whether any
+    are set, a chip and a status line. Never the cookies."""
+    if not saved_cookie_header():
+        return {
+            "set": False,
+            "chip": "Not set",
+            "tone": "",
+            "line": ("GoComics strips are fetched with the built-in browser check."),
+        }
+    status = store.cookie_status()
+    count = int(status.get("count") or 0)
+    expires = int(status.get("expires_at") or 0)
+    parts = [f"Pasted {_when(status.get('saved_at'), tz, today)}"]
+    if count:
+        parts.append(f"{count} cookie{'' if count == 1 else 's'}")
+    expired = 0 < expires < time.time()
+    if expires:
+        parts.append(f"{'expired' if expired else 'expire'} {_when(expires, tz, today)}")
+    line = ", ".join(parts) + "."
+    result = status.get("result")
+    if result:
+        used = _when(status.get("used_at"), tz, today)
+        if result == "worked":
+            line += f" Last used {used}: GoComics let them through."
+        else:
+            line += (
+                f" Last used {used}: GoComics turned them away, so the built-in browser "
+                "check was tried instead. Paste fresh ones."
+            )
+    if expired:
+        chip, tone = "Expired", "warn"
+    elif result == "turned away":
+        chip, tone = "Turned away", "bad"
+    elif result == "worked":
+        chip, tone = "Working", "ok"
+    else:
+        chip, tone = "Set", "slate"
+    return {"set": True, "chip": chip, "tone": tone, "line": line}
 
 
 def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
@@ -1690,6 +1816,7 @@ def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
         log.append(f"{when}  {source_name:<{width}}  {outcome:<8} {entry['text']}")
     return {
         "lede": " ".join(lede),
+        "cookies": cookie_view(store, tz, today),
         "running": bool(busy),
         "farside": farside,
         "preview": preview,
@@ -1797,11 +1924,49 @@ def blueprint() -> Blueprint:
             flash("Nothing to fetch: every strip shown is a manual picture, or none is on.", "warn")
         else:
             with _scope(plugin):
-                _enqueue(store.root, sources, _today(), force=True)
+                _enqueue(store.root, sources, _today(), force=True, pasted=saved_cookie_header())
             names = ", ".join(s.label for s in sources)
             log_entry(store, "Fetch now", "started", f"asked for {names}")
             flash("Fetching today's comics now; the job tray shows how far it got.", "ok")
         return redirect(url_for(f"{PLUGIN_ID}_media.index", _anchor="today"))
+
+    def _to_cookies() -> Response:
+        return redirect(url_for(f"{PLUGIN_ID}_media.index", _anchor="cookies"))
+
+    @bp.post("/cookies")
+    def save_cookies() -> Response:
+        plugin = _admin_plugin()
+        try:
+            pasted = cookies.parse_paste(request.form.get("cookies", ""))
+        except cookies.PasteError as err:
+            flash(str(err), "error")
+            return _to_cookies()
+        save_cookie_header(pasted.header())
+        store = images.Store(Path(plugin.data_dir))
+        store.update_cookie_status(None)
+        store.update_cookie_status(
+            lambda status: status.update(
+                saved_at=time.time(), expires_at=pasted.expires_at, count=len(pasted.pairs)
+            )
+        )
+        count = len(pasted.pairs)
+        log_entry(store, "GoComics cookies", "saved", f"{count} pasted")
+        flash(
+            f"Saved {count} GoComics cookie{'' if count == 1 else 's'}. The next GoComics "
+            "fetch uses them; Fetch now tries them at once.",
+            "ok",
+        )
+        return _to_cookies()
+
+    @bp.post("/cookies/clear")
+    def clear_cookies() -> Response:
+        plugin = _admin_plugin()
+        save_cookie_header("")
+        store = images.Store(Path(plugin.data_dir))
+        store.update_cookie_status(None)
+        log_entry(store, "GoComics cookies", "cleared", "the built-in browser check only")
+        flash("Cleared the GoComics cookies; the built-in browser check carries on alone.", "ok")
+        return _to_cookies()
 
     @bp.post("/strips/add")
     def add_strip() -> Response:
@@ -1839,7 +2004,9 @@ def blueprint() -> Blueprint:
             outcome: Fetched | SourceError
             with _scope(plugin):
                 warm = WARM_STRIP if slug != WARM_STRIP else ""
-                gocomics = GoComics(store.root / COOKIE_FILE, today, warm_name=warm)
+                gocomics = GoComics(
+                    store.root / COOKIE_FILE, today, warm_name=warm, pasted=saved_cookie_header()
+                )
                 try:
                     outcome = gocomics.strip(slug, label)
                 except NotFound as err:
@@ -1857,6 +2024,7 @@ def blueprint() -> Blueprint:
                 except SourceError as err:
                     outcome = err
             record_fetch(store, source, outcome, today, started)
+            note_pasted_result(store, gocomics)
             if isinstance(outcome, Fetched):
                 label = outcome.label or label
             else:
