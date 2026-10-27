@@ -259,3 +259,54 @@ def test_the_guarded_path_ignores_proxy_settings(monkeypatch: pytest.MonkeyPatch
     opener = net_guard.guarded_opener()
     proxies = [h for h in opener.handlers if isinstance(h, net_guard.urllib.request.ProxyHandler)]
     assert all(not h.proxies for h in proxies)  # none at all, or one with no proxies
+
+
+@pytest.mark.parametrize("tcp_elapsed", [9.0, 10.0])
+def test_tls_stays_within_the_connect_deadline(
+    monkeypatch: pytest.MonkeyPatch, tcp_elapsed: float
+) -> None:
+    from types import SimpleNamespace
+
+    now = 0.0
+
+    class Sock:
+        timeout = 0.0
+        closed = False
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeout = timeout
+
+        def close(self) -> None:
+            self.closed = True
+
+    sock = Sock()
+
+    def connect(address: tuple[str, int], timeout: float, source: Any) -> Sock:
+        nonlocal now
+        if ":" in address[0]:
+            now += 7.0
+            raise OSError("IPv6 unreachable")
+        now += tcp_elapsed - 7.0
+        sock.settimeout(timeout)
+        return sock
+
+    def handshake(raw: Sock, *, server_hostname: str) -> Sock:
+        nonlocal now
+        assert server_hostname == "pictures.example"
+        now += min(2.5, raw.timeout)
+        if raw.timeout < 2.5:
+            raise TimeoutError("TLS timed out")
+        return raw
+
+    tls = net_guard.ssl.create_default_context()
+    monkeypatch.setattr(tls, "wrap_socket", handshake)
+    monkeypatch.setattr(net_guard, "time", SimpleNamespace(monotonic=lambda: now))
+    monkeypatch.setattr(net_guard.socket, "create_connection", connect)
+    connection = net_guard._PinnedHTTPSConnection(
+        "pictures.example", pinned=["2606:2800:220:1::1", "93.184.216.34"], context=tls, timeout=10
+    )
+    with pytest.raises(TimeoutError):
+        connection.connect()
+    assert now <= 10.0
+    assert sock.closed
+    assert connection.sock is None

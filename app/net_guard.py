@@ -290,10 +290,22 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._tls = context
 
     def connect(self) -> None:
+        deadline = (
+            time.monotonic() + self.timeout if isinstance(self.timeout, (int, float)) else None
+        )
         sock = _connect(
             self._pinned, self.port, self.timeout, getattr(self, "source_address", None)
         )
-        self.sock = self._tls.wrap_socket(sock, server_hostname=self.host)
+        try:
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("timed out")
+                sock.settimeout(left)
+            self.sock = self._tls.wrap_socket(sock, server_hostname=self.host)
+        except Exception:
+            sock.close()
+            raise
 
 
 class _PinnedHTTPHandler(urllib.request.HTTPHandler):
