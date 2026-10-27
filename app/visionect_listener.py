@@ -19,8 +19,9 @@ that this module bounds before the library sees a byte:
   so a peer dribbling a byte every few seconds never trips it. Here a
   connection has ``IDENTIFY_TIMEOUT_S`` in all to identify, after which it
   is dropped (and a sign re-dials).
-* **Connection count.** At most ``MAX_CONNECTIONS`` sockets at once, and
-  ``MAX_CONNECTIONS_PER_PEER`` from one address.
+* **Connection count.** At most ``MAX_CONNECTIONS`` sockets at once (a bound
+  sign's own address is exempt), and ``MAX_CONNECTIONS_PER_PEER`` from one
+  address.
 
 It also works around a library bug: ``_handle_client`` awaits its timer task
 in a ``finally`` that suppresses only ``CancelledError``, so a write error in
@@ -41,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
+from collections.abc import Callable
 from typing import Any
 
 from pyvisionect.io import VisionectServer
@@ -193,6 +195,13 @@ class GuardedServer(VisionectServer):
         self.refused_connections = 0
         self.rejected_frames = 0
         self.identify_timeouts = 0
+        # Whether Tesserae keeps state for a UUID (a sign it tracks). The
+        # library allocates store and stats entries for every UUID a frame
+        # names, admitted or not; the rest are pruned as connections close.
+        self.keep_identity: Callable[[bytes], bool] = lambda _device_id: False
+        # A bound sign's own address, exempt from MAX_CONNECTIONS (never from
+        # the per-address cap), so a few busy addresses can't lock it out.
+        self.trusted_peer: Callable[[str], bool] = lambda _ip: False
 
     def mark_identified(self, writer: Any) -> None:
         """The socket behind ``writer`` identified as a sign Tesserae keeps."""
@@ -212,7 +221,8 @@ class GuardedServer(VisionectServer):
 
     async def _handle_client(self, reader: Any, writer: Any) -> None:
         ip = peer_ip(writer)
-        if self._open >= MAX_CONNECTIONS or self._per_peer[ip] >= MAX_CONNECTIONS_PER_PEER:
+        full = self._open >= MAX_CONNECTIONS and not self.trusted_peer(ip)
+        if full or self._per_peer[ip] >= MAX_CONNECTIONS_PER_PEER:
             self.refused_connections += 1
             self.note_peer(writer, "refused: too many open connections")
             abort(writer)
@@ -234,6 +244,24 @@ class GuardedServer(VisionectServer):
             self._per_peer[ip] -= 1
             if self._per_peer[ip] <= 0:
                 del self._per_peer[ip]
+            self.prune_identities()
+
+    def prune_identities(self) -> None:
+        """Forget the per-UUID state the library keeps (its device store,
+        ``stats.last_seen``) for every UUID with no open connection that
+        Tesserae doesn't keep: a malformed first status, a sign refused for
+        being one unknown too many, a made-up UUID."""
+        live = set(getattr(self, "_connections", None) or ())
+
+        def gone(device_id: bytes) -> bool:
+            return device_id not in live and not self.keep_identity(device_id)
+
+        prune = getattr(self.store, "prune", None)
+        if callable(prune):
+            prune(gone)
+        last_seen = self.stats.last_seen
+        for device_id in [d for d in last_seen if gone(d)]:
+            del last_seen[device_id]
 
     def _identify_deadline(self, writer: Any) -> None:
         guard = self._guards.get(writer)
@@ -268,3 +296,10 @@ class PrunableStore(DeviceStateStore):
         states = getattr(self, "_states", None)
         if isinstance(states, dict):
             states.pop(device_id, None)
+
+    def prune(self, drop: Callable[[bytes], bool]) -> None:
+        """Forget every UUID ``drop`` says to."""
+        states = getattr(self, "_states", None)
+        if isinstance(states, dict):
+            for device_id in [d for d in states if drop(d)]:
+                del states[device_id]

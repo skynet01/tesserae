@@ -135,7 +135,11 @@ def _set_device_config(app: Flask, device_id: str, values: dict[str, Any]) -> st
     if not ok:
         return f"Invalid config: {err}"
     store = app.config["SETTINGS_STORE"]
-    store.update_for_namespace("devices", device_id, merged, fields)
+    from app import visionect
+
+    problem = visionect.save_device_config(store, devices, device, merged, fields)
+    if problem:
+        return problem
     if device.transport == "relay":
         publisher = app.config.get("RELAY_PUBLISHER")
         if publisher is not None:

@@ -189,17 +189,18 @@ def _make_rest_instance(device: Any) -> str | None:
 
 def _sign_uuid_conflict(kind: Any, values: dict[str, Any], *, exclude: str = "") -> str | None:
     """Why a Visionect sign UUID can't be stored for a device of ``kind``:
-    another device is already bound to that sign. None when it can (or the
-    kind isn't a Visionect sign, or no UUID is given)."""
-    if not visionect.is_visionect_device(kind):
-        return None
-    uuid = visionect.normalise_uuid(values.get("uuid"))
-    if not uuid:
-        return None
-    other = visionect.device_bound_to(devices(), settings_store(), uuid, exclude=exclude)
-    if other is None:
-        return None
-    return f"Sign {uuid} is already bound to device {other!r}."
+    another device is already bound to that sign. An early refusal, before
+    anything is created; the store itself re-checks atomically
+    (``visionect.save_device_config``)."""
+    return visionect.binding_conflict(devices(), settings_store(), kind, values, exclude=exclude)
+
+
+def _undo_add(device: Any, problem: str, verb: str) -> Response:
+    """Remove a device created moments ago whose config couldn't be stored
+    (another request bound its sign first), and say why."""
+    device_service.delete_instance(devices=devices(), renderers=renderers(), instance_id=device.id)
+    flash(f"Device not {verb}. {problem}", "error")
+    return redirect(url_for("auth.settings_area", area="devices"))
 
 
 @bp.post("/settings/devices/add")
@@ -296,9 +297,16 @@ def devices_add() -> Response:
         values = values_from_form(present_fields)
         ok, _err = result.device.validate_config(values)
         if ok:
-            settings_store().update_for_namespace(
-                "devices", result.device.id, values, present_fields
+            problem = visionect.save_device_config(
+                settings_store(), devices(), result.device, values, present_fields
             )
+            if problem:
+                return _undo_add(result.device, problem, "added")
+    if visionect.is_visionect_device(result.device) and not visionect.normalise_uuid(
+        (settings_store().get_section("devices").get(result.device.id) or {}).get("uuid")
+    ):
+        # A blank sign device binds the next unknown sign, for a while.
+        visionect.arm_auto_bind(settings_store(), result.device.id)
     # New device's clones inherit picture-quality (dither/saturation/
     # contrast) from the user's existing base-renderer values where
     # available, so a freshly-added device matches the rest of the
@@ -903,9 +911,11 @@ def devices_register_discovered(discovered_id: str) -> Response:
     if isinstance(announced_uuid, str) and announced_uuid and uuid_fields:
         ok, _err = result.device.validate_config({"uuid": announced_uuid})
         if ok:
-            settings_store().update_for_namespace(
-                "devices", result.device.id, {"uuid": announced_uuid}, uuid_fields
+            problem = visionect.save_device_config(
+                settings_store(), devices(), result.device, {"uuid": announced_uuid}, uuid_fields
             )
+            if problem:
+                return _undo_add(result.device, problem, "registered")
     # Same picture-quality seeding as the manual add-device path.
     renderer_loader.seed_device_settings_from_base(renderers(), settings_store())
     rebuild_transport_fn()()
@@ -1338,7 +1348,14 @@ def devices_update_combined(instance_id: str) -> Response:
     if schema_fields:
         values = values_from_form(schema_fields)
         ok, err = device.validate_config(values)
-        conflict = _sign_uuid_conflict(device, values, exclude=instance_id) if ok else None
+        # Stored here for every branch below (a Visionect sign's UUID is
+        # checked against the other devices and stored atomically); the
+        # branches only deliver it.
+        conflict = (
+            visionect.save_device_config(store, devices(), device, values, schema_fields)
+            if ok
+            else None
+        )
         if not ok:
             flash(f"Invalid {device.name} config: {err}", "error")
         elif conflict:
@@ -1350,18 +1367,15 @@ def devices_update_combined(instance_id: str) -> Response:
             # wake. The device may retain dormant MQTT topics (kind
             # manifests declare them), so this branch must come before the
             # config_topic check.
-            store.update_for_namespace("devices", instance_id, values, schema_fields)
             publisher = current_app.config.get("RELAY_PUBLISHER")
             if publisher is not None:
                 publisher.on_config_change(instance_id)
             ok_messages.append("config saved and queued for the relay")
             any_change = True
         elif device.transport == "rest" or device.config_topic is None:
-            store.update_for_namespace("devices", instance_id, values, schema_fields)
             ok_messages.append("config saved")
             any_change = True
         else:
-            store.update_for_namespace("devices", instance_id, values, schema_fields)
             tr = transport()
             try:
                 tr.publish(
@@ -1568,20 +1582,20 @@ def devices_update_combined(instance_id: str) -> Response:
         if bm_error is not None:
             flash(f"{device.name} button map: {bm_error}", "error")
         else:
-            devices_section = store.get_section("devices") or {}
-            device_section = dict(devices_section.get(instance_id) or {})
-            existing = device_section.get("button_map")
+            existing = ((store.get_section("devices") or {}).get(instance_id) or {}).get(
+                "button_map"
+            )
+            # Only this key changes, atomically: writing back a copy of the
+            # whole entry would undo a save (a sign binding) made meanwhile.
             if parsed_map is None:
                 # Empty submission -> clear the override.
                 if isinstance(existing, dict) and existing:
-                    device_section.pop("button_map", None)
-                    store.patch_section("devices", {instance_id: device_section})
+                    store.update_item("devices", instance_id, {}, remove=("button_map",))
                     ok_messages.append("button map cleared")
                     any_change = True
             else:
                 if existing != parsed_map:
-                    device_section["button_map"] = parsed_map
-                    store.patch_section("devices", {instance_id: device_section})
+                    store.update_item("devices", instance_id, {"button_map": parsed_map})
                     ok_messages.append("button map saved")
                     any_change = True
 
@@ -1612,18 +1626,17 @@ def devices_update_combined(instance_id: str) -> Response:
     # the device manifest.
     if "refresh_mode" in form:
         wanted = (form.get("refresh_mode") or "").strip().lower()
-        devices_section = store.get_section("devices") or {}
-        device_section = dict(devices_section.get(instance_id) or {})
-        existing_mode = device_section.get("refresh_mode")
+        existing_mode = ((store.get_section("devices") or {}).get(instance_id) or {}).get(
+            "refresh_mode"
+        )
+        # Only this key, atomically (see the button map above).
         if wanted == "full":
             if existing_mode != "full":
-                device_section["refresh_mode"] = "full"
-                store.patch_section("devices", {instance_id: device_section})
+                store.update_item("devices", instance_id, {"refresh_mode": "full"})
                 ok_messages.append("update delivery saved")
                 any_change = True
         elif existing_mode is not None:
-            device_section.pop("refresh_mode", None)
-            store.patch_section("devices", {instance_id: device_section})
+            store.update_item("devices", instance_id, {}, remove=("refresh_mode",))
             ok_messages.append("update delivery saved")
             any_change = True
 
@@ -1684,11 +1697,9 @@ def devices_update_combined(instance_id: str) -> Response:
             for target_id in wa_targets:
                 target_section = dict(devices_section.get(target_id) or {})
                 before = {k: target_section.get(k) for k in wa_keys}
-                for k in wa_keys:
-                    target_section.pop(k, None)
-                target_section.update(wa_block)
-                if before != {k: target_section.get(k) for k in wa_keys}:
-                    store.patch_section("devices", {target_id: target_section})
+                if before != {k: wa_block.get(k) for k in wa_keys}:
+                    # Only the alignment keys, atomically (see the button map).
+                    store.update_item("devices", target_id, wa_block, remove=wa_keys)
                     wa_changed += 1
             if wa_changed:
                 any_change = True

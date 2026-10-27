@@ -311,10 +311,9 @@ def _wipe_settings_for_device(store: SettingsStore, device_id: str) -> tuple[int
     Returns the same shape as :func:`_count_settings_for_device` for
     caller reporting."""
     devices_removed = 0
-    devices_ns = store.get_section("devices") or {}
-    if isinstance(devices_ns, dict) and device_id in devices_ns:
-        new_devices = {k: v for k, v in devices_ns.items() if k != device_id}
-        store.update_section("devices", new_devices)
+    # One entry dropped atomically: rewriting the whole section from a copy
+    # would undo saves (a sign binding) made on other devices meanwhile.
+    if store.remove_item("devices", device_id):
         devices_removed = 1
     renderers_removed = 0
     renderers_ns = store.get_section("renderers") or {}

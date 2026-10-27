@@ -1597,3 +1597,33 @@ def test_render_in_progress_covers_the_whole_push(tmp_path: Path, composition_pn
     assert manager.invalidate_and_repaint("lobby") is False  # nothing to repaint from
     assert marks == [True]
     assert not manager.render_in_progress("lobby")
+
+
+def test_broadcast_pushes_mark_the_devices_they_deliver_to(
+    tmp_path: Path, composition_png: bytes
+) -> None:
+    """A push for no particular device (an image/URL/webpage push without a
+    device id, an unbound page with the legacy broadcast on) delivers to
+    every base renderer's device; those read as rendering while it runs.
+    Per-device clones don't take part, so their devices don't."""
+    renderers = [
+        _make_renderer(tmp_path, "pi_png", "png", retain=False),
+        _make_renderer(tmp_path, "pi_png__lobby", "png", retain=False, device="lobby"),
+    ]
+    manager, _mqtt, png = _wired(tmp_path, composition_png, renderers)
+    seen: list[tuple[bool, bool]] = []
+    base = renderers[0].module.transform
+
+    def _transform(png_bytes: bytes, *, panel: object, settings: object) -> bytes:
+        seen.append((manager.render_in_progress("pi_png"), manager.render_in_progress("lobby")))
+        return base(png_bytes, panel=panel, settings=settings)
+
+    renderers[0].module.transform = _transform  # type: ignore[attr-defined]
+    manager.push_image(png, source_label="upload")
+    assert seen == [(True, False)]
+    assert not manager.render_in_progress("pi_png")
+    seen.clear()
+    with patch("app.push.capture_composed", return_value=(_distinct_png((3, 4, 5)), [])):
+        manager.push("home")  # unbound page, legacy broadcast on
+    assert seen == [(True, False)]
+    assert not manager.render_in_progress("pi_png")

@@ -696,9 +696,31 @@ class PushManager:
         with self._rendering_lock:
             return self._rendering.get(device_id, 0) > 0
 
-    def _page_device_ids(self, page_id: str) -> list[str]:
+    def _broadcast_recipients(self) -> set[str]:
+        """The devices a push for no particular device delivers to: the
+        ``.device`` of every enabled base renderer. Per-device clones are
+        skipped on such a push (see ``_fan_out``)."""
+        disabled = _disabled_renderer_ids(self._settings)
+        return {
+            str(r.device)
+            for r in self._registry.all()
+            if r.id not in disabled and "__" not in r.id and r.device
+        }
+
+    def _page_push_targets(self, page_id: str, device_ids: set[str] | None) -> set[str]:
+        """The devices a page push renders for: the explicit targets, else
+        the page's bound devices, else (an unbound page with the legacy
+        broadcast on) every broadcast recipient."""
+        if device_ids:
+            return set(device_ids)
         page = self._page_store.get(page_id)
-        return list(getattr(page, "device_ids", None) or [])
+        bound = list(getattr(page, "device_ids", None) or [])
+        if bound:
+            return set(bound)
+        return self._broadcast_recipients() if _unbound_broadcast_enabled(self._settings) else set()
+
+    def _image_push_targets(self, device_id: str | None) -> set[str]:
+        return {device_id} if device_id else self._broadcast_recipients()
 
     def _notify(self, result: PushResult) -> None:
         with self._listener_lock:
@@ -1792,8 +1814,8 @@ class PushManager:
     # -- public API ------------------------------------------------------
 
     @_marks_rendering(
-        lambda self, page_id, *_a, device_ids=None, **_k: (
-            device_ids if device_ids else self._page_device_ids(page_id)
+        lambda self, page_id, *_a, device_ids=None, **_k: self._page_push_targets(
+            page_id, device_ids
         )
     )
     def push(
@@ -1989,7 +2011,7 @@ class PushManager:
         with self._followup_lock:
             return self._followups.get(page_id)
 
-    @_marks_rendering(lambda self, *_a, device_id=None, **_k: (device_id,))
+    @_marks_rendering(lambda self, *_a, device_id=None, **_k: self._image_push_targets(device_id))
     def push_image(
         self,
         image_bytes: bytes,
@@ -2065,7 +2087,7 @@ class PushManager:
         self._notify(result)
         return result
 
-    @_marks_rendering(lambda self, *_a, device_id=None, **_k: (device_id,))
+    @_marks_rendering(lambda self, *_a, device_id=None, **_k: self._image_push_targets(device_id))
     def push_url_image(
         self,
         url: str,
@@ -2115,7 +2137,7 @@ class PushManager:
         self._notify(result)
         return result
 
-    @_marks_rendering(lambda self, *_a, device_id=None, **_k: (device_id,))
+    @_marks_rendering(lambda self, *_a, device_id=None, **_k: self._image_push_targets(device_id))
     def push_webpage(
         self,
         url: str,
@@ -2333,7 +2355,7 @@ class PushManager:
                 # Republish is a user-initiated resend from the History
                 # page; treat it as user intent (bypass coalescing) so
                 # the user's re-send never gets silently superseded.
-                resending = set(selected_ids)
+                resending = set(selected_ids) or self._broadcast_recipients()
                 self._mark_rendering(resending, +1)
                 self._lock.acquire()
                 try:

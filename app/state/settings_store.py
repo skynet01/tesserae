@@ -338,6 +338,42 @@ class SettingsStore:
             ns[item_id] = merged
             self._flush()
 
+    def update_item(
+        self,
+        namespace: str,
+        item_id: str,
+        values: dict[str, Any],
+        *,
+        remove: Iterable[str] = (),
+    ) -> None:
+        """Set ``values`` and drop the ``remove`` keys on ``namespace.item_id``,
+        leaving every other key as it is, in one step under the store's lock.
+        For keys outside a manifest's settings (a button map, a refresh mode):
+        copying the whole item, changing a key and writing the copy back would
+        undo whatever another request saved on that item in between."""
+        with self._lock:
+            ns = self._data.setdefault(namespace, {})
+            if not isinstance(ns, dict):
+                ns = {}
+                self._data[namespace] = ns
+            existing = ns.get(item_id, {})
+            merged: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+            for key in remove:
+                merged.pop(key, None)
+            merged.update(values)
+            ns[item_id] = merged
+            self._flush()
+
+    def remove_item(self, namespace: str, item_id: str) -> bool:
+        """Drop ``namespace.item_id`` in one step. Returns whether it was there."""
+        with self._lock:
+            ns = self._data.get(namespace)
+            if not isinstance(ns, dict) or item_id not in ns:
+                return False
+            del ns[item_id]
+            self._flush()
+            return True
+
     def _get_item(self, namespace: str, item_id: str) -> dict[str, Any]:
         with self._lock:
             ns = self._data.get(namespace, {})

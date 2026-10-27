@@ -52,7 +52,7 @@
 
   {# SUB-NAV #}
   <nav class="dx-subnav" aria-label="Sections" data-subnav>
-    {% set _nav = [('overview', 'Overview'), ('identity', 'Identity'), ('display', 'Display'), ('timing', 'Timing'), ('controls', 'Controls'), ('rendering', 'Rendering'), ('power', 'Power'), ('lineups', 'Lineups'), ('connection', 'Connection')] %}
+    {% set _nav = [('overview', 'Overview'), ('identity', 'Identity'), ('display', 'Display'), ('timing', 'Timing')] + ([('controls', 'Controls')] if section.has_controls else []) + [('rendering', 'Rendering'), ('power', 'Power'), ('lineups', 'Lineups'), ('connection', 'Connection')] %}
     {% if section.logs %}{% set _nav = _nav + [('logs', 'Logs')] %}{% endif %}
     {% for anchor, label in _nav + [('remove', 'Remove')] %}
     <a href="#{{ anchor }}" class="dx-subnav-link{% if loop.first %} is-active{% endif %}{% if anchor == 'remove' %} is-danger{% endif %}" data-subnav-link="{{ anchor }}">{{ label }}</a>
@@ -399,7 +399,9 @@
       </div>
     </section>
 
-    {# ---------------- CONTROLS ---------------- #}
+    {# ---------------- CONTROLS ----------------
+       Only for a device with buttons or a touch panel. #}
+    {% if section.has_controls %}
     <section class="dx-section-card dx-devsec" id="controls" data-devsec>
       <header class="dx-section-head">
         <span class="dx-section-icon" aria-hidden="true"><i class="ph ph-hand-tap"></i></span>
@@ -453,6 +455,7 @@
         {% endif %}
       </div>
     </section>
+    {% endif %}
 
     {# ---------------- RENDERING ---------------- #}
     <section class="dx-section-card dx-devsec" id="rendering" data-devsec>

@@ -97,11 +97,20 @@ def free_port() -> int:
 class FakeSign:
     """A sign over a real socket: send status / ACK / NACK, collect frames."""
 
-    def __init__(self, port: int, uuid: str = UUID, *, rcvbuf: int | None = None) -> None:
+    def __init__(
+        self,
+        port: int,
+        uuid: str = UUID,
+        *,
+        rcvbuf: int | None = None,
+        local_port: int | None = None,
+    ) -> None:
         self.uuid = uuid
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         if rcvbuf is not None:  # a sign that stops reading fills this up
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        if local_port is not None:  # known before connecting (see _fake_addresses)
+            self.sock.bind(("127.0.0.1", local_port))
         self.sock.settimeout(5)
         self.sock.connect(("127.0.0.1", port))
         self.decoder = FrameDecoder(Direction.SERVER_TO_DEVICE)
@@ -214,9 +223,10 @@ class Harness:
     ) -> None:
         self.renders = tmp_path / "renders"
         self.renders.mkdir()
-        self.settings = FakeSettings(
-            {"devices": {"lobby": {"uuid": uuid}}, "app": dict(app_settings or {})}
-        )
+        lobby: dict[str, Any] = {"uuid": uuid}
+        if not uuid:  # a blank device just added: it binds the next unknown sign
+            lobby[visionect.AUTO_BIND_KEY] = time.time()
+        self.settings = FakeSettings({"devices": {"lobby": lobby}, "app": dict(app_settings or {})})
         kind = FakeDevice("visionect", None, SIGN_PANEL, tmp_path / "kind.json")
         self.device = FakeDevice("lobby", "visionect", SIGN_PANEL, tmp_path / "lobby.json")
         self.registry = SimpleNamespace(devices={"visionect": kind, "lobby": self.device})
@@ -726,7 +736,7 @@ def test_glass_check_resends_once_after_the_crc_has_had_time() -> None:
     svc._check_glass(sign, status)
     assert sign.shown_digest == "frame-a"  # never a loop
     svc._check_glass(sign, SimpleNamespace(display_state_crc=111))
-    assert not sign.crc_corrected  # a match re-arms the check
+    assert sign.crc_corrected  # a match doesn't re-arm it (only a new frame's ACK does)
 
 
 def test_a_slow_stop_never_lets_a_new_run_share_its_state(harness: Harness, monkeypatch) -> None:
@@ -837,8 +847,9 @@ def _closed_soon(sock: socket.socket, timeout: float = 3.0) -> bool:
         return False
 
 
-def _raw(port: int) -> socket.socket:
-    return socket.create_connection(("127.0.0.1", port), timeout=5)
+def _raw(port: int, local_port: int | None = None) -> socket.socket:
+    source = ("127.0.0.1", local_port) if local_port is not None else None
+    return socket.create_connection(("127.0.0.1", port), timeout=5, source_address=source)
 
 
 def test_the_listener_hooks_pyvisionect_where_it_expects() -> None:
@@ -1407,29 +1418,77 @@ def _other_uuid(n: int) -> str:
     return f"{n:08x}-0000-4000-8000-000000000000"
 
 
+UUID_FIELDS = [{"name": "uuid"}]
+
+
 def test_a_blank_device_binds_only_within_its_arming_window(tmp_path: Path) -> None:
+    """The window is a stored time, set when the device is added or its UUID
+    cleared. Renaming or saving an old blank device (which rewrites its
+    instance file) doesn't reopen it."""
     h = Harness(tmp_path)
-    old = time.time() - visionect.AUTO_BIND_WINDOW_S - 60
-    os.utime(h.device.path, (old, old))  # added over an hour ago
+    lobby = h.settings.sections["devices"]["lobby"]
+    lobby[visionect.AUTO_BIND_KEY] = time.time() - visionect.AUTO_BIND_WINDOW_S - 60
+    os.utime(h.device.path, None)  # renamed just now
+    save = visionect.save_device_config
     try:
         assert h.svc.start()
         sign = FakeSign(h.svc.port)
         try:
             sign.status()
             assert _wait(lambda: h.app.config["DISCOVERY_CACHE"].get(visionect.discovery_id(UUID)))
-            assert h.settings.sections["devices"]["lobby"]["uuid"] == ""  # not bound
+            assert lobby["uuid"] == ""  # not bound: listed as discovered
+            # Saving it blank again doesn't reopen the window either.
+            assert save(h.settings, h.registry, h.device, {"uuid": ""}, UUID_FIELDS) is None
             assert not h.svc.auto_bind_open(h.device)  # type: ignore[arg-type]
-            # Clearing a device's UUID re-opens its window (seen on attach).
-            h.settings.sections["devices"]["lobby"]["uuid"] = _other_uuid(1)
-            h.svc.attach(h.svc._ctx)  # type: ignore[arg-type]
-            h.settings.sections["devices"]["lobby"]["uuid"] = ""
-            h.svc.attach(h.svc._ctx)  # type: ignore[arg-type]  # and the waiting sign binds
-            assert _wait(lambda: h.settings.sections["devices"]["lobby"]["uuid"] == UUID)
+            # Clearing a UUID does.
+            assert (
+                save(h.settings, h.registry, h.device, {"uuid": _other_uuid(1)}, UUID_FIELDS)
+                is None
+            )
+            assert save(h.settings, h.registry, h.device, {"uuid": ""}, UUID_FIELDS) is None
+            h.svc._call_soon(h.svc._rescan)
+            assert _wait(lambda: lobby["uuid"] == UUID)
+            assert lobby.get(visionect.AUTO_BIND_KEY) is None  # bound: the window closed
             assert h.app.config["DISCOVERY_CACHE"].get(visionect.discovery_id(UUID)) is None
         finally:
             sign.close()
     finally:
         h.svc.stop()
+
+
+def test_one_lock_checks_and_stores_a_sign_binding(tmp_path: Path) -> None:
+    """Two saves binding one sign to two devices at once: exactly one wins,
+    and the listener's auto-bind doesn't take a sign another device has."""
+
+    class _SlowSettings(FakeSettings):
+        def update_for_namespace(self, *args: Any) -> None:
+            time.sleep(0.2)  # widen the gap between the check and the write
+            super().update_for_namespace(*args)
+
+    h = Harness(tmp_path, uuid=_other_uuid(1))
+    hall = FakeDevice("hall", "visionect", SIGN_PANEL, tmp_path / "hall.json")
+    h.registry.devices["hall"] = hall
+    settings = _SlowSettings(h.settings.sections)
+    results: list[str | None] = []
+    savers = [
+        threading.Thread(
+            target=lambda d=d: results.append(
+                visionect.save_device_config(settings, h.registry, d, {"uuid": UUID}, UUID_FIELDS)
+            )
+        )
+        for d in (h.device, hall)
+    ]
+    for t in savers:
+        t.start()
+    for t in savers:
+        t.join(5)
+    assert sorted(r is None for r in results) == [False, True]
+    section = h.settings.sections["devices"]
+    bound = [d for d in ("lobby", "hall") if section.get(d, {}).get("uuid") == UUID]
+    assert len(bound) == 1
+    other = "hall" if bound == ["lobby"] else "lobby"
+    h.settings.sections["devices"].setdefault(other, {})["uuid"] = ""
+    assert not visionect.bind_sign(settings, h.registry, h.registry.devices[other], UUID)
 
 
 def test_discovery_ids_are_long_and_never_merge_two_signs(tmp_path: Path) -> None:
@@ -1540,7 +1599,7 @@ def test_binding_keeps_device_settings_saved_meanwhile(tmp_path: Path) -> None:
     h.settings.__class__ = _RacingSettings
     assert h.svc._bind(UUID) is h.device
     stored = FakeSettings.get_section(h.settings, "devices")["lobby"]
-    assert stored == {"uuid": UUID, "dither": "floyd"}
+    assert stored["uuid"] == UUID and stored["dither"] == "floyd"
 
 
 def test_a_connection_already_replaced_in_the_library_is_ignored_not_refused() -> None:
@@ -1557,3 +1616,302 @@ def test_a_connection_already_replaced_in_the_library_is_ignored_not_refused() -
     status = StatusPacket(records=STATUS_TAGS, sentinel=0)
     assert svc._connected(stale, UUID, status) == ""
     assert sign.refused is None and sign.status is None
+
+
+def test_rejected_and_unidentified_identities_leave_no_library_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The library allocates store and stats entries for any UUID a frame
+    names, before Tesserae admits a sign. Malformed first statuses and signs
+    refused for being one unknown too many never reach the tracked signs, so
+    they are pruned as their connections close."""
+    monkeypatch.setattr(visionect, "MAX_UNKNOWN_SIGNS", 1)
+    h = Harness(tmp_path, uuid=_other_uuid(999))  # no device free to bind
+    try:
+        assert h.svc.start()
+        server = h.svc._server
+        for n in range(100):
+            sock = _raw(h.svc.port)
+            sock.sendall(device_frame(_other_uuid(n), PacketType.STATUS, b"\x01\x02\x03", 1))
+            sock.close()
+            assert _wait(lambda n=n: server.stats.accepted == n + 1 and server._open == 0)
+        assert server.stats.identified == 100  # each one registered a UUID
+        assert len(h.svc._store) == 0 and server.stats.last_seen == {}
+        # One unknown sign is tracked; the next is refused, and leaves nothing.
+        kept = FakeSign(h.svc.port, uuid=_other_uuid(500))
+        try:
+            kept.status()
+            assert _wait(lambda: _other_uuid(500) in h.svc._signs)
+            extra = FakeSign(h.svc.port, uuid=_other_uuid(501))
+            extra.status()
+            assert extra.dropped(timeout=5)
+            extra.close()
+            assert _wait(lambda: server._open == 1)
+            assert set(server.stats.last_seen) == {visionect.uuid_bytes(_other_uuid(500))}
+            assert len(h.svc._store) == 1
+        finally:
+            kept.close()
+        assert _wait(lambda: server._open == 0)
+        h.svc._call_soon(h.svc._rescan)  # notices it left: an unbound sign is forgotten
+        assert _wait(lambda: not h.svc._signs and len(h.svc._store) == 0)
+        assert server.stats.last_seen == {}
+    finally:
+        h.svc.stop()
+
+
+def test_a_corrective_resend_is_spent_until_a_new_frame_is_acked() -> None:
+    """A sign whose CRC never matches gets one corrective resend per frame,
+    not one every convergence period: the resend's own ACK doesn't re-arm."""
+    from pyvisionect.packets import ControlPacket as Control
+    from pyvisionect.session import Acked
+
+    svc = visionect.VisionectService()
+    sign = svc._sign(UUID)
+    conn = SimpleNamespace(device_id=visionect.uuid_bytes(UUID), closed=False)
+    sign.conn = conn
+    sign.shown_digest, sign.shown_checksum = "frame-a", 111
+    wrong = SimpleNamespace(display_state_crc=222)
+    long_ago = time.time() - visionect.CRC_CONVERGE_S - 1
+
+    def _ack(packet_id: int, digest: str) -> None:
+        sign.inflight = visionect._Inflight(
+            kind="image", packet_id=packet_id, conn=conn, writer=None, digest=digest, checksum=111
+        )
+        svc._handle_event(
+            conn,
+            Acked(packet_id=packet_id, control=Control.ack(), device_id=visionect.uuid_bytes(UUID)),
+        )
+
+    sign.shown_at = long_ago
+    svc._check_glass(sign, wrong)
+    assert sign.shown_digest == "" and sign.crc_corrected  # the one corrective resend
+    _ack(1, "frame-a")  # its ACK
+    assert sign.crc_corrected
+    sign.shown_at = long_ago
+    svc._check_glass(sign, wrong)
+    assert sign.shown_digest == "frame-a"  # no second correction cycle
+    _ack(2, "frame-b")  # a new desired frame re-arms it
+    assert not sign.crc_corrected
+
+
+@pytest.mark.parametrize("how", ["published again", "back-off"])
+def test_a_render_that_was_missing_is_sent_once_it_is_back(
+    harness: Harness, monkeypatch, caplog, how: str
+) -> None:
+    monkeypatch.setattr(visionect, "FAILED_RETRY_S", 0.3)
+    harness.render("frame-a")
+    target = harness.renders / "frame-a.png"
+    saved = target.read_bytes()
+    target.unlink()
+    harness.latest = {**harness.latest, "timestamp": 1.0}  # type: ignore[dict-item]
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        assert _wait(
+            lambda: "couldn't be read" in (harness.svc.sign_view(UUID) or {}).get("last_error", "")
+        )
+        harness.push()  # inside the back-off, nothing new: not retried, not logged again
+        target.write_bytes(saved)  # the artifact is back, same digest
+        if how == "published again":
+            harness.latest = {**harness.latest, "timestamp": 2.0}  # type: ignore[dict-item]
+        else:
+            time.sleep(0.4)
+        harness.push()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+    finally:
+        sign.close()
+    notes = [r for r in caplog.records if "can't send render" in r.getMessage()]
+    assert len(notes) == 1
+
+
+def test_a_status_during_an_encode_doesnt_discard_it(harness: Harness, monkeypatch) -> None:
+    calls: list[int] = []
+    real = visionect._encode
+
+    def _slow_encode(path: Path, panel: Any) -> Any:
+        calls.append(1)
+        time.sleep(0.6)
+        return real(path, panel)
+
+    monkeypatch.setattr(visionect, "_encode", _slow_encode)
+    harness.render("frame-a")
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        time.sleep(0.2)
+        sign.status()  # a heartbeat (or a probe's answer) mid-encode, same geometry
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        assert len(calls) == 1
+    finally:
+        sign.close()
+
+
+def test_a_frame_left_by_a_history_resend_is_adopted_after_a_restart(harness: Harness) -> None:
+    """After a resend the sign holds the deliberately altered checksum; a
+    restart must still see that it shows the frame, not repaint it."""
+    harness.render("frame-a")
+    status = StatusPacket(records=STATUS_TAGS, sentinel=0)
+    path = harness.renders / "frame-a.png"
+    checksum = int(visionect._encode(path, visionect.sign_panel(status)).state_checksum)
+    held = visionect.perturbed_checksum(checksum)
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status(with_tag(9, held))
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("in_sync") is True)
+        assert harness.svc._signs[UUID].shown_checksum == held
+        sign.wait_for(lambda s: len(s.images()) > 0, timeout=1.0)
+        assert sign.images() == []
+    finally:
+        sign.close()
+
+
+def test_the_signs_own_address_takes_its_uuid_back(tmp_path: Path, monkeypatch) -> None:
+    """A LAN host claims a sleeping sign's UUID from another address and keeps
+    the connection busy (so it is never probed). When the sign wakes, from the
+    address that last acknowledged its frames, it takes the UUID back; the
+    host's own ACKs meanwhile don't make its address the trusted one."""
+    h = Harness(tmp_path, uuid=UUID)
+    ports = {name: free_port() for name in ("sign", "host", "wake", "again")}
+    _fake_addresses(
+        monkeypatch,
+        {
+            ports["sign"]: "10.0.0.5",
+            ports["host"]: "10.0.0.66",
+            ports["wake"]: "10.0.0.5",
+            ports["again"]: "10.0.0.66",
+        },
+    )
+    try:
+        h.render("frame-a")
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port, local_port=ports["sign"])
+        sign.status()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        sign.ack(sign.images()[0].id)
+        assert _wait(lambda: h.svc._signs[UUID].trusted_ip == "10.0.0.5")
+        sign.close()  # asleep
+        assert _wait(lambda: h.svc._server._open == 0)
+        host = FakeSign(h.svc.port, local_port=ports["host"])
+        host.status()  # nothing holds the UUID: accepted
+        h.render("frame-b", shade=128)
+        h.push()
+        assert host.wait_for(lambda s: len(s.images()) == 1)
+        host.ack(host.images()[0].id)
+        host.status()
+        assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("remote") == "10.0.0.66")
+        assert h.svc._signs[UUID].trusted_ip == "10.0.0.5"
+        woke = FakeSign(h.svc.port, local_port=ports["wake"])
+        woke.status()
+        assert host.dropped(timeout=5)
+        assert not woke.dropped(timeout=0.5)
+        view = h.svc.sign_view(UUID) or {}
+        assert view.get("remote") == "10.0.0.5"
+        assert (view.get("refused") or {}).get("remote") == "10.0.0.66"
+        again = FakeSign(h.svc.port, local_port=ports["again"])
+        again.status()
+        assert again.dropped(timeout=5)  # and while it lives, the host is refused
+        for s in (host, woke, again):
+            s.close()
+    finally:
+        h.svc.stop()
+
+
+def test_busy_addresses_cant_lock_the_sign_out(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(visionect_listener, "MAX_CONNECTIONS", 2)
+    h = Harness(tmp_path, uuid=UUID)
+    ports = [free_port() for _ in range(4)]
+    _fake_addresses(
+        monkeypatch,
+        {ports[0]: "10.0.0.5", ports[1]: "10.0.0.66", ports[2]: "10.0.0.67", ports[3]: "10.0.0.5"},
+    )
+    try:
+        h.render("frame-a")
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port, local_port=ports[0])
+        sign.status()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        sign.ack(sign.images()[0].id)
+        assert _wait(lambda: h.svc._signs[UUID].trusted_ip == "10.0.0.5")
+        sign.close()
+        assert _wait(lambda: h.svc._server._open == 0)
+        squatters = [_raw(h.svc.port, ports[1]), _raw(h.svc.port, ports[2])]
+        assert _wait(lambda: h.svc._server._open == 2)  # the cap is full
+        back = FakeSign(h.svc.port, local_port=ports[3])
+        back.status()
+        assert back.wait_for(lambda s: len(s.images()) >= 0) and not back.dropped(timeout=0.5)
+        assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("connected") is True)
+        stranger = _raw(h.svc.port)
+        assert _closed_soon(stranger)  # anyone else is still refused
+        for s in [*squatters, stranger, back.sock]:
+            s.close()
+    finally:
+        h.svc.stop()
+
+
+def test_restart_adoption_uses_the_status_that_arrived_during_the_encode(
+    harness: Harness, monkeypatch
+) -> None:
+    """The first status reports another CRC; one with the same geometry,
+    arriving while the frame encodes, reports the frame's. Adoption must
+    read the newer one (it used to read the first: a needless resend)."""
+    harness.render("frame-a")
+    status = StatusPacket(records=STATUS_TAGS, sentinel=0)
+    path = harness.renders / "frame-a.png"
+    checksum = int(visionect._encode(path, visionect.sign_panel(status)).state_checksum)
+    real = visionect._encode
+
+    def _slow_encode(path: Path, panel: Any) -> Any:
+        time.sleep(0.6)
+        return real(path, panel)
+
+    monkeypatch.setattr(visionect, "_encode", _slow_encode)
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status(with_tag(9, checksum ^ 1))
+        time.sleep(0.2)
+        sign.status(with_tag(9, checksum))
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("in_sync") is True)
+        sign.wait_for(lambda s: len(s.images()) > 0, timeout=1.0)
+        assert sign.images() == []
+    finally:
+        sign.close()
+
+
+def test_a_matching_status_doesnt_rearm_the_correction_of_the_same_frame() -> None:
+    """Corrective resend acked, then a matching status, then a mismatch
+    again: still no second correction of that frame."""
+    from pyvisionect.packets import ControlPacket as Control
+    from pyvisionect.session import Acked
+
+    svc = visionect.VisionectService()
+    sign = svc._sign(UUID)
+    conn = SimpleNamespace(device_id=visionect.uuid_bytes(UUID), closed=False)
+    sign.conn = conn
+    sign.shown_digest, sign.shown_checksum = "frame-a", 111
+    long_ago = time.time() - visionect.CRC_CONVERGE_S - 1
+    sign.shown_at = long_ago
+    svc._check_glass(sign, SimpleNamespace(display_state_crc=222))
+    assert sign.crc_corrected and sign.shown_digest == ""
+    sign.inflight = visionect._Inflight(
+        kind="image", packet_id=1, conn=conn, writer=None, digest="frame-a", checksum=111
+    )
+    svc._handle_event(
+        conn, Acked(packet_id=1, control=Control.ack(), device_id=visionect.uuid_bytes(UUID))
+    )
+    svc._check_glass(sign, SimpleNamespace(display_state_crc=111))  # it matches for a while
+    sign.shown_at = long_ago
+    svc._check_glass(sign, SimpleNamespace(display_state_crc=222))  # then drifts again
+    assert sign.shown_digest == "frame-a"
+
+
+def test_a_long_run_of_render_failures_doesnt_overflow_the_backoff() -> None:
+    svc = visionect.VisionectService()
+    sign = svc._sign(UUID)
+    device = SimpleNamespace(id="lobby")
+    sign.failed_digest, sign.failed_tries = "frame-a", 1024
+    svc._render_failed(sign, device, "frame-a", 1.0, FileNotFoundError("gone"))  # type: ignore[arg-type]
+    assert sign.failed_retry_at - time.monotonic() <= visionect.FAILED_RETRY_MAX_S + 1

@@ -99,17 +99,31 @@ WRITE_TIMEOUT_S = 90.0
 # (DHCP) gets back in at its next re-dial.
 PROBE_QUIET_S = 30.0
 PROBE_TIMEOUT_S = 20.0
+# The address that last acknowledged a frame or sleep for a UUID is the sign's
+# own: a connection from it takes the UUID back from a connection elsewhere
+# (one that claimed it while the sign slept, say), and it is exempt from the
+# listener's total connection cap. Another address's ACKs move that trust only
+# once the trusted address has acknowledged nothing for TRUST_STALE_S (longer
+# than the longest sleep), so whoever holds the UUID meanwhile can't take it.
+TRUST_STALE_S = 25 * 3600.0
 # Quiet-hours sleep waits while the push pipeline renders for the device (a
 # push that started just before the window would otherwise land after the
 # sign fell asleep on the old frame), checking every RENDER_HOLD_POLL_S, for
 # at most RENDER_HOLD_MAX_S.
 RENDER_HOLD_POLL_S = 5.0
 RENDER_HOLD_MAX_S = 600.0
+# A latest render that couldn't be read or encoded is tried again after
+# FAILED_RETRY_S, doubling to at most FAILED_RETRY_MAX_S, and at once when it
+# is published again.
+FAILED_RETRY_S = 60.0
+FAILED_RETRY_MAX_S = 15 * 60.0
 # A blank device binds the first unknown sign that connects only within this
-# long of being added (its instance file written) or having its UUID cleared;
-# after that an unknown sign is listed as discovered instead. Anything on the
-# LAN can claim to be a sign, so a blank device doesn't stay up for grabs.
+# long of being added or having its UUID cleared (the time is stored with the
+# device's settings under AUTO_BIND_KEY); after that an unknown sign is listed
+# as discovered instead. Anything on the LAN can claim to be a sign, so a
+# blank device doesn't stay up for grabs.
 AUTO_BIND_WINDOW_S = 60 * 60.0
+AUTO_BIND_KEY = "uuid_armed_at"
 # Unbound UUIDs tracked at once (more connections are dropped), discovered
 # entries kept, and UUIDs remembered as already warned about.
 MAX_UNKNOWN_SIGNS = 16
@@ -259,15 +273,22 @@ class _Sign:
     heard_at: float = 0.0  # monotonic; its last status or ACK
     probe_at: float = 0.0  # monotonic; a status request sent to check it lives
     refused: dict[str, Any] | None = None  # the last same-UUID connection refused
+    trusted_ip: str = ""  # the address that last acknowledged a frame or sleep
+    trusted_at: float = 0.0  # wall clock of that acknowledgement
     frame: Any = None  # EncodedFrame for frame_digest
     frame_digest: str = ""
     failed_digest: str = ""  # a latest render that couldn't be read or encoded
+    failed_stamp: Any = None  # that render's publication timestamp
+    failed_retry_at: float = 0.0  # monotonic; when to try it again
+    failed_tries: int = 0
+    failed_logged: str = ""  # the failing digest already logged (once each)
     resend_stamp: float = 0.0  # the last History resend honoured (its timestamp)
     hold_since: float = 0.0  # monotonic; sleep held for a render in progress
     shown_digest: str = ""  # acked by the sign during this run
     shown_checksum: int | None = None  # its state checksum (status tag 9)
     shown_at: float = 0.0  # wall clock of that ACK
     crc_corrected: bool = False  # one corrective resend per mismatch
+    corrected_digest: str = ""  # the frame that corrective resend was for
     inflight: _Inflight | None = None  # at most one frame or sleep at a time
     retry_at: float = 0.0  # monotonic; after a refused frame
     sleep_retry_at: float = 0.0  # monotonic; after a refused sleep
@@ -321,10 +342,6 @@ class VisionectService:
         self._tasks: set[asyncio.Task[None]] = set()
         self._warned_unbound: dict[str, None] = {}  # insertion-ordered, capped
         self._discovered: dict[str, None] = {}  # discovery ids we listed, oldest first
-        # Auto-bind arming: when each blank device was seen to become blank
-        # (wall clock), and the blank set at the last attach.
-        self._blank_since: dict[str, float] = {}
-        self._blank_ids: set[str] | None = None
         self._retry_timer: threading.Timer | None = None
         # Read by Flask request threads; written on the loop thread.
         self._snapshot_lock = threading.Lock()
@@ -343,39 +360,15 @@ class VisionectService:
         sign waits gets its frame without waiting for the next check-in."""
         self._ctx = ctx
         self._ctx_gen += 1
-        try:
-            self._note_blank_devices(ctx)
-        except Exception:
-            logger.exception("visionect: checking for blank devices failed")
         self._call_soon(self._rescan)
-
-    def _note_blank_devices(self, ctx: _Context) -> None:
-        """Arm auto-bind for a device whose UUID was just cleared (or that
-        just appeared blank). Not on the first attach: a restart doesn't
-        re-open the window; a new device's file time arms it instead."""
-        section = ctx.settings.get_section("devices") or {}
-        blank = set()
-        for device in visionect_devices(ctx.devices):
-            cfg = section.get(device.id) if isinstance(section, dict) else None
-            if not normalise_uuid(cfg.get("uuid") if isinstance(cfg, dict) else None):
-                blank.add(device.id)
-        if self._blank_ids is not None:
-            now = time.time()
-            for device_id in blank - self._blank_ids:
-                self._blank_since[device_id] = now
-        for device_id in list(self._blank_since):
-            if device_id not in blank:
-                del self._blank_since[device_id]
-        self._blank_ids = blank
 
     def auto_bind_open(self, device: Device) -> bool:
         """Whether this blank device still binds the next unknown sign:
-        within AUTO_BIND_WINDOW_S of its instance file being written (it was
-        added, or saved) or of its UUID being cleared."""
-        since = self._blank_since.get(device.id, 0.0)
-        with contextlib.suppress(OSError):
-            since = max(since, device.path.stat().st_mtime)
-        return time.time() - since < AUTO_BIND_WINDOW_S
+        within AUTO_BIND_WINDOW_S of being added or having its UUID cleared."""
+        armed = self._device_cfg(device.id).get(AUTO_BIND_KEY)
+        if isinstance(armed, bool) or not isinstance(armed, (int, float)) or armed <= 0:
+            return False
+        return time.time() - float(armed) < AUTO_BIND_WINDOW_S
 
     def start(self, timeout: float = 5.0) -> bool:
         """Bind the listener on a daemon thread. Returns whether it is up."""
@@ -525,6 +518,8 @@ class VisionectService:
         server = GuardedServer(
             on_events=self._on_events, store=store, host=self.host, port=self.port
         )
+        server.keep_identity = self._keeps_identity
+        server.trusted_peer = self._trusted_peer
         self._stop_event, self._store, self._server = stop_event, store, server
         await server.start()
         logger.info("visionect: listening for signs on %s:%d", self.host, self.port)
@@ -620,11 +615,9 @@ class VisionectService:
         ]
         if not blank:
             return None
-        chosen = blank[0]
-        # Only the uuid key, merged under the settings store's lock: the rest
-        # of the device's settings may be saved from a request meanwhile.
-        ctx.settings.update_for_namespace("devices", chosen.id, {"uuid": uuid}, [{"name": "uuid"}])
-        self._blank_since.pop(chosen.id, None)
+        chosen = next((d for d in blank if bind_sign(ctx.settings, ctx.devices, d, uuid)), None)
+        if chosen is None:
+            return None
         self._forget_discovery(uuid)
         logger.info("visionect: bound sign %s to device %s", uuid, chosen.id)
         return chosen
@@ -756,6 +749,26 @@ class VisionectService:
         if isinstance(last_seen, dict):
             last_seen.pop(key, None)
 
+    def _trusted_peer(self, ip: str) -> bool:
+        """A bound sign's own address: exempt from the total connection cap."""
+        return bool(ip) and any(
+            (sign.trusted_ip or sign.remote) == ip
+            for uuid, sign in list(self._signs.items())
+            if self._device_for_uuid(uuid) is not None
+        )
+
+    def _note_trusted(self, sign: _Sign) -> None:
+        """An acknowledgement from the sign's connection: see TRUST_STALE_S."""
+        ip, now = sign.remote, time.time()
+        if ip and (
+            not sign.trusted_ip or ip == sign.trusted_ip or now - sign.trusted_at > TRUST_STALE_S
+        ):
+            sign.trusted_ip, sign.trusted_at = ip, now
+
+    def _keeps_identity(self, device_id: bytes) -> bool:
+        """The listener keeps library state only for UUIDs tracked here."""
+        return normalise_uuid(device_id.hex()) in self._signs
+
     def _unknown_signs(self) -> int:
         return sum(1 for uuid in self._signs if self._device_for_uuid(uuid) is None)
 
@@ -886,10 +899,17 @@ class VisionectService:
         #    can't be read or encoded is noted once and skipped: the sign
         #    keeps (and may sleep on) the frame it has, rather than this
         #    pass failing every minute all night.
+        stamp = (latest or {}).get("timestamp")
+        backing_off = (
+            digest == sign.failed_digest
+            and stamp == sign.failed_stamp
+            and time.monotonic() < sign.failed_retry_at
+        )
         if (
             latest
             and digest
-            and digest not in (sign.frame_digest, sign.failed_digest)
+            and digest != sign.frame_digest
+            and not backing_off
             and status is not None
         ):
             path = artifact_path(ctx.renders_dir, latest)
@@ -898,37 +918,36 @@ class VisionectService:
                     raise FileNotFoundError(f"{path} is missing")
                 frame = await loop.run_in_executor(None, _encode, path, panel)
             except Exception as exc:
-                sign.failed_digest = digest
-                sign.last_error = (
-                    "The latest render couldn't be read, so the sign keeps its last frame."
-                )
-                logger.warning(
-                    "visionect %s: can't send render %s (%s); the sign keeps its last frame",
-                    device.id,
-                    digest[:12],
-                    exc,
-                    exc_info=not isinstance(exc, FileNotFoundError),
-                )
+                self._render_failed(sign, device, digest, stamp, exc)
             else:
                 current = ctx.latest_render_fn(device.id) or {}
                 if (
                     self._ctx_gen != gen
                     or str(current.get("digest") or "") != digest
                     or self._device_for_uuid(sign.uuid) is not device
-                    or sign.status is not status
+                    or getattr(sign.status, "display_type", None) != status.display_type
                 ):
-                    sign.dirty = True  # superseded while encoding; start over
+                    # Superseded while encoding (a newer render, another
+                    # device, a different panel); start over. A new status
+                    # with the same geometry doesn't count.
+                    sign.dirty = True
                     return
                 sign.frame, sign.frame_digest = frame, digest
-                sign.failed_digest = ""
+                sign.failed_digest = sign.failed_logged = ""
+                sign.failed_tries = 0
                 sign.repaint_until = 0.0
                 sign.last_error = ""
-                if not sign.shown_digest and status.display_state_crc == frame.state_checksum:
+                checksum = int(frame.state_checksum)
+                # The newest status (same geometry, checked above): one that
+                # arrived during the encode may report a different CRC.
+                reported = getattr(sign.status, "display_state_crc", None)
+                if not sign.shown_digest and reported in (checksum, perturbed_checksum(checksum)):
                     # Before our first ACK this run (a restart) the sign's CRC
-                    # is the best evidence: it already shows this frame. Its
-                    # checksum and time arm the glass check, as an ACK would.
+                    # is the best evidence: it already shows this frame (as a
+                    # History resend left it, perhaps). Its checksum and time
+                    # arm the glass check, as an ACK would.
                     sign.shown_digest = digest
-                    sign.shown_checksum = int(frame.state_checksum)
+                    sign.shown_checksum = int(reported)
                     sign.shown_at = time.time()
 
         if not self._alive(sign) or sign.inflight is not None:
@@ -938,8 +957,8 @@ class VisionectService:
         # 2. Send the frame the sign hasn't acked, one at a time. A History
         #    "resend" of the frame it already shows is honoured once, with a
         #    checksum the sign can't hold, so it really repaints (ghosting).
-        stamp = resend_stamp(latest) if digest and digest == sign.frame_digest else 0.0
-        repaint = bool(stamp) and stamp != sign.resend_stamp
+        resend = resend_stamp(latest) if digest and digest == sign.frame_digest else 0.0
+        repaint = bool(resend) and resend != sign.resend_stamp
         if sign.frame is not None and (sign.frame_digest != sign.shown_digest or repaint):
             wait = sign.retry_at - time.monotonic()
             if wait > 0:
@@ -963,7 +982,7 @@ class VisionectService:
                 writer=writer,
                 digest=sign.frame_digest,
                 checksum=checksum,
-                resend_stamp=stamp,
+                resend_stamp=resend,
             )
             sign.inflight = inflight
             self._publish(sign)  # "sending" while the write is under way
@@ -1020,6 +1039,34 @@ class VisionectService:
         sign.inflight = inflight
         logger.info("visionect: quiet hours, sign %s sleeps for %d min", sign.uuid, minutes)
         await self._send(sign, inflight, SLEEP_ACK_TIMEOUT_S)
+
+    def _render_failed(
+        self, sign: _Sign, device: Device, digest: str, stamp: Any, exc: Exception
+    ) -> None:
+        """Note a latest render that couldn't be read or encoded. It is tried
+        again with a back-off, or at once if it is published again, and
+        logged once (a traceback only for an encode error)."""
+        if digest != sign.failed_digest:
+            sign.failed_tries = 0
+        sign.failed_digest, sign.failed_stamp = digest, stamp
+        sign.failed_tries = min(sign.failed_tries + 1, 32)
+        backoff = min(FAILED_RETRY_S * 2 ** min(sign.failed_tries - 1, 16), FAILED_RETRY_MAX_S)
+        sign.failed_retry_at = time.monotonic() + backoff
+        sign.last_error = "The latest render couldn't be read, so the sign keeps its last frame."
+        if sign.failed_logged == digest:
+            logger.debug(
+                "visionect %s: render %s still unreadable: %s", device.id, digest[:12], exc
+            )
+            return
+        sign.failed_logged = digest
+        logger.warning(
+            "visionect %s: can't send render %s (%s); the sign keeps its last frame and it is "
+            "tried again",
+            device.id,
+            digest[:12],
+            exc,
+            exc_info=not isinstance(exc, FileNotFoundError),
+        )
 
     async def _send(self, sign: _Sign, inflight: _Inflight, ack_timeout: float) -> None:
         """Put what ``inflight`` queued on the wire, then start its ACK clock."""
@@ -1136,11 +1183,16 @@ class VisionectService:
             sign.heard_at = now
             if answered and inflight is not None:
                 sign.inflight = None
+                self._note_trusted(sign)
                 if inflight.kind == "image":
                     sign.shown_digest = inflight.digest
                     sign.shown_checksum = inflight.checksum
                     sign.shown_at = time.time()
-                    sign.crc_corrected = False  # a new frame: its own corrective resend
+                    if inflight.digest != sign.corrected_digest:
+                        # A new desired frame gets its own corrective resend;
+                        # the ACK of that resend itself doesn't re-arm it.
+                        sign.crc_corrected = False
+                        sign.corrected_digest = ""
                     sign.retry_at = 0.0
                     sign.last_error = ""
                     if inflight.resend_stamp:
@@ -1196,8 +1248,19 @@ class VisionectService:
             and sign.remote
             and remote != sign.remote
         ):
-            self._refuse(sign, writer, remote)
-            return ""
+            if not sign.trusted_ip or remote != sign.trusted_ip:
+                self._refuse(sign, writer, remote)
+                return ""
+            # The sign's own address takes the UUID back from whoever
+            # claimed it from elsewhere (while it slept, say).
+            logger.warning(
+                "visionect: sign %s re-dialed from %s, the address that last acknowledged its "
+                "frames; dropping the connection from %s that held its UUID",
+                uuid,
+                remote,
+                sign.remote,
+            )
+            sign.refused = {"remote": sign.remote, "at": time.time()}
         if sign is None:
             device = device or self._bind(uuid)
             if device is None and self._unknown_signs() >= MAX_UNKNOWN_SIGNS:
@@ -1287,11 +1350,11 @@ class VisionectService:
         if reported is None or sign.shown_checksum is None or sending:
             return
         if reported == sign.shown_checksum:
-            sign.crc_corrected = False
-            return
+            return  # (a match doesn't re-arm the correction: only a new frame's ACK does)
         if time.time() - sign.shown_at < CRC_CONVERGE_S or sign.crc_corrected:
             return
         sign.crc_corrected = True
+        sign.corrected_digest = sign.shown_digest
         logger.info(
             "visionect: sign %s reports state %s, not the acked %s; re-sending",
             sign.uuid,
@@ -1408,6 +1471,92 @@ def device_bound_to(
         if isinstance(cfg, dict) and normalise_uuid(cfg.get("uuid")) == want:
             return device.id
     return None
+
+
+# Every write of a Visionect device's UUID goes through the helpers below,
+# which check that no other device has the sign and store it under this lock,
+# so two saves (or a save and the listener's auto-bind) can't bind one sign
+# to two devices.
+_BINDING_LOCK = threading.RLock()
+
+
+def binding_conflict(
+    devices: DeviceRegistry,
+    settings: Any,
+    device: Any,
+    values: dict[str, Any],
+    *,
+    exclude: str = "",
+) -> str | None:
+    """Why ``values`` can't be stored for ``device`` (a device or a kind):
+    another device is already bound to the sign UUID in them. None when they
+    can, or when ``device`` isn't a Visionect sign or no UUID is given."""
+    if not is_visionect_device(device):
+        return None
+    uuid = normalise_uuid(values.get("uuid"))
+    if not uuid:
+        return None
+    other = device_bound_to(devices, settings, uuid, exclude=exclude)
+    if other is None:
+        return None
+    return f"Sign {uuid} is already bound to device {other!r}."
+
+
+def _stored_config(settings: Any, device_id: str) -> dict[str, Any]:
+    section = settings.get_section("devices") or {}
+    cfg = section.get(device_id) if isinstance(section, dict) else None
+    return dict(cfg) if isinstance(cfg, dict) else {}
+
+
+def save_device_config(
+    settings: Any,
+    devices: DeviceRegistry,
+    device: Any,
+    values: dict[str, Any],
+    fields: list[dict[str, Any]],
+) -> str | None:
+    """Store a device's validated config values, as ``update_for_namespace``
+    does. For a Visionect device the sign UUID is checked against every other
+    device and stored atomically, and clearing it opens the auto-bind window.
+    Returns why nothing was stored, or None."""
+    with _BINDING_LOCK:
+        problem = binding_conflict(devices, settings, device, values, exclude=device.id)
+        if problem:
+            return problem
+        visionect = is_visionect_device(device) and "uuid" in values
+        before = (
+            normalise_uuid(_stored_config(settings, device.id).get("uuid")) if visionect else ""
+        )
+        settings.update_for_namespace("devices", device.id, values, fields)
+        if before and not normalise_uuid(values.get("uuid")):
+            arm_auto_bind(settings, device.id)
+    return None
+
+
+def arm_auto_bind(settings: Any, device_id: str) -> None:
+    """Open a blank device's auto-bind window now (it was just added, or its
+    UUID cleared)."""
+    settings.update_for_namespace(
+        "devices", device_id, {AUTO_BIND_KEY: time.time()}, [{"name": AUTO_BIND_KEY}]
+    )
+
+
+def bind_sign(settings: Any, devices: DeviceRegistry, device: Device, uuid: str) -> bool:
+    """Store ``uuid`` on ``device`` if it is still blank and no other device
+    has that sign (the listener's auto-bind). Only these keys change, merged
+    under the settings store's lock; the window closes."""
+    with _BINDING_LOCK:
+        if normalise_uuid(_stored_config(settings, device.id).get("uuid")):
+            return False
+        if device_bound_to(devices, settings, uuid, exclude=device.id) is not None:
+            return False
+        settings.update_for_namespace(
+            "devices",
+            device.id,
+            {"uuid": uuid, AUTO_BIND_KEY: None},
+            [{"name": "uuid"}, {"name": AUTO_BIND_KEY}],
+        )
+    return True
 
 
 def canvas_size(panel: Any) -> tuple[int, int] | None:

@@ -208,8 +208,12 @@ def _derive_manifest(
     # touch dispatch and the editors' Interaction UI apply to it. A hardware
     # fact (distinct from the ``touch_enabled`` firmware config); surfaced in
     # the device APIs so agents and the editor know which panels are tappable.
-    if entry.manifest.get("touch") is True:
-        manifest["touch"] = True
+    # ``false`` is stated too (it reads the same as absent).
+    # Physical buttons: ``false`` hides button maps and the Home Assistant
+    # Input entity for a SKU with none (``app.device_loader.has_buttons``).
+    for capability in ("touch", "buttons"):
+        if isinstance(entry.manifest.get(capability), bool):
+            manifest[capability] = entry.manifest[capability]
 
     extends = entry.manifest.get("config_schema_extends")
     if isinstance(extends, dict):
