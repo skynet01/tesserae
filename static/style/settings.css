@@ -4179,6 +4179,14 @@ select.dx-input:hover {
 .dx-devsec .dx-toggle-row { padding: 6px 0 14px; }
 .dx-devsec .dx-quiet-hours [data-dep-target] + [data-dep-target] { margin-top: 14px; }
 .dx-devsec .dx-quiet-hours[data-dep-off] [data-dep-target] { opacity: 0.55; pointer-events: none; }
+/* The two weekday pickers share a row when both fit, else stack. */
+.dx-devsec .dx-quiet-hours .dx-qh-days { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+/* Its switches read like the override row: ruled off, text left, switch right. */
+.dx-devsec .dx-quiet-hours > .dx-toggle-row[data-dep-target] {
+  margin-top: 14px;
+  padding: 14px 0 0;
+  border-top: 1px solid var(--dx-border-faint, #f1f0eb);
+}
 .dx-devsec .dx-button-map { margin: 0; }
 .dx-devsec .dx-button-map .field { padding: 0; }
 .dx-devsec .dx-debug { margin-top: 4px; }
