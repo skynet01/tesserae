@@ -139,6 +139,8 @@ PARAM_FLASH_SAVE = 53
 PARAM_WIFI_SSID = 65
 READ_PARAMS = (PARAM_HEARTBEAT, PARAM_SLEEP_DISABLE, PARAM_WIFI_SSID)
 HEARTBEAT_MAX_MINUTES = 24 * 60
+# How long a picture waits for the frame to answer a settings packet.
+PARAM_WAIT_S = 10.0
 PARAM_NAMES = {
     PARAM_HEARTBEAT: "check-in interval",
     PARAM_SLEEP_DISABLE: "sleep mode",
@@ -146,6 +148,7 @@ PARAM_NAMES = {
 }
 # pyvisionect.devices.enums.ParamControl.
 PARAM_READ = 0
+PARAM_READ_ERROR = 2
 PARAM_WRITE_ERROR = 3
 # What the device page can ask a connected sign to do (request_action).
 ACTIONS = ("status", "reboot", "refresh")
@@ -258,8 +261,10 @@ def status_summary(status: Any) -> dict[str, Any]:
         if isinstance(value, int) and not isinstance(value, bool):
             out[key] = value
     charging = fields.get("ChargingStatus")
-    if charging is not None:
-        out["charging"] = str(charging)
+    if isinstance(charging, dict):
+        charging = charging.get("name")
+    if charging:
+        out["charging"] = f"charger {charging}"
     return out
 
 
@@ -377,6 +382,7 @@ class _Sign:
     # refused.
     params: dict[int, Any] = field(default_factory=dict)
     params_asked: bool = False
+    params_wait_until: float = 0.0  # monotonic; pictures wait for a settings answer till then
     params_written: tuple[tuple[int, int], ...] = ()
     param_error: str = ""
     force_refresh: bool = False  # Full refresh asked from the device page
@@ -1032,11 +1038,13 @@ class VisionectService:
             return
         conn, writer = sign.conn, sign.writer
 
-        # 1b. The sign's settings: read them once per connection, then write
-        #     (and save to flash) what the device's config asks for. Small
-        #     packets, ahead of any frame on the same socket.
-        await self._sync_params(sign, device)
-        if not self._alive(sign):
+        # A settings read or write is out: hold the picture until the frame
+        # answers (or PARAM_WAIT_S passes). A picture sent on top of an
+        # unanswered settings packet made the 32" frame drop the connection
+        # with "protocol error", over and over.
+        wait = sign.params_wait_until - time.monotonic()
+        if wait > 0:
+            self._schedule(sign.uuid, delay=wait + 0.05)
             return
 
         # 2. Send the frame the sign hasn't acked, one at a time. A History
@@ -1082,6 +1090,12 @@ class VisionectService:
             )
             await self._send(sign, inflight, IMAGE_ACK_TIMEOUT_S)
             return  # the ACK re-runs us; sleep must wait for it
+
+        # 2b. The frame's own settings, only with the latest picture on the
+        #     glass and nothing in flight: read them once per connection, then
+        #     write (and save to flash) what the device's config asks for.
+        if await self._sync_params(sign, device):
+            return  # its answer re-runs us; sleep waits for it
 
         # 3. Only with the latest frame on the glass: quiet-hours sleep, once
         #    (the sign takes a moment to drop the socket after acking it).
@@ -1200,11 +1214,12 @@ class VisionectService:
 
     # -- the sign's own settings and actions ---------------------------------
 
-    async def _sync_params(self, sign: _Sign, device: Device) -> None:
+    async def _sync_params(self, sign: _Sign, device: Device) -> bool:
         """Read the sign's settings once per connection; once they're in,
         write the ones the device's config sets differently, save them to
         flash and read them back. A set of writes goes out at most once per
-        connection, so a sign that refuses one doesn't get it every pass."""
+        connection, so a sign that refuses one doesn't get it every pass.
+        True when it sent something (the caller waits for the answer)."""
         conn, writer = sign.conn, sign.writer
         if not sign.params_asked:
             sign.params_asked = True
@@ -1212,15 +1227,16 @@ class VisionectService:
                 conn.read_params(list(READ_PARAMS))
             except Exception:
                 logger.debug("visionect: reading %s's settings failed", sign.uuid, exc_info=True)
-                return
+                return False
+            self._await_params(sign)
             await self._write(conn, writer)
-            return
+            return True
         want = desired_params(self._device_cfg(device.id))
         if any(pid not in sign.params for pid in want):
-            return  # not read yet (or this firmware doesn't have it)
+            return False  # not read yet (or this firmware doesn't have it)
         change = tuple(sorted((pid, v) for pid, v in want.items() if sign.params[pid] != v))
         if not change or change == sign.params_written:
-            return
+            return False
         sign.params_written = change
         try:
             conn.write_params(dict(change))
@@ -1229,17 +1245,28 @@ class VisionectService:
         except Exception as exc:
             sign.param_error = f"Tesserae couldn't write the frame's settings: {exc}"
             logger.warning("visionect: writing %s's settings failed: %s", sign.uuid, exc)
-            return
+            return False
         logger.info(
             "visionect %s: setting sign %s %s",
             device.id,
             sign.uuid,
             ", ".join(f"{PARAM_NAMES.get(pid, pid)}={v}" for pid, v in change),
         )
+        self._await_params(sign)
         await self._write(conn, writer)
+        return True
+
+    def _await_params(self, sign: _Sign) -> None:
+        sign.params_wait_until = time.monotonic() + PARAM_WAIT_S
+        self._schedule(sign.uuid, delay=PARAM_WAIT_S + 0.05)
 
     def _params_received(self, sign: _Sign, packet: Any) -> None:
-        """The sign's answer to a settings read or write."""
+        """The sign's answer to a settings read or write. A read answer ends
+        the wait for it (a write is followed by a read back)."""
+        if any(
+            int(i.control) in (PARAM_READ, PARAM_READ_ERROR) for i in getattr(packet, "items", ())
+        ):
+            sign.params_wait_until = 0.0
         for item in getattr(packet, "items", ()):
             pid, control = int(item.id), int(item.control)
             if control == PARAM_WRITE_ERROR:
@@ -1480,7 +1507,7 @@ class VisionectService:
         sign.connect_reason = str(getattr(status, "connect_reason_name", "") or "")
         # Read the sign's settings afresh on every connection (a reboot or a
         # USB console may have changed them); a new connection may write again.
-        sign.params, sign.params_asked = {}, False
+        sign.params, sign.params_asked, sign.params_wait_until = {}, False, 0.0
         sign.params_written, sign.param_error = (), ""
         device = device or self._bind(uuid)
         self._check_glass(sign, status)
