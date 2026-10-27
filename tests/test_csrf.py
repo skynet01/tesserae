@@ -26,6 +26,75 @@ def app(tmp_path: Path, monkeypatch) -> Flask:
     return app
 
 
+@pytest.fixture
+def gated_app(app) -> Flask:
+    auth.install_gate(app, app.config["SETTINGS_STORE"])
+    return app
+
+
+@pytest.mark.parametrize("action", ["setup", "login", "forget"])
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Origin": "http://localhost:9999"},
+        {"Referer": "http://localhost:9999/attack"},
+    ],
+)
+def test_cookie_free_admin_forms_reject_cross_origin(gated_app, action, headers) -> None:
+    store = gated_app.config["SETTINGS_STORE"]
+    if action != "setup":
+        auth.set_password(store, "test-password")
+    if action == "forget":
+        auth.set_password_disabled(store, True)
+    before = store.get_section("auth")
+    client = gated_app.test_client()
+    path = "/settings/system/auth/forget" if action == "forget" else f"/{action}"
+    response = client.post(
+        path,
+        headers=headers,
+        data={"password": "test-password", "password_confirm": "test-password", "confirmed": "1"},
+    )
+    assert response.status_code == 403
+    assert store.get_section("auth") == before
+    assert client.get_cookie("session") is None
+
+
+@pytest.mark.parametrize("action", ["setup", "login", "forget"])
+def test_cookie_free_same_origin_admin_forms_work(gated_app, action) -> None:
+    store = gated_app.config["SETTINGS_STORE"]
+    if action != "setup":
+        auth.set_password(store, "test-password")
+    if action == "forget":
+        auth.set_password_disabled(store, True)
+    client = gated_app.test_client()
+    path = "/settings/system/auth/forget" if action == "forget" else f"/{action}"
+    response = client.post(
+        path,
+        headers={"Origin": "http://localhost"},
+        data={"password": "test-password", "password_confirm": "test-password", "confirmed": "1"},
+    )
+    assert response.status_code == 302
+    assert auth.password_is_set(store) == (action != "forget")
+    if action != "forget":
+        with client.session_transaction() as session:
+            assert session["authed"]
+
+
+@pytest.mark.parametrize("cookie", [False, True])
+def test_session_only_pairing_api_is_not_exempt(gated_app, cookie) -> None:
+    client = gated_app.test_client()
+    if cookie:
+        with client.session_transaction() as session:
+            session["authed"] = True
+    assert (
+        client.post(
+            "/api/v1/device/admin/pairing/issue", headers={"Origin": "http://elsewhere.test"}
+        ).status_code
+        == 403
+    )
+
+
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
 @pytest.mark.parametrize(
     "headers",
@@ -188,6 +257,7 @@ def test_rejections_are_logged_once_per_route_without_request_secrets(app, caplo
 def test_cookie_free_api_clients_reach_their_existing_auth_and_validation(
     app, path, body, headers, status
 ) -> None:
+    auth.install_gate(app, app.config["SETTINGS_STORE"])
     app.config["SETTINGS_STORE"].patch_section(
         "app", {"mcp_token_secret": "mcp-test", "webhook_token_secret": "webhook-test"}
     )
@@ -197,6 +267,7 @@ def test_cookie_free_api_clients_reach_their_existing_auth_and_validation(
 
 
 def test_device_registration_heartbeat_frame_and_ota_report_without_cookie(app) -> None:
+    auth.install_gate(app, app.config["SETTINGS_STORE"])
     client = app.test_client()
     headers = {"Origin": "http://elsewhere.test", "Sec-Fetch-Site": "cross-site"}
     code = app.config["PAIRING_STORE"].issue(note="csrf-test").code

@@ -13,6 +13,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Session-cookie mutations reject cross-origin browser requests, including
   forms posted from another port on the same host, without changing forms or
   cookie-free device, webhook and MCP clients.
+- Cookie-free admin, setup and login mutations also reject cross-origin
+  requests; only explicitly identified independently authenticated APIs bypass
+  that check without a session cookie.
 
 ## [0.480.1], 2026-10-26
 

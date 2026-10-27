@@ -1,4 +1,4 @@
-"""Cookie request provenance without adding tokens to every admin form.
+"""Admin request provenance without adding tokens to every form.
 
 Cookie-free device/API requests keep their own authentication. Legacy clients
 with no Fetch Metadata, Origin or Referer are allowed; an explicitly opaque,
@@ -18,6 +18,24 @@ from werkzeug.wrappers import Response
 logger = logging.getLogger(__name__)
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+# These blueprints authenticate independently of browser sessions (tokens,
+# pairing codes or the MCP direct-loopback gate). Only cookie-free calls
+# bypass provenance checks. Never exempt /api/* by path: some API routes
+# are admin/session actions, including REST device pairing-code issuance.
+_COOKIE_FREE_BLUEPRINTS = frozenset(
+    {"mcp_api", "webhook", "companion_api", "trmnl_api", "bloomin8_api"}
+)
+_COOKIE_FREE_ENDPOINTS = frozenset(
+    {
+        "rest_api.post_tap",
+        "rest_api.post_status",
+        "rest_api.post_interact",
+        "rest_api.post_log",
+        "rest_api.post_discover",
+        "rest_api.post_register",
+    }
+)
 
 
 def _origin(url: str) -> tuple[str, str, int] | None:
@@ -45,7 +63,10 @@ def install_protection(app: Flask) -> None:
         if request.method not in _UNSAFE_METHODS:
             return None
         cookie_name = app.config["SESSION_COOKIE_NAME"]
-        if cookie_name not in request.cookies:
+        if cookie_name not in request.cookies and (
+            request.blueprint in _COOKIE_FREE_BLUEPRINTS
+            or request.endpoint in _COOKIE_FREE_ENDPOINTS
+        ):
             return None
 
         fetch_site = request.headers.get("Sec-Fetch-Site")
@@ -69,9 +90,9 @@ def install_protection(app: Flask) -> None:
         with log_lock:
             if route not in logged_routes:
                 logged_routes.add(route)
-                logger.warning("CSRF: blocked cross-origin session request to %s", route)
+                logger.warning("CSRF: blocked cross-origin admin request to %s", route)
         return Response(
-            "Forbidden: cross-origin session request blocked (CSRF).",
+            "Forbidden: cross-origin admin request blocked (CSRF).",
             status=403,
             content_type="text/plain; charset=utf-8",
         )

@@ -50,7 +50,8 @@ install dir and open `http://localhost:8765/`.
 
 ## Browser request protection
 
-Unsafe requests (POST, PUT, PATCH and DELETE) carrying Tesserae's session cookie
+Unsafe admin requests (POST, PUT, PATCH and DELETE), including cookie-free setup
+and login submissions,
 must have `Sec-Fetch-Site: same-origin` or `none` when that header is present.
 In its absence, `Origin`, or otherwise `Referer`, must match the request's scheme,
 host and port. Cross-port requests are refused with a clear 403. Proxy-forwarded
@@ -61,8 +62,10 @@ headers and supply the correct forwarded scheme, host and port.
 For compatibility, requests with all three provenance headers missing are
 allowed. This leaves legacy browsers that omit every header with only the
 cookie's SameSite protection. Without Fetch Metadata, an explicit `Origin: null`
-or malformed origin is refused. No route exemptions are needed: requests without a session cookie
-continue through the existing device, OTA, webhook and MCP authentication.
+or malformed origin is refused. Explicit API exemptions let cookie-free device,
+companion, webhook and MCP requests continue through their independent
+authentication. Session-only API actions, such as issuing a device pairing
+code, are protected. Device-authenticated reads and OTA downloads are unchanged.
 Rejections are logged once per route per server process, without request URLs
 or tokens.
 
