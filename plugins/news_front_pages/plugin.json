@@ -57,7 +57,7 @@
           "max_length": 1000,
           "monospace": true,
           "placeholder": "optional, e.g. filter: contrast(1.15)",
-          "help": "CSS for this paper only, as declarations separated by semicolons. They style this paper's page image (it fills the cell's width, top first) and nothing else. Examples: transform: translateY(-3.5%) moves the page up by 3.5% of its height, to hide the printer's line some papers carry above the masthead. filter: contrast(1.15) grayscale(1) darkens the print. transform: scale(1.2); transform-origin: top center zooms in on the top. height: 100%; object-fit: cover; object-position: 50% 3% fills the cell and crops. Allowed: filter, opacity, transform, scale, rotate, transform-origin, margin, width and height (and their min/max), object-fit, object-position, clip-path: inset(), image-rendering. Moves, sizes and zoom are bounded (the page grows at most 3x along each side). url(), @import, quotes, braces and anything else are ignored, and anything that isn't plain CSS (a < or a backslash, say) drops the paper's CSS altogether."
+          "help": "Styles this paper's page image only. Move up: transform: translateY(-3%) (positive moves down). Zoom: transform: scale(1.2). Wider: width: 110%. Darker: filter: contrast(1.2). Several: separate with ;"
         }
       ],
       "default": [
