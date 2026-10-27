@@ -1972,6 +1972,9 @@ form[data-dirty] .dx-inline-save { display: none; }
   font-size: 19px;
 }
 .dx-section-body { display: flex; flex-direction: column; gap: 0; }
+/* A settings group's heading (``group`` on a setting). */
+.dx-section-body > .dx-section-group { margin: 22px 0 2px; }
+.dx-section-body > .dx-section-group:first-child { margin-top: 10px; }
 /* A section that folds (``fold`` in _server_section.html): the head is
    the summary, with a caret on the right like the Dashboards rows. Closed,
    the head drops the rule and gap it keeps above the body. */

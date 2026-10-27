@@ -1008,7 +1008,8 @@
       const list = box.querySelector("[data-repeater-list]");
       const tpl = box.querySelector("template[data-repeater-template]");
       const addBtn = box.querySelector("[data-repeater-add]");
-      if (!storage || !list || !tpl || !addBtn) return;
+      // No Add button is fine: a list-layout page may add rows its own way.
+      if (!storage || !list || !tpl) return;
       box.dataset.repeaterBound = "1";
       const empty = box.querySelector("[data-repeater-empty]");
       const count = box.querySelector("[data-repeater-count]");
@@ -1054,16 +1055,20 @@
       }
 
       // A list-layout row's head says what its fields hold: the title (the
-      // first text field), the summary (the first textarea, on one line) and
-      // the switch's name for a screen reader; a row switched off is dimmed.
+      // first filled of its title fields), the summary (on one line) and the
+      // switch's name for a screen reader; a row switched off is dimmed.
       function describe(row) {
         const title = row.querySelector("[data-repeater-title]");
         if (!title) return;
-        const text = row.querySelector('[data-repeater-type="string"]');
-        title.textContent = (text && text.value.trim()) || `New ${rowLabel.toLowerCase()}`;
+        const valueOf = (key) => {
+          const el = Array.from(controls(row)).find((c) => c.dataset.repeaterKey === key);
+          return el ? String(el.value).replace(/\s+/g, " ").trim() : "";
+        };
+        const keys = (title.dataset.titleKeys || "").split(" ").filter(Boolean);
+        const text = keys.map(valueOf).find(Boolean);
+        title.textContent = text || `New ${rowLabel.toLowerCase()}`;
         const meta = row.querySelector("[data-repeater-meta]");
-        const note = row.querySelector('[data-repeater-type="textarea"]');
-        if (meta && note) meta.textContent = note.value.replace(/\s+/g, " ").trim();
+        if (meta && meta.dataset.summaryKey) meta.textContent = valueOf(meta.dataset.summaryKey);
         const toggle = row.querySelector(".repeater-row-toggle input");
         if (toggle) {
           const label = toggle.closest("[data-repeater-toggle-label]");
@@ -1090,7 +1095,10 @@
           describe(row);
           setOff(row.querySelector("[data-repeater-up]"), i === 0);
           setOff(row.querySelector("[data-repeater-down]"), i === all.length - 1);
-          setOff(row.querySelector("[data-repeater-remove]"), all.length <= min);
+          setOff(
+            row.querySelector("[data-repeater-remove]"),
+            all.length <= min || row.hasAttribute("data-repeater-fixed"),
+          );
         });
         setOff(addBtn, all.length >= max);
         if (empty) empty.hidden = all.length > 0;
@@ -1157,7 +1165,7 @@
       list.addEventListener("input", () => serialise(false));
       list.addEventListener("change", () => serialise(false));
 
-      addBtn.addEventListener("click", () => {
+      if (addBtn) addBtn.addEventListener("click", () => {
         if (rows().length >= max) {
           announce(`At most ${max}.`);
           return;

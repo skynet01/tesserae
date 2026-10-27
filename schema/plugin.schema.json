@@ -233,6 +233,17 @@
             "max_rows": { "type": "integer", "minimum": 1, "maximum": 200, "description": "Defaults to 50." },
             "add_label": { "type": "string", "maxLength": 40, "description": "The add button's text. Defaults to \"Add row\"." },
             "row_label": { "type": "string", "maxLength": 40, "description": "What one row is called, for screen readers (\"Paper 2 of 4\"). Defaults to \"Row\"." },
+            "list": {
+              "type": "object",
+              "description": "How an admin page drawing this repeater as a list (repeater_layout=\"list\") shows its rows: title (sub-field names tried in turn for the row title), summary (a sub-field shown beside it), fixed ({sub-field: [values]}: rows that can't be removed) and add (false drops the Add button). See app/repeater.py list_options.",
+              "properties": {
+                "title": { "type": "array", "items": { "type": "string" } },
+                "summary": { "type": "string" },
+                "fixed": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+                "add": { "type": "boolean" }
+              },
+              "additionalProperties": false
+            },
             "default": { "type": "array", "items": { "type": "object" } }
           }
         }

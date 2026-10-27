@@ -17,7 +17,10 @@
    sets: ``fold`` ("open" or "closed") makes the head a disclosure that
    shows and hides the fields, the save bar staying outside it so unsaved
    changes are never folded away; ``repeater_layout`` ("list") draws a
-   repeater as one row per item. #}
+   repeater as one row per item, passing on the page's
+   ``repeater_row_extra`` / ``repeater_foot_extra`` macros when it defines
+   them (see ``repeater_field``). A setting's ``group`` puts a small
+   heading over it and the settings after it, until the next group. #}
 
 {% from "_components.html" import auto_field, repeater_field, options_more_open, options_more_close with context %}
 
@@ -91,12 +94,16 @@
          the existing show/hide JS keeps working. #}
       {#- A widget's own settings can mark fine-tuning ``advanced`` the same
          way its cell options do: those render last, inside "More options". -#}
-      {% set ns = namespace(group=none) %}
+      {% set ns = namespace(group=none, heading=none) %}
       {% set opt_sections = option_sections(section.fields, section.state) if section.kind == 'plugin' else none %}
       {% for field in (opt_sections.basic + opt_sections.advanced if opt_sections else section.fields) %}
         {% if opt_sections and opt_sections.advanced and loop.index0 == opt_sections.basic|length %}{{ options_more_open() }}{% endif %}
         {% set value = section.state.get(field.name, field.get('default', '')) %}
         {% set field_id = section.id ~ '-' ~ field.name %}
+        {% if field.get('group') and field.group != ns.heading %}
+          <p class="device-subhead dx-section-group">{{ field.group }}</p>
+          {% set ns.heading = field.group %}
+        {% endif %}
 
         {% set this_group = none %}
         {% if section.kind == 'broker' %}
@@ -128,7 +135,8 @@
             </label>
           </div>
         {% elif field.type == 'repeater' and section.get('repeater_layout') and repeater_view(field, value).usable %}
-          {{ repeater_field(field_id, field.name, field.label, field, value, field.get('help'), layout=section.repeater_layout) }}
+          {{ repeater_field(field_id, field.name, field.label, field, value, field.get('help'), layout=section.repeater_layout,
+                            row_extra=repeater_row_extra|default(none), foot_extra=repeater_foot_extra|default(none)) }}
         {% elif section.kind == 'panel' and field.name in ('panel_w', 'panel_h') %}
           <div class="panel-custom-fields">{{ auto_field(field_id, field.name, field, value) }}</div>
         {% else %}

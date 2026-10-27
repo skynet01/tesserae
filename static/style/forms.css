@@ -2822,7 +2822,7 @@ input[type="range"].slider:focus::-moz-range-thumb {
 .repeater--list .repeater-empty { margin-top: 12px; }
 /* No rows: no column head over nothing. */
 .repeater--list:has(> .repeater-empty:not([hidden])) .repeater-list-head { display: none; }
-.repeater--list .repeater-foot { justify-content: space-between; margin-top: 12px; }
+.repeater--list .repeater-foot { justify-content: space-between; flex-wrap: wrap; margin-top: 12px; }
 @media (max-width: 640px) {
   .repeater--list .repeater-row-fields { grid-template-columns: minmax(0, 1fr); }
   .repeater--list .repeater-list-head,

@@ -722,3 +722,56 @@ def test_a_blank_number_default_keeps_a_plugin_from_loading(tmp_path: Path) -> N
 @pytest.mark.parametrize("pattern", ["a{١}", "a{１}", "a{1,٣}", "a{１,2}"])
 def test_counts_take_ascii_digits_only(pattern: str) -> None:
     assert repeater.pattern_error(pattern) == "has a { that isn't a count like {3} or {1,8}"
+
+
+def _list_field(**extra: object) -> dict[str, object]:
+    return {
+        "name": "items",
+        "type": "repeater",
+        "label": "Items",
+        "fields": [
+            {"name": "on", "type": "boolean", "label": "On"},
+            {"name": "label", "type": "string", "label": "Label"},
+            {"name": "slug", "type": "string", "label": "Slug"},
+            {"name": "note", "type": "textarea", "label": "Note"},
+        ],
+        **extra,
+    }
+
+
+def test_list_options_default_and_declared() -> None:
+    assert repeater.list_options(_list_field()) == {
+        "title": ["label"],
+        "summary": "note",
+        "fixed": {},
+        "add": True,
+    }
+    declared = _list_field(
+        list={"title": ["label", "slug"], "summary": "slug", "fixed": {"slug": ["x"]}, "add": False}
+    )
+    assert repeater.spec_errors(declared) == []
+    assert repeater.list_options(declared) == {
+        "title": ["label", "slug"],
+        "summary": "slug",
+        "fixed": {"slug": ["x"]},
+        "add": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "rows",
+        {"title": ["note"]},
+        {"title": "label"},
+        {"summary": "nope"},
+        {"fixed": {"slug": "x"}},
+        {"fixed": {"nope": ["x"]}},
+        {"add": "no"},
+        {"sort": True},
+    ],
+)
+def test_list_options_errors_are_reported_and_ignored(bad: object) -> None:
+    field = _list_field(list=bad)
+    assert repeater.spec_errors(field)
+    assert repeater.list_options(field)["title"] in (["label"], [])

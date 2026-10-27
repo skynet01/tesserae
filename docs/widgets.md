@@ -162,9 +162,15 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   returns there. `settings_section` takes keys that fit the card to the page:
   `title`, `blurb`, `icon`, `fold="closed"` (or `"open"`) to make the card a
   disclosure, and `repeater_layout="list"` to draw a repeater as one row per
-  item (title, one-line summary and switch, opened for the rest). Wrap the
-  page's cards in `<div class="settings-section-list">` for the Settings
-  spacing. The same masking, validation and storage rules apply. `secret: true`
+  item (title, one-line summary and switch, opened for the rest). A page can
+  add its own content to those rows: set `repeater_row_extra` to a macro
+  `(row, part)` before including the partial (`part` is `"head"`, beside the
+  switch, or `"body"`, under the fields) and `repeater_foot_extra` to one
+  drawn in the list's foot; comics_daily uses them for each strip's status,
+  upload and import, and its Add strip box. A setting's `group` puts a small
+  heading over it and the settings after it. Wrap the page's cards in
+  `<div class="settings-section-list">` for the Settings spacing. The same
+  masking, validation and storage rules apply. `secret: true`
   stores under `<name>_secret` in `settings.json` so an on-disk grep
   for `secret` reveals every sensitive value. `advanced: true` folds a
   setting into the card's "More options" section, as on cell options.
@@ -215,6 +221,14 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   whole with a message naming the row, and the stored rows stay as they
   were. `fetch()` gets the stored list; validate what your widget relies
   on, since an older or hand-edited settings file can hold anything.
+
+  An optional `"list"` object says how the list layout draws the rows:
+  `title` (string sub-fields tried in turn for a row's title; the first
+  string one by default), `summary` (the sub-field shown beside it; the
+  first textarea by default), `fixed` (`{"slug": ["dilbert"]}`: rows
+  holding one of those values can't be removed and that sub-field is
+  read-only in them) and `add: false` (no Add button, for a page that adds
+  rows its own way).
 
   Changing an existing setting into a repeater: export
   `legacy_rows(name, value)` from `server.py`. When the stored value isn't
