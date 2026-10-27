@@ -518,6 +518,71 @@ def test_visionect_device_band_says_whether_auto_bind_is_open_and_shows_refusals
     assert band["ok"] is False
 
 
+def test_visionect_device_page_shows_the_signs_report_and_its_actions(
+    app: Flask, monkeypatch
+) -> None:
+    """A bound sign's last report (firmware, battery, Wi-Fi, check-in) and
+    its Report in / Full refresh / Reboot buttons, which go to the service
+    and say why when it can't."""
+    import time as _time
+    from types import SimpleNamespace
+
+    from app import visionect
+
+    client = app.test_client()
+    _sign_in(client)
+    client.post("/settings/devices/add", data={"kind": "visionect", "id": "hall", "name": "Hall"})
+    asked: list[tuple[str, str]] = []
+    state: dict[str, str | None] = {"problem": None}
+
+    def request_action(device_id: str, action: str) -> str | None:
+        asked.append((device_id, action))
+        return state["problem"]
+
+    fake = SimpleNamespace(
+        running=True,
+        port=11113,
+        start_error=None,
+        device_uuid=lambda _d: "aabbccdd-0000-1111-2222-333344445555",
+        auto_bind_open=lambda _d: False,
+        sign_view=lambda _u: {
+            "connected": True,
+            "in_sync": True,
+            "connected_at": _time.time(),
+            "connect_reason": "wakeup",
+            "status": {"firmware": "6.17.4168", "battery_pct": 61, "rssi": -53},
+            "heartbeat_min": 5,
+            "sleep_disabled": 1,
+            "wifi": "home-wifi",
+            "param_error": "",
+            "action": {"kind": "refresh", "at": _time.time()},
+        },
+        request_action=request_action,
+        on_push=lambda *_a: None,
+    )
+    monkeypatch.setattr(visionect, "service", lambda: fake)
+    page = client.get("/settings/devices/hall").get_data(as_text=True)
+    for text in (
+        "6.17.4168",
+        "61%",
+        "home-wifi · -53 dBm",
+        "5 min (set on the sign)",
+        "Off (stays awake)",
+        "Full refresh asked",
+        "Check-in interval",
+        "Sign sleep between check-ins",
+    ):
+        assert text in page, text
+    for action in ("status", "refresh", "reboot"):
+        assert f"/settings/devices/hall/visionect/{action}" in page
+    resp = client.post("/settings/devices/hall/visionect/reboot", follow_redirects=True)
+    assert asked == [("hall", "reboot")]
+    assert "Sent Hall&#39;s sign a reboot" in resp.get_data(as_text=True)
+    state["problem"] = "The sign isn't connected right now."
+    resp = client.post("/settings/devices/hall/visionect/status", follow_redirects=True)
+    assert "The sign isn&#39;t connected right now." in resp.get_data(as_text=True)
+
+
 def test_every_config_save_checks_the_sign_binding_and_adding_arms_auto_bind(
     app: Flask,
 ) -> None:

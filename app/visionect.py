@@ -129,6 +129,26 @@ AUTO_BIND_KEY = "uuid_armed_at"
 MAX_UNKNOWN_SIGNS = 16
 MAX_DISCOVERED = 8
 MAX_WARNED_UNBOUND = 64
+# The sign's own settings (TCLV parameters), read on every connection. The
+# check-in interval (minutes) and sleep-mode switch are written when the
+# device's config asks for something else, then saved to the sign's flash;
+# the Wi-Fi network is shown on the device page. Only these are ever written.
+PARAM_HEARTBEAT = 29
+PARAM_SLEEP_DISABLE = 52
+PARAM_FLASH_SAVE = 53
+PARAM_WIFI_SSID = 65
+READ_PARAMS = (PARAM_HEARTBEAT, PARAM_SLEEP_DISABLE, PARAM_WIFI_SSID)
+HEARTBEAT_MAX_MINUTES = 24 * 60
+PARAM_NAMES = {
+    PARAM_HEARTBEAT: "check-in interval",
+    PARAM_SLEEP_DISABLE: "sleep mode",
+    PARAM_FLASH_SAVE: "flash save",
+}
+# pyvisionect.devices.enums.ParamControl.
+PARAM_READ = 0
+PARAM_WRITE_ERROR = 3
+# What the device page can ask a connected sign to do (request_action).
+ACTIONS = ("status", "reboot", "refresh")
 # pyvisionect.imaging.constants Encoding.FOUR_BIT and Dithering.NONE. The
 # renderer has already dithered onto the 16-grey ramp, and NONE keeps n*17
 # levels exact.
@@ -194,6 +214,52 @@ def status_heartbeat(fields: dict[str, Any], *, uuid: str, connect_reason: str) 
         ]
         if parts:
             out["fw_version"] = ".".join(parts)
+    return out
+
+
+def desired_params(cfg: dict[str, Any]) -> dict[int, int]:
+    """The sign settings a device's config asks for, as TCLV id to value:
+    ``heartbeat_min`` (minutes between check-ins) and ``sign_sleep``
+    ("sleep" or "awake"). Blank or junk leaves the sign's own setting."""
+    out: dict[int, int] = {}
+    try:
+        minutes = int(str(cfg.get("heartbeat_min") or "").strip())
+    except ValueError:
+        minutes = 0
+    if 1 <= minutes <= HEARTBEAT_MAX_MINUTES:
+        out[PARAM_HEARTBEAT] = minutes
+    mode = str(cfg.get("sign_sleep") or "").strip()
+    if mode in ("sleep", "awake"):
+        out[PARAM_SLEEP_DISABLE] = 1 if mode == "awake" else 0
+    return out
+
+
+def status_summary(status: Any) -> dict[str, Any]:
+    """What the device page shows from a sign's last status packet."""
+    if status is None:
+        return {}
+    try:
+        fields = status.fields()
+    except Exception:
+        return {}
+    out: dict[str, Any] = {}
+    fw = getattr(status, "firmware_version", None)
+    if fw:
+        out["firmware"] = ".".join(str(n) for n in fw)
+    for key, name in (
+        ("battery_pct", "BatteryLevel"),
+        ("battery_mv", "BatteryVoltage"),
+        ("rssi", "SignalStrength"),
+        ("temperature_c", "AverageTemperature"),
+        ("uptime_min", "DeviceUptime"),
+        ("next_status_min", "NextStatus"),
+    ):
+        value = fields.get(name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[key] = value
+    charging = fields.get("ChargingStatus")
+    if charging is not None:
+        out["charging"] = str(charging)
     return out
 
 
@@ -301,8 +367,20 @@ class _Sign:
     pending_status: tuple[Any, Any] | None = None  # (device, StatusPacket) to record
     status_task: asyncio.Task[None] | None = None  # records pending_status, latest wins
     connected_at: float = 0.0
+    connect_reason: str = ""  # why the sign dialed this connection (reboot, wakeup...)
     last_seen: float = 0.0
     last_error: str = ""
+    # The sign's settings as read on this connection (READ_PARAMS), and the
+    # writes asked of it: ``params_asked`` once the read went out,
+    # ``params_written`` the settings last written (never written twice in a
+    # row, so a sign that won't take them can't loop), ``param_error`` why it
+    # refused.
+    params: dict[int, Any] = field(default_factory=dict)
+    params_asked: bool = False
+    params_written: tuple[tuple[int, int], ...] = ()
+    param_error: str = ""
+    force_refresh: bool = False  # Full refresh asked from the device page
+    action: dict[str, Any] | None = None  # the last action sent ({kind, at}), for the device page
 
 
 def sign_panel(status: Any) -> Any:
@@ -954,11 +1032,19 @@ class VisionectService:
             return
         conn, writer = sign.conn, sign.writer
 
+        # 1b. The sign's settings: read them once per connection, then write
+        #     (and save to flash) what the device's config asks for. Small
+        #     packets, ahead of any frame on the same socket.
+        await self._sync_params(sign, device)
+        if not self._alive(sign):
+            return
+
         # 2. Send the frame the sign hasn't acked, one at a time. A History
-        #    "resend" of the frame it already shows is honoured once, with a
-        #    checksum the sign can't hold, so it really repaints (ghosting).
+        #    "resend" of the frame it already shows, or Full refresh on the
+        #    device page, is honoured once, with a checksum the sign can't
+        #    hold, so it really repaints (ghosting).
         resend = resend_stamp(latest) if digest and digest == sign.frame_digest else 0.0
-        repaint = bool(resend) and resend != sign.resend_stamp
+        repaint = (bool(resend) and resend != sign.resend_stamp) or sign.force_refresh
         if sign.frame is not None and (sign.frame_digest != sign.shown_digest or repaint):
             wait = sign.retry_at - time.monotonic()
             if wait > 0:
@@ -975,6 +1061,7 @@ class VisionectService:
                 packet_id = int(conn.send_image(sign.frame, checksum_override=checksum))
             else:
                 packet_id = int(conn.send_image(sign.frame))
+            sign.force_refresh = False
             inflight = _Inflight(
                 kind="image",
                 packet_id=packet_id,
@@ -1111,6 +1198,102 @@ class VisionectService:
             stats.bytes_out += len(data)
         return True
 
+    # -- the sign's own settings and actions ---------------------------------
+
+    async def _sync_params(self, sign: _Sign, device: Device) -> None:
+        """Read the sign's settings once per connection; once they're in,
+        write the ones the device's config sets differently, save them to
+        flash and read them back. A set of writes goes out at most once per
+        connection, so a sign that refuses one doesn't get it every pass."""
+        conn, writer = sign.conn, sign.writer
+        if not sign.params_asked:
+            sign.params_asked = True
+            try:
+                conn.read_params(list(READ_PARAMS))
+            except Exception:
+                logger.debug("visionect: reading %s's settings failed", sign.uuid, exc_info=True)
+                return
+            await self._write(conn, writer)
+            return
+        want = desired_params(self._device_cfg(device.id))
+        if any(pid not in sign.params for pid in want):
+            return  # not read yet (or this firmware doesn't have it)
+        change = tuple(sorted((pid, v) for pid, v in want.items() if sign.params[pid] != v))
+        if not change or change == sign.params_written:
+            return
+        sign.params_written = change
+        try:
+            conn.write_params(dict(change))
+            conn.write_params({PARAM_FLASH_SAVE: 1})
+            conn.read_params(list(READ_PARAMS))
+        except Exception as exc:
+            sign.param_error = f"Tesserae couldn't write the sign's settings: {exc}"
+            logger.warning("visionect: writing %s's settings failed: %s", sign.uuid, exc)
+            return
+        logger.info(
+            "visionect %s: setting sign %s %s",
+            device.id,
+            sign.uuid,
+            ", ".join(f"{PARAM_NAMES.get(pid, pid)}={v}" for pid, v in change),
+        )
+        await self._write(conn, writer)
+
+    def _params_received(self, sign: _Sign, packet: Any) -> None:
+        """The sign's answer to a settings read or write."""
+        for item in getattr(packet, "items", ()):
+            pid, control = int(item.id), int(item.control)
+            if control == PARAM_WRITE_ERROR:
+                sign.param_error = (
+                    f"The sign refused the {PARAM_NAMES.get(pid, f'setting {pid}')} "
+                    "Tesserae wrote; it keeps its own."
+                )
+                logger.warning("visionect: sign %s refused a write to TCLV %d", sign.uuid, pid)
+                continue
+            if control != PARAM_READ or pid not in READ_PARAMS or not item.value:
+                continue  # a write's echo, an error, or nothing to read
+            if pid == PARAM_WIFI_SSID:
+                sign.params[pid] = item.value.split(b"\0")[0].decode("ascii", "replace")
+            else:
+                sign.params[pid] = int.from_bytes(item.value, "little")
+
+    def request_action(self, device_id: str, action: str) -> str | None:
+        """Ask the device's sign, from a request thread, to report its status
+        now ("status"), reboot ("reboot") or repaint the frame it shows from
+        scratch ("refresh"). Returns why it can't, or None once queued."""
+        if action not in ACTIONS:
+            return "Unknown action."
+        if not self.running:
+            return "Tesserae isn't listening for signs right now."
+        uuid = self.device_uuid(device_id)
+        if not uuid:
+            return "No sign is bound to this device yet."
+        view = self.sign_view(uuid) or {}
+        if not view.get("connected"):
+            return "The sign isn't connected right now (asleep, or between connections); try again when it is."
+        self._call_soon(functools.partial(self._do_action, uuid, action))
+        return None
+
+    def _do_action(self, uuid: str, action: str) -> None:
+        sign = self._signs.get(uuid)
+        if sign is None or not self._alive(sign):
+            return
+        if action == "refresh":
+            sign.force_refresh = True
+            self._schedule(uuid)
+        else:
+            try:
+                if action == "reboot":
+                    sign.conn.reboot()
+                else:
+                    sign.conn.request_status()
+            except Exception:
+                logger.warning("visionect: %s for sign %s failed", action, uuid, exc_info=True)
+                return
+            self._spawn(self._write(sign.conn, sign.writer))
+            logger.info("visionect: %s sent to sign %s", action, uuid)
+        sign.action = {"kind": action, "at": time.time()}
+        self._publish(sign)
+
     def _sleep_minutes(self, device: Device) -> int | None:
         """Minutes until this device's quiet window ends, when it is inside a
         window that asked for sleep-through; else None. Recomputed every time,
@@ -1151,7 +1334,13 @@ class VisionectService:
 
     def _handle_event(self, conn: Any, event: Any) -> str:
         """Apply one event; return the UUID to re-run, or ""."""
-        from pyvisionect.session import Acked, DeviceConnected, Nacked, StatusReceived
+        from pyvisionect.session import (
+            Acked,
+            DeviceConnected,
+            Nacked,
+            ParamsReceived,
+            StatusReceived,
+        )
 
         uuid = normalise_uuid(event.uuid or (conn.device_id.hex() if conn.device_id else ""))
         if not uuid:
@@ -1171,6 +1360,11 @@ class VisionectService:
             device = self._device_for_uuid(uuid)
             if device is not None:
                 self._queue_status(sign, device, event.status)
+            self._publish(sign)
+            return uuid
+        if isinstance(event, ParamsReceived):
+            sign.heard_at = now
+            self._params_received(sign, event.params)
             self._publish(sign)
             return uuid
         inflight = sign.inflight
@@ -1283,6 +1477,11 @@ class VisionectService:
         sign.inflight = None
         sign.asleep_until = 0.0
         sign.connected_at = time.time()
+        sign.connect_reason = str(getattr(status, "connect_reason_name", "") or "")
+        # Read the sign's settings afresh on every connection (a reboot or a
+        # USB console may have changed them); a new connection may write again.
+        sign.params, sign.params_asked = {}, False
+        sign.params_written, sign.param_error = (), ""
         device = device or self._bind(uuid)
         self._check_glass(sign, status)
         if device is None:
@@ -1431,6 +1630,13 @@ class VisionectService:
             "asleep_until": sign.asleep_until or None,
             "last_error": sign.last_error,
             "refused": dict(sign.refused) if sign.refused else None,
+            "connect_reason": sign.connect_reason,
+            "status": status_summary(sign.status),
+            "heartbeat_min": sign.params.get(PARAM_HEARTBEAT),
+            "sleep_disabled": sign.params.get(PARAM_SLEEP_DISABLE),
+            "wifi": sign.params.get(PARAM_WIFI_SSID),
+            "param_error": sign.param_error,
+            "action": dict(sign.action) if sign.action else None,
         }
         with self._snapshot_lock:
             self._snapshot[sign.uuid] = view

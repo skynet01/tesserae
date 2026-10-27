@@ -1923,8 +1923,91 @@ def _visionect_add_context() -> tuple[list[dict[str, str]], dict[str, Any]]:
 
 def _visionect_setup(device: Device) -> dict[str, Any] | None:
     """Status band for a Visionect sign's card: whether Tesserae is
-    listening for signs, and what the bound sign is doing. None for every
-    other kind."""
+    listening for signs, and what the bound sign is doing; plus, once a
+    sign is bound, what it last reported and the actions it can be asked
+    for. None for every other kind."""
+    band = _visionect_band(device)
+    svc = visionect.service()
+    if band is None or svc is None or not svc.running:
+        return band
+    uuid = svc.device_uuid(device.id)
+    if uuid:
+        band["sign"] = _visionect_sign(svc.sign_view(uuid) or {})
+    return band
+
+
+def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
+    """The bound sign's own report for the device page: rows of what it
+    said in its last status and settings read, the last action asked of it,
+    and whether it is connected (actions need it to be)."""
+    from datetime import datetime
+
+    from app.tz_resolve import app_timezone
+
+    tz = app_timezone()
+
+    def clock(ts: Any) -> str:
+        try:
+            return datetime.fromtimestamp(float(ts), tz=tz).strftime("%b %d %H:%M")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return ""
+
+    st = view.get("status") or {}
+    rows: list[tuple[str, str]] = []
+    if st.get("firmware"):
+        rows.append(("Firmware", str(st["firmware"])))
+    battery = [f"{st['battery_pct']}%"] if "battery_pct" in st else []
+    if "battery_mv" in st:
+        battery.append(f"{st['battery_mv'] / 1000:.2f} V")
+    if st.get("charging"):
+        battery.append(str(st["charging"]))
+    if battery:
+        rows.append(("Battery", " · ".join(battery)))
+    wifi = [str(view["wifi"])] if view.get("wifi") else []
+    if "rssi" in st:
+        wifi.append(f"{st['rssi']} dBm")
+    if wifi:
+        rows.append(("Wi-Fi", " · ".join(wifi)))
+    if "temperature_c" in st:
+        rows.append(("Temperature", f"{st['temperature_c']} °C"))
+    if "uptime_min" in st:
+        minutes = int(st["uptime_min"])
+        days, rest = divmod(minutes, 24 * 60)
+        rows.append(("Up for", (f"{days} d " if days else "") + f"{rest // 60} h {rest % 60} min"))
+    heartbeat = view.get("heartbeat_min")
+    if isinstance(heartbeat, int):
+        rows.append(("Check-in interval", f"{heartbeat} min (set on the sign)"))
+    elif "next_status_min" in st:
+        rows.append(("Next check-in", f"in {st['next_status_min']} min"))
+    sleep_off = view.get("sleep_disabled")
+    if isinstance(sleep_off, int):
+        rows.append(("Sleep between check-ins", "Off (stays awake)" if sleep_off else "On"))
+    if view.get("connect_reason") and view.get("connected"):
+        since = clock(view.get("connected_at"))
+        rows.append(
+            (
+                "Connected",
+                f"{since}, reason “{view['connect_reason']}”"
+                if since
+                else str(view["connect_reason"]),
+            )
+        )
+    note = ""
+    action = view.get("action") or {}
+    if action.get("kind") in ("status", "reboot", "refresh"):
+        what = {"status": "Report in", "reboot": "Reboot", "refresh": "Full refresh"}[
+            action["kind"]
+        ]
+        note = f"{what} asked {clock(action.get('at'))}."
+    return {
+        "rows": rows,
+        "connected": bool(view.get("connected")),
+        "note": note,
+        "error": str(view.get("param_error") or ""),
+    }
+
+
+def _visionect_band(device: Device) -> dict[str, Any] | None:
     if not device.kind_of or not visionect.is_visionect_device(device):
         return None
     svc = visionect.service()

@@ -251,6 +251,11 @@
 }
 
 .status-fields div { display: contents; }
+/* A Visionect sign's report and actions under its status band. */
+.dx-visionect-sign { margin-top: 12px; }
+.dx-visionect-sign .status-fields { margin-top: 0; }
+.dx-visionect-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.dx-visionect-actions form { margin: 0; }
 .status-fields dt {
   font-weight: 700;
   text-transform: uppercase;
