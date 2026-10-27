@@ -2,25 +2,191 @@
 {% from "_components.html" import section_card %}
 {% block title %}Newspapers, Tesserae{% endblock %}
 {% block head_extra %}<script src="{{ url_for('static', filename='pages/settings.js') }}" defer></script>{% endblock %}
+
+{#- Verify for one paper row: a button and the place its result lands. Drawn
+    under each saved row's fields, and copied into rows added on the page
+    (the list's new-row template carries no extras). It posts the code as
+    typed, so a row needn't be saved first. -#}
+{% macro verify_tools() -%}
+  <div class="nx-verify" data-nx-verify>
+    <button type="button" class="dx-btn-ghost-sm" data-nx-verify-btn>
+      <i class="ph ph-seal-check" aria-hidden="true"></i><span>Verify code</span>
+    </button>
+    <span class="field-help nx-verify-hint">Downloads the newest page for the code as typed. Nothing is saved.</span>
+    <div class="nx-verify-result" data-nx-verify-result role="status" aria-live="polite" hidden></div>
+  </div>
+{%- endmacro %}
+
+{#- Each paper row's extras (repeater_field's row_extra): what it shows now
+    as a chip in the head; under the fields, that in words and Verify. -#}
+{% macro paper_extra(row, part) -%}
+  {%- set st = view.papers.get((row.code or '')|upper) -%}
+  {%- if part == 'head' %}
+    {%- if st %}<span class="tg tg--sm{% if st.tone %} tg--{{ st.tone }}{% endif %} nx-chip">{{ st.chip }}</span>{% endif %}
+  {%- else %}
+    {%- if st %}<p class="nx-status-line">{{ st.line }}</p>{% endif %}
+    {{ verify_tools() }}
+  {%- endif %}
+{%- endmacro %}
+
 {% block main %}
 <div class="page-head">
   <h1><i class="ph ph-newspaper" aria-hidden="true"></i> Newspapers</h1>
-  <p class="page-blurb">Today's front pages from the Freedom Forum archive, one paper per render. Open a paper to change its code or its crop.</p>
+  <p class="page-blurb">Today's front pages from the Freedom Forum archive, one paper per render. Open a paper to change its code or crop, or to check that its code works.</p>
 </div>
 
 <div class="settings-section-list">
+{% set repeater_row_extra = paper_extra %}
 {% include "_plugin_admin_settings.html" %}
 
-{% call section_card(icon='download-simple', title='Downloads', id='downloads') %}
-  <p class="lede">{{ downloads.status | join(' ') }}</p>
-  {% if downloads.log %}
-  <details class="dx-disclosure">
-    <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Log</span></summary>
-    <div class="dx-disclosure-body">
-      <pre class="dx-code dx-log-view dx-log-view--wrap" data-log-tail>{{ downloads.log | join('\n') }}</pre>
-    </div>
-  </details>
+{% call section_card(icon='list-checks', title='Fetches', id='fetches',
+                     description="Pages aren't fetched on a timer. A paper is fetched the first time a frame shows it each day, then checked every " ~ recheck_min ~ " minutes until that day's edition is out. Meanwhile the frame keeps the newest page it has.") %}
+  <div class="nx-fetch-head">
+    <div class="nx-status">{% for line in view.status %}<p>{{ line }}</p>{% endfor %}</div>
+    <form method="post" action="{{ url_for('news_front_pages.fetch_now') }}" class="nx-fetch" data-nx-reload>
+      {% if view.running %}
+        <button type="button" class="dx-btn-ghost-sm" disabled><i class="ph ph-arrows-clockwise" aria-hidden="true"></i><span>Fetching…</span></button>
+      {% else %}
+        <button type="submit" class="dx-btn-ghost-sm" title="Fetch today's page for every paper that doesn't have it yet"><i class="ph ph-arrows-clockwise" aria-hidden="true"></i><span>Fetch now</span></button>
+      {% endif %}
+    </form>
+  </div>
+  {% if view.log %}
+  <pre class="dx-code dx-log-view dx-log-view--wrap nx-log" data-log-tail aria-label="Fetch log, newest last">
+    {%- for e in view.log %}<span class="nx-line">{{ e.when }}  {{ e.code }}  <span class="nx-out{% if e.tone %} nx-out--{{ e.tone }}{% endif %}">{{ e.outcome }}</span> {{ e.text }}</span>{% if not loop.last %}{{ '\n' }}{% endif %}{% endfor -%}
+  </pre>
+  <p class="field-help nx-log-help">Newest last. OK is a page saved; MISSING is an edition Freedom Forum doesn't have (not out yet, or not printed that day); ERROR is Freedom Forum not answering. Verify checks are logged too.</p>
+  {% else %}
+  <p class="nx-empty">No fetches yet. The first frame that shows a newspaper starts them, or press Fetch now.</p>
   {% endif %}
 {% endcall %}
 </div>
+
+<template id="nx-verify-template">{{ verify_tools() }}</template>
+
+<script>
+  (function () {
+    var root = document.getElementById('plugin-news_front_pages');
+    var settings = root ? root.querySelector('form') : null;
+    var list = root ? root.querySelector('[data-repeater-list]') : null;
+    var tpl = document.getElementById('nx-verify-template');
+    var url = {{ url_for('news_front_pages.verify') | tojson }};
+
+    // Rows added on the page come from the list's own template, which has
+    // no extras: give them Verify too.
+    function equip() {
+      if (!list || !tpl) return;
+      list.querySelectorAll('[data-repeater-row]').forEach(function (row) {
+        var body = row.querySelector('[data-repeater-body]');
+        if (!body || body.querySelector('[data-nx-verify]')) return;
+        var actions = body.querySelector('.repeater-row-actions');
+        body.insertBefore(tpl.content.cloneNode(true), actions);
+      });
+    }
+    equip();
+    if (list) new MutationObserver(equip).observe(list, { childList: true });
+
+    function show(box, data) {
+      box.hidden = false;
+      box.replaceChildren();
+      var tag = document.createElement('span');
+      tag.className = 'tg tg--sm nx-chip' + (data.tone ? ' tg--' + data.tone : '');
+      tag.textContent = data.chip || '';
+      var text = document.createElement('p');
+      text.textContent = data.message || '';
+      var words = document.createElement('div');
+      words.className = 'nx-verify-words';
+      if (data.chip) words.appendChild(tag);
+      words.appendChild(text);
+      if (data.thumb) {
+        var img = document.createElement('img');
+        img.src = data.thumb;
+        img.alt = 'Top of the page that downloaded';
+        img.className = 'nx-thumb';
+        box.appendChild(img);
+      }
+      box.appendChild(words);
+    }
+
+    document.addEventListener('click', function (ev) {
+      var btn = ev.target.closest('[data-nx-verify-btn]');
+      if (!btn || btn.getAttribute('aria-disabled') === 'true') return;
+      var row = btn.closest('[data-repeater-row]');
+      var input = row ? row.querySelector('[data-repeater-key="code"]') : null;
+      var box = btn.closest('[data-nx-verify]').querySelector('[data-nx-verify-result]');
+      var label = btn.querySelector('span');
+      btn.setAttribute('aria-disabled', 'true');
+      btn.classList.add('is-busy');
+      label.textContent = 'Checking…';
+      box.hidden = false;
+      box.replaceChildren();
+      var wait = document.createElement('p');
+      wait.className = 'nx-verify-wait';
+      wait.textContent = 'Asking Freedom Forum for the newest page. This can take up to a minute.';
+      box.appendChild(wait);
+      var form = new FormData();
+      form.append('code', input ? input.value : '');
+      fetch(url, { method: 'POST', body: form, credentials: 'same-origin' })
+        .then(function (resp) {
+          return resp.json().catch(function () {
+            return { ok: false, tone: 'bad', chip: 'Error', message: 'The server answered ' + resp.status + '.' };
+          });
+        })
+        .catch(function () {
+          return { ok: false, tone: 'bad', chip: 'Error', message: "Couldn't reach Tesserae. Check the connection and try again." };
+        })
+        .then(function (data) {
+          show(box, data);
+          btn.removeAttribute('aria-disabled');
+          btn.classList.remove('is-busy');
+          label.textContent = 'Verify code';
+        });
+    });
+
+    // Fetch now reloads the page: ask before dropping unsaved settings.
+    document.querySelectorAll('form[data-nx-reload]').forEach(function (form) {
+      form.addEventListener('submit', function (ev) {
+        if (settings && settings.hasAttribute('data-dirty') &&
+            !window.confirm('This reloads the page, so your unsaved changes to the papers are dropped. Go ahead?')) {
+          ev.preventDefault();
+        }
+      });
+    });
+  })();
+</script>
+
+<style>
+  .nx-chip { flex: none; }
+  .nx-status-line { margin: 12px 0 0; font-size: 12.5px; color: var(--t-fg-soft); max-width: 75ch; }
+  .nx-verify { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; margin-top: 12px; }
+  .nx-verify-hint { margin: 0; flex: 1 1 220px; }
+  .nx-verify .is-busy { opacity: 0.7; cursor: progress; }
+  .nx-verify .is-busy i { animation: nx-spin 1.2s linear infinite; }
+  @keyframes nx-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .nx-verify .is-busy i { animation: none; } }
+  .nx-verify-result { flex: 1 1 100%; display: flex; align-items: flex-start; gap: 14px; padding: 12px; border: 1px solid var(--t-border); border-radius: var(--t-radius-md); background: var(--t-surface-sunk); }
+  .nx-verify-result[hidden] { display: none; }
+  .nx-verify-result p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--t-fg-soft); max-width: 70ch; }
+  .nx-verify-words { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+  .nx-verify-wait { font-style: italic; }
+  .nx-thumb { flex: none; width: 80px; height: auto; border: 1px solid var(--t-border); background: #fff; }
+  .nx-fetch-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 16px; flex-wrap: wrap; }
+  .nx-status { flex: 1 1 320px; font-size: 14px; color: var(--t-fg-soft); }
+  .nx-status p { margin: 0 0 4px; max-width: 75ch; }
+  .nx-status:empty { display: none; }
+  .nx-fetch { margin: 0; flex: none; }
+  .nx-log { margin-top: 14px; }
+  .nx-log-help { margin: 8px 0 0; }
+  /* A wrapped entry hangs under its first line, so entries stay apart. */
+  .nx-line { display: inline-block; width: 100%; padding-left: 4ch; text-indent: -4ch; }
+  .nx-out { font-weight: 600; }
+  .nx-out--ok { color: color-mix(in oklab, var(--t-ok) 75%, var(--t-fg)); }
+  .nx-out--warn { color: color-mix(in oklab, var(--t-warn) 75%, var(--t-fg)); }
+  .nx-out--bad { color: color-mix(in oklab, var(--t-danger) 80%, var(--t-fg)); }
+  .nx-empty { margin: 14px 0 0; font-size: 13px; color: var(--t-muted); }
+  @media (max-width: 520px) {
+    .nx-verify-hint { flex-basis: 100%; }
+    .nx-thumb { width: 64px; }
+  }
+</style>
 {% endblock %}
