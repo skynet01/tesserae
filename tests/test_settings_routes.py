@@ -1648,3 +1648,19 @@ def test_startup_restores_rest_on_a_switched_rest_only_device(tmp_path: Path) ->
     saved = json.loads((inst_dir / "hall_sticky.json").read_text(encoding="utf-8"))
     assert saved["transport"] == "rest"
     assert saved["access_token"] == "7e57c0de-abcdef0123456789"
+
+
+def test_server_tab_does_not_build_device_sections(app_with_gate: Flask, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Each tab builds only its own cards. The device view-models are the
+    costly ones (status, timetable, palette, firmware lookups per display)
+    and the Server, Renderers, Plugins and System tabs never show them."""
+    from app.settings import index_routes
+
+    def _boom(*a, **k):  # pragma: no cover - the assertion is the point
+        raise AssertionError("a device section was built for a tab that does not show devices")
+
+    monkeypatch.setattr(index_routes, "_build_device_section", _boom)
+    client = app_with_gate.test_client()
+    client.post("/setup", data={"password": "abcdefgh", "password_confirm": "abcdefgh"})
+    for area in ("server", "renderers", "plugins", "system"):
+        assert client.get(f"/settings/{area}").status_code == 200, area

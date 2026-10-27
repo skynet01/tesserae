@@ -1,0 +1,67 @@
+{
+  "name": "Tesserae",
+  "slug": "tesserae",
+  "categories": [
+    10,
+    16
+  ],
+  "date_created": "2026-10-27",
+  "type": "ct",
+  "updateable": true,
+  "privileged": false,
+  "architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "interface_port": 8765,
+  "documentation": "https://docs.tesserae.ink/install/lxc/",
+  "website": "https://tesserae.ink/",
+  "repository": "https://github.com/dmellok/tesserae",
+  "logo": "https://cdn.jsdelivr.net/gh/dmellok/tesserae@main/docs/assets/brand/icon.svg",
+  "description": "Tesserae is a self-hosted dashboard server for e-ink panels. It composes tile-based dashboards from weather, calendar, Home Assistant and other widgets, renders them in a headless browser, and pushes the frames to ESP32 boards, TRMNL devices and KOReader readers over HTTP or MQTT.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/tesserae.sh",
+      "config_path": "/opt/tesserae_data/tesserae.env",
+      "resources": {
+        "cpu": 4,
+        "ram": 3072,
+        "hdd": 16,
+        "os": "Debian",
+        "version": "13"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "app_vars": [
+    {
+      "name": "var_tesserae_channel",
+      "label": "Release channel",
+      "type": "select",
+      "options": [
+        "stable",
+        "edge"
+      ],
+      "default": "stable",
+      "help": "stable follows tagged releases; edge tracks the main branch and updates on every commit"
+    }
+  ],
+  "notes": [
+    {
+      "text": "The first visit opens the setup wizard: pick an admin password, then follow the onboarding steps for timezone, transport, device and first dashboard.",
+      "type": "info"
+    },
+    {
+      "text": "Authentication is a single password gate meant for a trusted LAN. Do not expose the container to the internet; use a VPN for remote access.",
+      "type": "warning"
+    },
+    {
+      "text": "Dashboards, settings and device registrations live in /opt/tesserae_data. Back up that directory; /opt/tesserae is replaced on every update.",
+      "type": "info"
+    }
+  ]
+}

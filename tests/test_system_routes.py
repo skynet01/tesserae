@@ -145,6 +145,106 @@ def test_system_page_swaps_update_card_under_docker(
     assert "Update &amp; restart" not in body
 
 
+def test_system_page_points_helper_script_installs_at_update_command(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Proxmox VE helper-script install (``TESSERAE_INSTALL_METHOD=
+    community-script``) on the stable channel is a release tarball with
+    no ``.git``. The Updates card must send the user to the container's
+    ``update`` command, not the generic "re-run install.sh" advice,
+    which would wreck that install's layout."""
+    from app.updater import Updater
+
+    monkeypatch.setenv("TESSERAE_INSTALL_METHOD", "community-script")
+    monkeypatch.delenv("TESSERAE_IN_DOCKER", raising=False)
+    monkeypatch.setattr(Updater, "has_git_repo", lambda self: False)
+    client = app.test_client()
+    _sign_in(client)
+    body = client.get("/settings/system").get_data(as_text=True)
+    assert "<code>update</code>" in body
+    assert "pct enter" in body
+    assert "install.sh | bash" not in body
+    assert "docker compose pull" not in body
+    assert "Check for updates" not in body
+
+
+def test_system_page_bare_install_without_method_keeps_installer_hint(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ``TESSERAE_INSTALL_METHOD`` a non-git install still gets
+    the install.sh hint, so the helper-script branch is opt-in."""
+    from app.updater import Updater
+
+    monkeypatch.delenv("TESSERAE_INSTALL_METHOD", raising=False)
+    monkeypatch.delenv("TESSERAE_IN_DOCKER", raising=False)
+    monkeypatch.setattr(Updater, "has_git_repo", lambda self: False)
+    client = app.test_client()
+    _sign_in(client)
+    body = client.get("/settings/system").get_data(as_text=True)
+    assert "install.sh | bash" in body
+    assert "pct enter" not in body
+
+
+def test_release_check_endpoint_reports_pending_then_result(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Updates card on a Docker / bare install polls this: the first
+    answer says a check is running (nothing cached yet), and once the
+    background thread has heard from GitHub the rendered block carries
+    the result."""
+    import threading
+
+    from app.updater import Updater
+
+    # Hold the stubbed GitHub answer until the first poll has been read,
+    # so the test sees the pending state rather than racing the thread.
+    gate = threading.Event()
+
+    def _slow_tags(self, repo, api_path, *, user_agent):  # type: ignore[no-untyped-def]
+        gate.wait(5.0)
+        return [{"name": "v999.0.0"}]
+
+    monkeypatch.setattr(Updater, "_github_get_json", _slow_tags)
+    client = app.test_client()
+    _sign_in(client)
+    upd = app.config["UPDATER"]
+    first = client.get("/settings/system/release-check").get_json()
+    assert first["pending"] is True
+    assert "Checking GitHub" in first["html"]
+    gate.set()
+    upd.join_release_check_for_test()
+    second = client.get("/settings/system/release-check").get_json()
+    assert second["pending"] is False
+    assert "v999.0.0 available" in second["html"]
+    assert "Checking GitHub" not in second["html"]
+
+
+def test_system_page_polls_rather_than_waits_for_the_release_check(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under Docker the page never calls GitHub on the request thread.
+    It renders the cached check and hands the poll URL to the script."""
+    from app.updater import Updater
+
+    def _never(self, *a, **k):  # pragma: no cover - the assertion is the point
+        raise AssertionError("latest_release_via_api ran on the page's thread")
+
+    monkeypatch.setattr(Updater, "latest_release_via_api", _never)
+    monkeypatch.setenv("TESSERAE_IN_DOCKER", "1")
+    app.testing = False
+    try:
+        monkeypatch.setattr(Updater, "release_check_pending", lambda self: True)
+        monkeypatch.setattr(Updater, "release_check_status", lambda self, v, **k: None)
+        client = app.test_client()
+        _sign_in(client)
+        body = client.get("/settings/system").get_data(as_text=True)
+    finally:
+        app.testing = True
+    assert 'data-release-check="/settings/system/release-check"' in body
+    assert "data-release-check-pending" in body
+    assert "Checking GitHub" in body
+
+
 def test_update_apply_refused_under_docker(app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
     """A hand-crafted POST to /settings/system/update/apply under the
     Docker image is server-side refused too, not just hidden in the UI."""

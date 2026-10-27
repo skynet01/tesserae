@@ -146,6 +146,10 @@ class Updater:
         # unauth'd limit is plenty for one self-hosted instance but a
         # multi-tab user would burn through it quickly without caching.
         self._latest_release: ReleaseCheck | None = None
+        # The background refresh of that check (see release_check_status):
+        # one thread at a time, so a page and its poll never race GitHub.
+        self._release_lock = threading.Lock()
+        self._release_thread: threading.Thread | None = None
 
     @property
     def last_check(self) -> RemoteCheck | None:
@@ -235,6 +239,52 @@ class Updater:
         )
         self._latest_release = check
         return check
+
+    def release_check_status(
+        self, current_version: str, *, ttl_s: int = 3600
+    ) -> ReleaseCheck | None:
+        """The cached release check, without waiting on GitHub.
+
+        Returns the last check while it is younger than ``ttl_s``. When
+        it is missing or expired, one background thread runs
+        :meth:`latest_release_via_api` and the caller gets whatever is
+        cached meanwhile: the expired check, or ``None`` on a cold start.
+        The System page renders from this and polls
+        ``/settings/system/release-check`` for the answer, so GitHub's
+        latency (up to the 10 s socket timeout, longer on a host with no
+        route out) never sits on a page load."""
+        now = time.time()
+        with self._release_lock:
+            cached = self._latest_release
+            if cached is not None and now - cached.fetched_at < ttl_s:
+                return cached
+            running = self._release_thread
+            if running is None or not running.is_alive():
+                self._release_thread = threading.Thread(
+                    target=self._refresh_release_check,
+                    args=(current_version, ttl_s),
+                    name="tesserae-release-check",
+                    daemon=True,
+                )
+                self._release_thread.start()
+            return cached
+
+    def release_check_pending(self) -> bool:
+        """Whether a background release check is still running."""
+        thread = self._release_thread
+        return thread is not None and thread.is_alive()
+
+    def join_release_check_for_test(self, timeout: float = 5.0) -> None:
+        """Wait for an in-flight background release check. Test helper."""
+        thread = self._release_thread
+        if thread is not None:
+            thread.join(timeout)
+
+    def _refresh_release_check(self, current_version: str, ttl_s: int) -> None:
+        try:
+            self.latest_release_via_api(current_version, ttl_s=ttl_s)
+        except Exception:
+            logger.debug("release check refresh failed", exc_info=True)
 
     def has_git_repo(self) -> bool:
         """Whether the install is a git checkout (the in-app updater

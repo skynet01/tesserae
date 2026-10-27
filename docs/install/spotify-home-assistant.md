@@ -17,7 +17,7 @@ loopback access, the flow is simpler; see the
 
 1. Install **NGINX Proxy Manager** + **DuckDNS** HA Apps.
 2. Set up a public HTTPS URL pointing at Tesserae on your LAN.
-3. Tell Tesserae what its public URL is via the **Settings → App →
+3. Tell Tesserae what its public URL is via the **Settings → Server →
    Public URL** field.
 4. Register a Spotify Developer app with the matching redirect URI.
 5. Click Connect.
@@ -183,7 +183,7 @@ override, it sees the internal `http://<some-internal-host>:8765`
 connection NPM forwarded, which Spotify rejects.
 
 1. Open Tesserae via the new HTTPS URL (NOT via HA Ingress).
-2. **Settings → App → Public URL** (top of the page).
+2. **Settings → Server → Network & integrations → Public URL**.
 3. Paste your full URL, scheme + host + port if non-standard, no
    trailing slash:
    - `https://tesserae.myhome.duckdns.org` (paths 2a / 2b)

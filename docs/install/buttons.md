@@ -132,7 +132,7 @@ kitchen panel shouldn't get yanked back by the scheduler a minute
 later.
 
 The override expires at the rotation's next daily anchor (midnight
-in the timezone from **Settings → App**, else the host's). A **touch**
+in the timezone from **Settings → Server → Location & time**, else the host's). A **touch**
 that rotates the page holds it for one dwell window of the step it
 landed on instead, then the lineup carries on; a tap is a lighter
 gesture than a button, and touch panels tend to run short-dwell

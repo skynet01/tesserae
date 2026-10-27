@@ -15,7 +15,16 @@ import tempfile
 import time
 from pathlib import Path
 
-from flask import current_app, flash, jsonify, redirect, request, send_file, session
+from flask import (
+    current_app,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+)
 from werkzeug.wrappers import Response
 
 from app import backup as _backup_mod
@@ -34,6 +43,23 @@ from ._shared import (
 )
 
 # -- updates ------------------------------------------------------------
+
+
+@bp.get("/settings/system/release-check")
+def system_release_check() -> Response:
+    """The Docker / bare-install Updates card polls this for the GitHub
+    release check the page started in the background. Answers with the
+    card's result block already rendered, plus whether a check is still
+    running so the client knows to ask again."""
+    upd = updater()
+    check = upd.release_check_status(str(current_app.config.get("APP_VERSION") or "0.0.0"))
+    pending = upd.release_check_pending()
+    html = render_template(
+        "_release_check.html",
+        system_release_check=check,
+        system_release_pending=pending,
+    )
+    return jsonify(pending=pending, html=html)
 
 
 @bp.post("/settings/system/update/check")

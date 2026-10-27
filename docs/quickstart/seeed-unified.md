@@ -49,7 +49,9 @@ Tesserae ships a **web-based firmware flasher**. Chrome / Edge / Chromium-based 
 
 ## 02 — Connect to Wi-Fi
 
-After flashing, the device boots into a **soft-AP setup mode** and broadcasts an open Wi-Fi network named `tesserae-<macsuffix>` (e.g. `tesserae-a4b2c9`).
+If you flashed from [tesserae.ink/flash](https://tesserae.ink/flash), its **Connect it** step sends your Wi-Fi details and the server URL to the board over the same USB cable, and you can skip the hotspot below.
+
+Otherwise, after flashing the device boots into a **soft-AP setup mode** and broadcasts an open Wi-Fi network named `Tesserae-Setup`.
 
 1. On your phone or laptop, join that Wi-Fi network. Your OS may complain that there's no internet on this network; ignore it and stay connected.
 2. A captive portal loads automatically. If it doesn't, browse to `http://192.168.4.1/`.

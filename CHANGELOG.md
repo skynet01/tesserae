@@ -123,6 +123,73 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   had been paged away from by a button, so lineups kept advancing through
   it.
 
+## [0.483.2], 2026-10-27
+
+### Changed
+
+- The paperlesspaper OpenPaper L is confirmed on real hardware: catalog notes,
+  tested data and the compatibility page say so.
+
+## [0.483.0], 2026-10-27
+
+### Added
+
+- Hardware kind `waveshare_rlcd_42` for Waveshare's ESP32-S3-RLCD-4.2, a 4.2"
+  400x300 reflective LCD (Sitronix ST7305). Not e-paper: it repaints instantly
+  and holds its image only while powered. Inherits `esp32_bw_client` and the
+  15000-byte mono frame the Waveshare 4.2" e-paper module takes; firmware is
+  the `waveshare-rlcd-42` build in tesserae-device-firmware, confirmed on a
+  bench unit. Not auto-selected from a relay self-report because it shares
+  the mono 400x300 report with the e-paper module.
+
+## [0.482.0], 2026-10-27
+
+### Changed
+
+- Settings builds only the cards the open tab shows. Every tab used to
+  assemble the full device view-model (status, timetable, palette and
+  firmware lookups for each display) and then discard it, which is what
+  made the Server tab slow to open on a Docker install with a few
+  devices.
+- The System tab's GitHub release check on Docker and other non-git
+  installs runs in the background. The page renders the cached result,
+  or a "checking" line that fills in once the check finishes, instead
+  of waiting on GitHub before it can load.
+- The per-device firmware "update available" lookup no longer waits on
+  api.tesserae.ink during a Settings render. A cold or expired cache
+  starts one background fetch per device kind, and the next render
+  shows the answer.
+
+## [0.481.2], 2026-10-27
+
+### Fixed
+
+- The Proxmox VE helper script asks for the release channel on the host,
+  before the container dialog. Asking inside the container never showed
+  the question, because the engine treats install-time prompts as
+  unattended, so every install silently took stable.
+
+## [0.481.1], 2026-10-27
+
+### Changed
+
+- The Proxmox VE helper script defaults to 4 CPUs, 3 GB RAM and a 16 GB
+  disk. The metadata record matches.
+
+## [0.481.0], 2026-10-27
+
+### Added
+
+- A Proxmox VE helper script in the community-scripts format, under
+  `scripts/proxmox/`. It creates an unprivileged Debian 13 container,
+  installs Tesserae on a stable (tagged release) or edge (main branch)
+  channel with Chromium and a systemd service, and lands on the setup
+  wizard. `update` in the container shell moves it forward on the chosen
+  channel. The LXC install page documents how to run it.
+- Installers that own the upgrade path can set `TESSERAE_INSTALL_METHOD`;
+  Settings → System then points at their update command instead of
+  suggesting a re-run of install.sh. The helper script sets it.
+
 ## [0.480.1], 2026-10-26
 
 ### Fixed

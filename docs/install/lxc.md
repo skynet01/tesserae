@@ -62,6 +62,19 @@ SSH in as that user (if you installed `openssh-server`) or `su tesserae` from th
 
 Once the venv is built and Tesserae starts cleanly, the [systemd service path](server.md#run-as-a-service-linux) keeps it running across reboots. The systemd unit runs identically inside the container as on bare metal.
 
+## Proxmox VE helper script
+
+If you run Proxmox VE, a [community-scripts](https://community-scripts.org/) style installer does the whole job from the host shell: it creates an unprivileged Debian 13 container, installs the newest Tesserae release with Chromium, and starts it as a systemd service. Run this on the Proxmox host:
+
+```sh
+COMMUNITY_SCRIPTS_URL=https://raw.githubusercontent.com/dmellok/tesserae/main/scripts/proxmox \
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/dmellok/tesserae/main/scripts/proxmox/ct/tesserae.sh)"
+```
+
+The first thing it asks is the release channel: type `stable` for the newest tagged release or `edge` to track the `main` branch, within ten seconds, or it takes `stable`. Set `var_tesserae_channel=edge` in the environment to skip the question. The container dialog that follows offers Default, which applies the script's sizes without asking, and Advanced, which asks about CPU, RAM, disk, network and the rest. When it finishes it prints the container's address; open `http://<container-ip>:8765/` to land on the setup wizard. Inside the container, `update` moves Tesserae to the newest release or commit on the channel you picked. State lives in `/opt/tesserae_data`, and the listen port and other environment settings are in `/opt/tesserae_data/tesserae.env`.
+
+The script sources live at [`scripts/proxmox/`](https://github.com/dmellok/tesserae/tree/main/scripts/proxmox) in the repo.
+
 ## Automation with cloud-init
 
 MicroCloud and Proxmox both support cloud-init, so the package install, user creation, venv build, and systemd setup can be baked into a single config you reuse across containers (or hyperscaler instances).

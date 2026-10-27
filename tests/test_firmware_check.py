@@ -187,3 +187,65 @@ def test_a_kind_with_no_feed_is_not_re_fetched_hourly(monkeypatch) -> None:
     monkeypatch.setattr(fc.time, "time", lambda: now + fc._MISS_CACHE_TTL_SECONDS + 60)
     assert fc.latest_for_kind("no_such_kind") is None
     assert len(calls) == 2
+
+
+# ----- wait=False: the Settings pages never block on the network --------
+
+
+def _info(version: str) -> firmware_check.FirmwareInfo:
+    return firmware_check.FirmwareInfo(
+        version=version, released_at="", url="", notes_headline="", assets=()
+    )
+
+
+def test_wait_false_returns_none_on_cold_cache_and_fills_it_in_background(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def _fake_fetch(kind: str, *, api_base: str, current: str = "") -> firmware_check.FirmwareInfo:
+        calls.append(kind)
+        return _info("2.0.0")
+
+    monkeypatch.setattr(firmware_check, "_fetch", _fake_fetch)
+    assert firmware_check.latest_for_kind("esp32_client", wait=False) is None
+    firmware_check.join_for_test()
+    assert calls == ["esp32_client"]
+    info = firmware_check.latest_for_kind("esp32_client", wait=False)
+    assert info is not None and info.version == "2.0.0"
+    # The fresh entry is served without another fetch.
+    assert calls == ["esp32_client"]
+
+
+def test_wait_false_starts_one_fetch_per_kind(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Several devices of one kind on a page start one background fetch."""
+    import threading
+
+    gate = threading.Event()
+    calls: list[str] = []
+
+    def _slow_fetch(kind: str, *, api_base: str, current: str = "") -> firmware_check.FirmwareInfo:
+        calls.append(kind)
+        gate.wait(2.0)
+        return _info("2.0.0")
+
+    monkeypatch.setattr(firmware_check, "_fetch", _slow_fetch)
+    for _ in range(3):
+        assert firmware_check.latest_for_kind("esp32_client", wait=False) is None
+    gate.set()
+    firmware_check.join_for_test()
+    assert calls == ["esp32_client"]
+
+
+def test_wait_false_serves_expired_entry_while_refreshing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        firmware_check, "_fetch", lambda kind, *, api_base, current="": _info("2.1.0")
+    )
+    firmware_check._cache["esp32_client"] = (time.time() - 2 * 60 * 60, _info("2.0.0"))
+    stale = firmware_check.latest_for_kind("esp32_client", wait=False)
+    assert stale is not None and stale.version == "2.0.0"
+    firmware_check.join_for_test()
+    fresh = firmware_check.latest_for_kind("esp32_client", wait=False)
+    assert fresh is not None and fresh.version == "2.1.0"

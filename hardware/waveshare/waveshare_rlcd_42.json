@@ -1,0 +1,29 @@
+{
+  "tesserae_compat": "1.x",
+  "id": "waveshare_rlcd_42",
+  "name": "Waveshare ESP32-S3-RLCD-4.2",
+  "vendor": "Waveshare",
+  "url": "https://www.waveshare.com/esp32-s3-rlcd-4.2.htm",
+  "icon": "device-tablet",
+  "description": "Waveshare's ESP32-S3 development board with a 4.2 inch 400x300 reflective LCD (RLCD, Sitronix ST7305): a monochrome panel that reads like e-paper without a backlight but is not e-paper, so it refreshes instantly and holds its image only while powered. ESP32-S3-WROOM-1-N16R8 (16 MB flash, 8 MB PSRAM), 18650 battery holder, SHTC3 temperature/humidity sensor, PCF85063 RTC, microSD slot, one user key. Runs the native Tesserae device firmware (env `waveshare-rlcd-42`) over the v1 REST device API and paints a raw 1-bpp mono buffer (15000 bytes) from the esp32_bw_bin renderer, the same bytes as the Waveshare 4.2 inch e-paper module.",
+  "protocol": "esp32_bw_client",
+  "renderers": [
+    "esp32_bw_bin"
+  ],
+  "panel": {
+    "w": 400,
+    "h": 300,
+    "orientation": "landscape",
+    "name": "4.2 inch reflective LCD (400x300)",
+    "gamut": "mono",
+    "native_w": 400,
+    "native_h": 300
+  },
+  "protocol_config": {
+    "model_header": "Waveshare_RLCD_42"
+  },
+  "refresh_floor_s": 30,
+  "image_format": "bin",
+  "auto_select": false,
+  "notes_md": "Confirmed on real hardware (2026-10-27, bench unit): selftest pattern, dashboard frames over the v1 REST API, image held through deep sleep, battery, SHTC3 and the KEY button. Firmware support is in tesserae-device-firmware as the `waveshare-rlcd-42` build. Wire format is exactly 15000 bytes (400*300/8), MSB=leftmost pixel, bit-set=white, bit-clear=black; no header, no padding, no checksum. The firmware transposes this into the ST7305's own memory layout, so the frame is byte-identical to the `waveshare_4_2_bw` e-paper kind. Default device ids look like `waveshare_rlcd_42_<mac-suffix>` (model string `Waveshare_RLCD_42`). OTA-capable; descriptors are signed for this kind id.\n\n**Not e-paper.** A reflective LCD repaints in milliseconds with no flash and no wear, so the refresh floor here is about battery life rather than the glass. It also holds its image only while the controller is powered and refreshing: the firmware leaves the ST7305 in its low-power mode across deep sleep, so the panel keeps showing the last frame between wakes, and the image is gone when the board is switched off or the cell runs flat.\n\n**Orientation.** The firmware follows Waveshare's landscape pixel layout. If a frame comes up upside down on a unit, set the device's orientation to `landscape_flipped` rather than changing the firmware.\n\n**Battery.** The 18650 cell is read through a 1:3 divider on GPIO4 and reported as `battery_pct`; the ETA6098 charger has status LEDs only, so charging state is not reported.\n\n**Buttons.** The KEY button reports as `right`, so a stock server advances the rotation on a press. BOOT is left to the ROM loader. The PWR control is a slide switch on the battery line, not a GPIO.\n\n**Sensors and storage.** The SHTC3 temperature/humidity sensor reports in the status body; the PCF85063 RTC is not yet driven (its register map differs from the PCF8563 the firmware speaks). The microSD slot (SDMMC, 1-bit) carries the deck cache.\n\n**Pairing.** Not auto-selected from a relay self-report: it shares the mono 400x300 report with the Waveshare 4.2 inch e-paper module, so pick this kind by hand."
+}

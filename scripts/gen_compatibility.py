@@ -116,8 +116,7 @@ VENDOR_INTRO: dict[str, str] = {
         "the region that holds the frame's vendor cloud certificate; "
         "paperlesspaper support can re-provision a frame that wants the vendor "
         "service back, or back up that region first to keep your own copy. The "
-        "OpenPaper 7 is on the bench; the OpenPaper L build has not met its "
-        "hardware yet."
+        "OpenPaper 7 and the OpenPaper L are both confirmed on the bench."
     ),
     "remarkable": (
         "E-ink writing tablets running the "

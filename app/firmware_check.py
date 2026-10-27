@@ -12,7 +12,10 @@ This module deliberately keeps things lightweight for v0.70.0:
 * A single process-lifetime in-memory cache with a 60-minute TTL per
   kind. No on-disk persistence; a Tesserae restart re-fetches.
 * Fetches happen lazily on the first request for a given kind and any
-  subsequent request after TTL expiry. No background timer.
+  subsequent request after TTL expiry. No background timer. A caller that
+  must not wait on the network (the Settings pages) passes ``wait=False``
+  and gets the cached answer while one background thread per kind fills
+  or refreshes the cache.
 * Failures are silent, the cache stays empty for that kind and the UI
   simply hides the "update available" chip until the next fetch.
 
@@ -26,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -70,10 +74,14 @@ class FirmwareInfo:
 # tried and couldn't get data (repo has no releases, network error, etc.);
 # it still counts against the TTL to avoid hammering the endpoint.
 _cache: dict[str, tuple[float, FirmwareInfo | None]] = {}
+# Kind -> the background fetch currently filling its cache entry, so a page
+# with several devices of one kind starts one fetch, not one per device.
+_inflight: dict[str, threading.Thread] = {}
+_inflight_lock = threading.Lock()
 
 
 def latest_for_kind(
-    kind: str, *, api_base: str = _DEFAULT_API_BASE, current: str = ""
+    kind: str, *, api_base: str = _DEFAULT_API_BASE, current: str = "", wait: bool = True
 ) -> FirmwareInfo | None:
     """Return the latest known firmware info for ``kind`` (or ``None``).
 
@@ -85,6 +93,13 @@ def latest_for_kind(
     as ``?current=`` on the outbound request so api.tesserae.ink can aggregate
     version distribution. It never changes the response, so it's only sent on a
     cache-miss fetch, not on a cached hit.
+
+    ``wait=False`` keeps the network off the caller's thread. A fresh cache
+    entry comes back as usual; a missing or expired one starts a single
+    background fetch for the kind and the caller gets whatever is cached
+    meanwhile (the expired entry, or ``None`` on a cold start). The Settings
+    pages render this way, so a cold cache costs a page load nothing and the
+    next render shows the answer.
     """
     now = time.time()
     hit = _cache.get(kind)
@@ -95,9 +110,47 @@ def latest_for_kind(
         ttl = _CACHE_TTL_SECONDS if hit[1] is not None else _MISS_CACHE_TTL_SECONDS
         if (now - hit[0]) < ttl:
             return hit[1]
+    if not wait:
+        _refresh_in_background(kind, api_base=api_base, current=current)
+        return hit[1] if hit is not None else None
     info = _fetch(kind, api_base=api_base, current=current)
     _cache[kind] = (now, info)
     return info
+
+
+def _refresh_in_background(kind: str, *, api_base: str, current: str) -> None:
+    """Start one fetch for ``kind`` unless one is already running."""
+    with _inflight_lock:
+        running = _inflight.get(kind)
+        if running is not None and running.is_alive():
+            return
+        thread = threading.Thread(
+            target=_refresh,
+            args=(kind, api_base, current),
+            name=f"tesserae-firmware-check-{kind}",
+            daemon=True,
+        )
+        _inflight[kind] = thread
+        thread.start()
+
+
+def _refresh(kind: str, api_base: str, current: str) -> None:
+    try:
+        info = _fetch(kind, api_base=api_base, current=current)
+    except Exception:  # _fetch swallows its own errors; this is belt and braces
+        logger.debug("firmware_check: background fetch failed for kind=%s", kind, exc_info=True)
+        info = None
+    _cache[kind] = (time.time(), info)
+    with _inflight_lock:
+        _inflight.pop(kind, None)
+
+
+def join_for_test(timeout: float = 5.0) -> None:
+    """Wait for every in-flight background fetch to finish. Test helper."""
+    with _inflight_lock:
+        threads = list(_inflight.values())
+    for thread in threads:
+        thread.join(timeout)
 
 
 def clear_cache() -> None:

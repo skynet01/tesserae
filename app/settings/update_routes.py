@@ -78,7 +78,7 @@ def settings_update(section_kind: str) -> Response:
         fields = [f for f in renderer.manifest.get("settings", []) if not f.get("device_setting")]
         try:
             values = values_from_form(fields)
-        except RepeaterValueError as err:
+        except RepeaterValueError as exc:
             flash(f"{renderer.name} settings not saved. {err}", "error")
             return redirect_to_section(section_kind)
         store.update_for_namespace("renderers", rid, values, fields)
@@ -99,10 +99,10 @@ def settings_update(section_kind: str) -> Response:
         fields = list(plugin.manifest.get("settings", []))
         try:
             values = values_from_form(fields)
-        except RepeaterValueError as err:
+        except RepeaterValueError as exc:
             # Nothing is saved: a repeater's rows are all or nothing, and the
             # other fields wait with them rather than half the card saving.
-            flash(f"{plugin.name} settings not saved. {err}", "error")
+            flash(f"{plugin.name} settings not saved. {exc}", "error")
             return redirect_to_section(section_kind)
         store.update_for_namespace("plugins", pid, values, fields)
         flash(f"{plugin.name} settings saved.", "ok")

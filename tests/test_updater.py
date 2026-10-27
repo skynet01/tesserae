@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from app import backup as _backup
-from app.updater import Updater, UpdaterError
+from app.updater import ReleaseCheck, Updater, UpdaterError
 
 
 def _new_data_root(tmp_path: Path) -> Path:
@@ -481,6 +481,48 @@ def test_latest_release_via_api_caches_within_ttl(tmp_path: Path) -> None:
     u.latest_release_via_api("0.64.45")
     u.latest_release_via_api("0.64.45")
     assert u.api_calls == ["/tags"]  # second call served from cache
+
+
+def test_release_check_status_never_waits_on_github(tmp_path: Path) -> None:
+    """The System page reads the cached check and lets a background
+    thread fill it: a cold start answers None at once, and the next read
+    after the thread finishes has the result without another API call."""
+    u = _StubReleaseUpdater(
+        repo_root=tmp_path,
+        data_root=_new_data_root(tmp_path),
+        api_responses={"/tags": [{"name": "v0.64.45"}]},
+    )
+    assert u.release_check_status("0.64.40") is None
+    u.join_release_check_for_test()
+    assert u.release_check_pending() is False
+    check = u.release_check_status("0.64.40")
+    assert check is not None
+    assert check.latest_tag == "v0.64.45"
+    assert check.behind is True
+    assert u.api_calls == ["/tags"]
+
+
+def test_release_check_status_serves_expired_check_while_refreshing(tmp_path: Path) -> None:
+    u = _StubReleaseUpdater(
+        repo_root=tmp_path,
+        data_root=_new_data_root(tmp_path),
+        api_responses={"/tags": [{"name": "v0.64.46"}]},
+    )
+    import time
+
+    u._latest_release = ReleaseCheck(
+        current_version="0.64.45",
+        latest_tag="v0.64.45",
+        latest_url="https://github.com/dmellok/tesserae/releases/tag/v0.64.45",
+        behind=False,
+        fetched_at=time.time() - 7200,
+    )
+    stale = u.release_check_status("0.64.45")
+    assert stale is not None and stale.latest_tag == "v0.64.45"
+    u.join_release_check_for_test()
+    fresh = u.release_check_status("0.64.45")
+    assert fresh is not None and fresh.latest_tag == "v0.64.46"
+    assert u.api_calls == ["/tags"]
 
 
 # ----- a release-tag clone (the LXC cloud-init, #328), real git ---------

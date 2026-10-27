@@ -31,7 +31,7 @@ publishes the Tesserae App to Home Assistant Supervisor.
 ### Configuration
 
 The App's **Configuration** tab exposes the small set of options
-that need to be set at boot (port, broker host, app password). Anything
+that need to be set at boot (log level and the MQTT broker host, port, username and password). Anything
 else is configured from inside Tesserae's own Settings UI, which
 persists into the App's mounted `/data` volume, your state survives
 App restarts and version upgrades.
@@ -62,7 +62,7 @@ in HA, the entities just appear.
    at the same broker HA uses. (If you run HA's Mosquitto App, that's
    `core-mosquitto` from inside the App or `homeassistant.local`
    from a standalone Tesserae host.)
-2. **Settings → App → Home Assistant discovery**, flip the toggle on
+2. **Settings → Server → Network & integrations → Home Assistant MQTT discovery**, flip the toggle on
    and save.
 
 Tesserae publishes the discovery config under
@@ -88,9 +88,9 @@ Under the **Tesserae hub** device:
   schedules, timed page refreshes, deck pre-renders, home returns)
   until you turn it back on. Manual sends, physical buttons and HA
   commands still go through. The same toggle lives in
-  **Settings → App → Automation**.
+  **Settings → Server → Automation**.
 - A **switch** named *Quiet hours*, the app-level quiet-hours toggle
-  (the window itself is set in **Settings → App → Quiet hours**).
+  (the window itself is set in **Settings → Server → Quiet hours**).
 - One **switch** per lineup, mirroring its enabled flag. Lineups with
   a bound display also get a *Push now* **button** (warm every page and
   send the entry page), and lineups with more than one page get *Next*
@@ -177,7 +177,7 @@ to the hub via `via_device`):
 - Lazily (when the device's heartbeat carries them): **Battery**,
   **Battery voltage**, **Signal**, **IP address**, **Firmware**,
   **Temperature**, **Humidity**, **Uptime**, plus **Low battery**
-  (against the Settings → App threshold) and **Next wake** (the
+  (against the Settings → Server → Low-battery warnings threshold) and **Next wake** (the
   server's wake prediction).
 
 ### Trimming what's published

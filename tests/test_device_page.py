@@ -224,7 +224,7 @@ def test_connection_chips_link_to_the_firmware_page(app: Flask, monkeypatch) -> 
     monkeypatch.setattr(
         index_routes.firmware_check_module,
         "latest_for_kind",
-        lambda kind_id, current="": FirmwareInfo(
+        lambda kind_id, current="", wait=True: FirmwareInfo(
             version="1.40.0",
             released_at="2026-09-18",
             url="https://github.com/example/firmware/releases/tag/v1.40.0",

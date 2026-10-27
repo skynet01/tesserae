@@ -801,3 +801,27 @@
     });
   });
 })();
+
+// Settings → System on Docker / bare installs: the GitHub release check
+// runs on the server in the background, so the Updates card polls for
+// the result instead of the page waiting on GitHub. The server renders
+// the finished block; this only swaps it in.
+(function () {
+  'use strict';
+  const box = document.querySelector('[data-release-check]');
+  if (!box || !box.hasAttribute('data-release-check-pending')) return;
+  const url = box.getAttribute('data-release-check');
+  let tries = 0;
+  function poll() {
+    tries += 1;
+    fetch(url, { headers: { Accept: 'application/json' }, credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data || typeof data.html !== 'string') return;
+        box.innerHTML = data.html;
+        if (data.pending && tries < 15) setTimeout(poll, 1500);
+      })
+      .catch(function () { /* keep the placeholder; the next visit asks again */ });
+  }
+  setTimeout(poll, 1000);
+})();
