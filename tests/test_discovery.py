@@ -514,7 +514,7 @@ def test_visionect_device_band_says_whether_auto_bind_is_open_and_shows_refusals
             "refused": {"remote": "10.0.0.66", "at": _time.time()},
         }
         band = index_routes._visionect_setup(device)
-    assert "from 10.0.0.66 claimed this sign's UUID and was refused" in band["body"]
+    assert "from 10.0.0.66 claimed this frame's UUID and was refused" in band["body"]
     assert band["ok"] is False
 
 
@@ -566,21 +566,21 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
         "6.17.4168",
         "61%",
         "home-wifi · -53 dBm",
-        "5 min (set on the sign)",
+        "Every 5 min",
         "Off (stays awake)",
         "Full refresh asked",
         "Check-in interval",
-        "Sign sleep between check-ins",
+        "Sleep between check-ins",
     ):
         assert text in page, text
     for action in ("status", "refresh", "reboot"):
         assert f"/settings/devices/hall/visionect/{action}" in page
     resp = client.post("/settings/devices/hall/visionect/reboot", follow_redirects=True)
     assert asked == [("hall", "reboot")]
-    assert "Sent Hall&#39;s sign a reboot" in resp.get_data(as_text=True)
-    state["problem"] = "The sign isn't connected right now."
+    assert "Sent Hall a reboot" in resp.get_data(as_text=True)
+    state["problem"] = "The frame isn't connected right now."
     resp = client.post("/settings/devices/hall/visionect/status", follow_redirects=True)
-    assert "The sign isn&#39;t connected right now." in resp.get_data(as_text=True)
+    assert "The frame isn&#39;t connected right now." in resp.get_data(as_text=True)
 
 
 def test_every_config_save_checks_the_sign_binding_and_adding_arms_auto_bind(

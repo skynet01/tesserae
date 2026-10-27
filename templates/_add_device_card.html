@@ -307,7 +307,7 @@
         <p>
           <strong>Tesserae replaces the Visionect server.</strong> The sign dials the address in
           its flash on TCP {{ visionect_listener.port if visionect_listener else 11113 }}: run
-          Tesserae on the old Visionect server's address, or set the address over the sign's USB
+          Tesserae on the old Visionect server's address, or set the address over the frame's USB
           console. Leave the UUID blank and the first unknown sign that connects within the hour is
           bound to this device; the sign reports its own screen size. The protocol has no authentication, so
           keep the port on your LAN.
@@ -325,24 +325,24 @@
       <form method="post" action="{{ url_for('auth.devices_add') }}" class="form">
         {% if visionect_kinds|length > 1 %}
         {{ select_field('add-vx-kind', 'kind', 'Model', value=visionect_kinds[0].value, options=visionect_kinds,
-                        help='Sets the starting panel size. The sign reports its real size when it connects.') }}
+                        help='Sets the starting panel size. The frame reports its real size when it connects.') }}
         {% else %}
         <input type="hidden" name="kind" value="visionect">
         {% endif %}
         {{ text_input('add-vx-id', 'id', 'Device id', value='', placeholder='hallway_sign', required=True,
                       help='Lowercase, no spaces.') }}
-        {{ text_input('add-vx-name', 'name', 'Display name', value='', placeholder='Hallway sign') }}
-        {{ text_input('add-vx-uuid', 'uuid', 'Sign UUID', value='', placeholder='36002000-1247-3830-3933-303600000000',
-                      help="Optional. On the sign's label or in the old Visionect server's device list. Blank binds the first unknown sign that connects within the hour.") }}
+        {{ text_input('add-vx-name', 'name', 'Display name', value='', placeholder='Hallway frame') }}
+        {{ text_input('add-vx-uuid', 'uuid', 'Frame UUID', value='', placeholder='36002000-1247-3830-3933-303600000000',
+                      help="Optional. On the frame's label or in the old Visionect server's device list. Blank binds the first unknown frame that connects within the hour.") }}
         {{ select_field('add-vx-orientation', 'panel_orientation', 'Rotation', value='',
                         blank_label='Model default',
                         options=[{'value':'landscape','label':'0°'},
                                  {'value':'portrait','label':'90°'},
                                  {'value':'landscape_flipped','label':'180°'},
                                  {'value':'portrait_flipped','label':'270°'}],
-                        help='Clockwise turn applied to match how the sign is mounted.') }}
+                        help='Clockwise turn applied to match how the frame is mounted.') }}
         <div class="dx-actions-right">
-          <button type="submit" class="dx-btn-primary"><i class="ph ph-plus" aria-hidden="true"></i><span>Add Visionect sign</span></button>
+          <button type="submit" class="dx-btn-primary"><i class="ph ph-plus" aria-hidden="true"></i><span>Add Visionect frame</span></button>
         </div>
       </form>
     </div>

@@ -1047,7 +1047,9 @@ def test_an_unacked_frame_expires_and_the_latest_is_sent_on_redial(
         assert sign.dropped(timeout=5), "the connection outlived the ACK deadline"
     finally:
         sign.close()
-    assert "never confirmed the frame" in (harness.svc.sign_view(UUID) or {}).get("last_error", "")
+    assert "never confirmed the picture" in (harness.svc.sign_view(UUID) or {}).get(
+        "last_error", ""
+    )
     again = FakeSign(harness.svc.port)
     try:
         again.status()
@@ -1948,14 +1950,14 @@ def _u32(n: int) -> bytes:
     ("cfg", "want"),
     [
         ({}, {}),
-        ({"heartbeat_min": "", "sign_sleep": ""}, {}),
+        ({"heartbeat_min": "", "frame_sleep": ""}, {}),
         ({"heartbeat_min": "5"}, {visionect.PARAM_HEARTBEAT: 5}),
         ({"heartbeat_min": "0"}, {}),
         ({"heartbeat_min": "99999"}, {}),
         ({"heartbeat_min": "nope"}, {}),
-        ({"sign_sleep": "awake"}, {visionect.PARAM_SLEEP_DISABLE: 1}),
-        ({"sign_sleep": "sleep"}, {visionect.PARAM_SLEEP_DISABLE: 0}),
-        ({"sign_sleep": "whatever"}, {}),
+        ({"frame_sleep": "awake"}, {visionect.PARAM_SLEEP_DISABLE: 1}),
+        ({"frame_sleep": "sleep"}, {visionect.PARAM_SLEEP_DISABLE: 0}),
+        ({"frame_sleep": "whatever"}, {}),
     ],
 )
 def test_desired_params(cfg: dict[str, Any], want: dict[int, int]) -> None:
@@ -1964,7 +1966,7 @@ def test_desired_params(cfg: dict[str, Any], want: dict[int, int]) -> None:
 
 def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path) -> None:
     h = Harness(tmp_path, uuid=UUID)
-    h.settings.sections["devices"]["lobby"].update(heartbeat_min="5", sign_sleep="awake")
+    h.settings.sections["devices"]["lobby"].update(heartbeat_min="5", frame_sleep="awake")
     try:
         assert h.svc.start()
         sign = FakeSign(h.svc.port)

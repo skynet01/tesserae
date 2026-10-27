@@ -1139,9 +1139,9 @@ def devices_album_resync(instance_id: str) -> Response:
 
 
 _VISIONECT_ACTION_DONE = {
-    "status": "Asked {name}'s sign to report in; its status shows here once it does.",
-    "reboot": "Sent {name}'s sign a reboot. It reconnects in a minute or two and gets the latest frame.",
-    "refresh": "{name}'s sign repaints its frame from scratch now.",
+    "status": "Asked {name} to report in; its status shows here once it does.",
+    "reboot": "Sent {name} a reboot. It reconnects in a minute or two and gets the latest picture.",
+    "refresh": "{name} repaints its picture from scratch now.",
 }
 
 
@@ -1158,7 +1158,7 @@ def devices_visionect_action(instance_id: str, action: str) -> Response:
     problem = (
         svc.request_action(device.id, action)
         if svc is not None
-        else "Tesserae isn't listening for signs right now."
+        else "Tesserae isn't listening for Visionect frames right now."
     )
     if problem:
         flash(problem, "error")

@@ -219,7 +219,7 @@ def status_heartbeat(fields: dict[str, Any], *, uuid: str, connect_reason: str) 
 
 def desired_params(cfg: dict[str, Any]) -> dict[int, int]:
     """The sign settings a device's config asks for, as TCLV id to value:
-    ``heartbeat_min`` (minutes between check-ins) and ``sign_sleep``
+    ``heartbeat_min`` (minutes between check-ins) and ``frame_sleep``
     ("sleep" or "awake"). Blank or junk leaves the sign's own setting."""
     out: dict[int, int] = {}
     try:
@@ -228,7 +228,7 @@ def desired_params(cfg: dict[str, Any]) -> dict[int, int]:
         minutes = 0
     if 1 <= minutes <= HEARTBEAT_MAX_MINUTES:
         out[PARAM_HEARTBEAT] = minutes
-    mode = str(cfg.get("sign_sleep") or "").strip()
+    mode = str(cfg.get("frame_sleep") or "").strip()
     if mode in ("sleep", "awake"):
         out[PARAM_SLEEP_DISABLE] = 1 if mode == "awake" else 0
     return out
@@ -898,9 +898,9 @@ class VisionectService:
         inflight = sign.inflight
         if inflight is not None and now >= inflight.deadline:
             sign.inflight = None
-            what = "frame" if inflight.kind == "image" else "sleep command"
+            what = "picture" if inflight.kind == "image" else "sleep command"
             sign.last_error = (
-                f"The sign never confirmed the {what}, so Tesserae dropped the connection; "
+                f"The frame never confirmed the {what}, so Tesserae dropped the connection; "
                 "it re-dials and gets the latest state."
             )
             logger.warning(
@@ -1139,7 +1139,7 @@ class VisionectService:
         sign.failed_tries = min(sign.failed_tries + 1, 32)
         backoff = min(FAILED_RETRY_S * 2 ** min(sign.failed_tries - 1, 16), FAILED_RETRY_MAX_S)
         sign.failed_retry_at = time.monotonic() + backoff
-        sign.last_error = "The latest render couldn't be read, so the sign keeps its last frame."
+        sign.last_error = "The latest render couldn't be read, so the frame keeps its last picture."
         if sign.failed_logged == digest:
             logger.debug(
                 "visionect %s: render %s still unreadable: %s", device.id, digest[:12], exc
@@ -1163,7 +1163,7 @@ class VisionectService:
         if not ok:
             sign.inflight = None
             sign.last_error = (
-                "The sign stopped taking data, so Tesserae dropped the connection; it re-dials."
+                "The frame stopped taking data, so Tesserae dropped the connection; it re-dials."
             )
             if inflight.conn is sign.conn:
                 self._drop(sign)
@@ -1227,7 +1227,7 @@ class VisionectService:
             conn.write_params({PARAM_FLASH_SAVE: 1})
             conn.read_params(list(READ_PARAMS))
         except Exception as exc:
-            sign.param_error = f"Tesserae couldn't write the sign's settings: {exc}"
+            sign.param_error = f"Tesserae couldn't write the frame's settings: {exc}"
             logger.warning("visionect: writing %s's settings failed: %s", sign.uuid, exc)
             return
         logger.info(
@@ -1244,7 +1244,7 @@ class VisionectService:
             pid, control = int(item.id), int(item.control)
             if control == PARAM_WRITE_ERROR:
                 sign.param_error = (
-                    f"The sign refused the {PARAM_NAMES.get(pid, f'setting {pid}')} "
+                    f"The frame refused the {PARAM_NAMES.get(pid, f'setting {pid}')} "
                     "Tesserae wrote; it keeps its own."
                 )
                 logger.warning("visionect: sign %s refused a write to TCLV %d", sign.uuid, pid)
@@ -1263,13 +1263,13 @@ class VisionectService:
         if action not in ACTIONS:
             return "Unknown action."
         if not self.running:
-            return "Tesserae isn't listening for signs right now."
+            return "Tesserae isn't listening for Visionect frames right now."
         uuid = self.device_uuid(device_id)
         if not uuid:
-            return "No sign is bound to this device yet."
+            return "No frame is bound to this device yet."
         view = self.sign_view(uuid) or {}
         if not view.get("connected"):
-            return "The sign isn't connected right now (asleep, or between connections); try again when it is."
+            return "The frame isn't connected right now (asleep, or between connections); try again when it is."
         self._call_soon(functools.partial(self._do_action, uuid, action))
         return None
 
@@ -1404,9 +1404,9 @@ class VisionectService:
                 if inflight.kind == "image":
                     sign.retry_at = now + delay
                     sign.last_error = (
-                        "The sign refused a frame while charging; Tesserae retries in 5 minutes."
+                        "The frame refused a picture while charging; Tesserae retries in 5 minutes."
                         if event.charging
-                        else "The sign refused a frame; Tesserae retries in a minute."
+                        else "The frame refused a picture; Tesserae retries in a minute."
                     )
                     level = logging.DEBUG if event.charging else logging.WARNING
                     logger.log(level, "visionect: sign %s refused a frame; retrying", uuid)

@@ -1,9 +1,9 @@
 {
   "tesserae_compat": "1.x",
-  "name": "Visionect sign",
+  "name": "Visionect frame",
   "icon": "frame-corners",
   "version": "0.1.0",
-  "description": "A Visionect e-paper sign (Place & Play 32\", Joan, the 13\" boards) driven directly, with no Visionect Software Suite. The sign dials the server address in its flash on TCP 11113; Tesserae listens there, renders a 16-level grey frame and pushes it over the sign's own protocol (pyvisionect). Point the sign at this host: run Tesserae where the old Visionect server ran, or set the address over the sign's USB console. The protocol has no authentication, so keep port 11113 on your LAN. Leave the UUID blank to bind the first unknown sign that connects within an hour. Quiet hours with sleep-through put the sign into deep sleep until the window ends.",
+  "description": "A Visionect e-paper frame (Place & Play 32\", Joan, the 13\" boards) driven directly, with no Visionect Software Suite. The frame dials the server address in its flash on TCP 11113; Tesserae listens there, renders a 16-level grey picture and pushes it over the frame's own protocol (pyvisionect). Point the frame at this host: run Tesserae where the old Visionect server ran, or set the address over the frame's USB console. The protocol has no authentication, so keep port 11113 on your LAN. Leave the UUID blank to bind the first unknown frame that connects within an hour. Quiet hours with sleep-through put the frame into deep sleep until the window ends.",
   "renderers": ["trmnl_png_gray16"],
   "transport": "push",
   "buttons": false,
@@ -19,16 +19,16 @@
   "config_schema": {
     "uuid": {
       "type": "string",
-      "label": "Sign UUID",
+      "label": "Frame UUID",
       "default": "",
-      "help": "The sign's UUID, e.g. 36002000-1247-3830-3933-303600000000 (on the label, or in the old Visionect server's device list). Leave blank and the first unknown sign that connects within an hour of adding the device (or clearing this field) is bound to it; later ones are listed as discovered devices."
+      "help": "The frame's UUID, e.g. 36002000-1247-3830-3933-303600000000 (on the label, or in the old Visionect server's device list). Leave blank and the first unknown frame that connects within an hour of adding the device (or clearing this field) is bound to it; later ones are listed as discovered devices."
     },
     "heartbeat_min": {
       "type": "select",
       "label": "Check-in interval",
       "default": "",
       "choices": [
-        {"value": "", "label": "Leave as the sign has it"},
+        {"value": "", "label": "Leave as the frame has it"},
         {"value": "1", "label": "Every minute"},
         {"value": "2", "label": "Every 2 minutes"},
         {"value": "5", "label": "Every 5 minutes"},
@@ -37,18 +37,18 @@
         {"value": "30", "label": "Every 30 minutes"},
         {"value": "60", "label": "Every hour"}
       ],
-      "help": "How often the sign reports in (battery, signal, what it shows) between frames. Shorter keeps Home Assistant's sensors fresher and notices a dropped connection sooner, for a little more power. Written to the sign and saved in its flash when it next connects."
+      "help": "How often the frame reports in (battery, signal, what it shows) between pictures. Shorter keeps Home Assistant's sensors fresher and notices a dropped connection sooner, for a little more power. Written to the frame and saved in its flash when it next connects."
     },
-    "sign_sleep": {
+    "frame_sleep": {
       "type": "select",
-      "label": "Sign sleep between check-ins",
+      "label": "Sleep between check-ins",
       "default": "",
       "choices": [
-        {"value": "", "label": "Leave as the sign has it"},
+        {"value": "", "label": "Leave as the frame has it"},
         {"value": "sleep", "label": "Sleep (saves power)"},
         {"value": "awake", "label": "Stay awake"}
       ],
-      "help": "Whether the sign's processor sleeps between check-ins (the sign's sleep-mode setting). Staying awake suits a sign on mains power; sleeping saves battery. Quiet hours' deep sleep is separate. Written to the sign and saved in its flash when it next connects."
+      "help": "Whether the frame's processor sleeps between check-ins (its sleep-mode setting). Staying awake suits a frame on mains power; sleeping saves battery. Quiet hours' deep sleep is separate. Written to the frame and saved in its flash when it next connects."
     }
   }
 }
