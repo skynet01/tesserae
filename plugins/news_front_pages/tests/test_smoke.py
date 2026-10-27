@@ -1643,40 +1643,79 @@ def test_the_log_keeps_only_the_newest_lines() -> None:
     assert state["log"][-1]["text"] == f"line {server.LOG_LINES + 4}"
 
 
-def test_the_downloads_card_sums_up_the_state_and_lists_the_log(tmp_path: Path) -> None:
+def test_the_downloads_card_sums_up_the_state_and_lists_the_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "rasteriser_available", lambda: True)
     at = datetime(2026, 10, 25, 14, 3, 12, tzinfo=UTC).timestamp()
+    for name in ("USAT_20261025.jpg", "NY_NYT_20261025.jpg", "WSJ_20261024.jpg"):
+        _seed(tmp_path, name)  # 700 px: the JPEG fallback
     server._write_json(
         tmp_path / "state.json",
         {
             "log": [
-                {"at": at, "code": "WSJ", "text": "2026-10-25: PDF, 1440×2794 px, 812 KB in 4.2 s"},
+                {
+                    "at": at,
+                    "code": "WSJ",
+                    "text": "2026-10-25: PDF, 1440\u00d72794 px, 812 KB in 4.2 s",
+                },
                 {"at": at + 2, "code": "AZ_ADS", "text": "no page in the last 3 days"},
                 {"at": "soon", "code": "WSJ", "text": "a hand-edited line"},
             ],
             "pdf_retry": {
                 "USAT": {"day": "2026-10-25", "tries": 2, "after": at + 3600},
                 "NY_NYT": {"day": "2026-10-25", "tries": server.PDF_MAX_TRIES, "after": at},
-                "LAT": "junk",
+                # An earlier edition's retry: jobs only redraw today's.
+                "WSJ": {"day": "2026-10-24", "tries": 1, "after": at},
+                # A paper taken off the list.
+                "LAT": {"day": "2026-10-25", "tries": 1, "after": at},
+                "BAD": "junk",
             },
-            "failed": {"AZ_ADS": "missing"},
+            "failed": {"AZ_ADS": "missing", "OLD": "unreachable"},
         },
     )
-    view = server.downloads_view(tmp_path, UTC)
+    listed = ["NY_NYT", "WSJ", "USAT", "AZ_ADS"]
+    view = server.downloads_view(tmp_path, UTC, listed, today=TODAY)
     assert view["status"] == [
         "Last activity Oct 25, 14:03.",
         "Waiting to ask for the PDF again: USAT (try 3 of 6, after 15:03).",
         "Out of PDF tries, keeping the JPG: NY_NYT.",
         "No page yet for AZ_ADS (none in the last 3 days).",
+        "History, no longer acted on: LAT's PDF retry for 2026-10-25, "
+        "WSJ's PDF retry for 2026-10-24, OLD's failed download.",
     ]
     assert view["log"] == [
-        "Oct 25 14:03:12  WSJ     2026-10-25: PDF, 1440×2794 px, 812 KB in 4.2 s",
+        "Oct 25 14:03:12  WSJ     2026-10-25: PDF, 1440\u00d72794 px, 812 KB in 4.2 s",
         "Oct 25 14:03:14  AZ_ADS  no page in the last 3 days",
     ]
-    empty = server.downloads_view(tmp_path / "none", UTC)
+    # Today's page redrawn sharp since: its retry is history too, and with
+    # no rasteriser nothing would ever redraw it.
+    _seed(tmp_path, "USAT_20261025.jpg", _jpeg(1440, 2700))
+    assert "USAT (try" not in " ".join(
+        server.downloads_view(tmp_path, UTC, listed, today=TODAY)["status"]
+    )
+    monkeypatch.setattr(server, "rasteriser_available", lambda: False)
+    status = server.downloads_view(tmp_path, UTC, listed, today=TODAY)["status"]
+    assert not any(line.startswith(("Waiting", "Out of")) for line in status)
+    empty = server.downloads_view(tmp_path / "none", UTC, today=TODAY)
     assert empty == {
         "status": ["Nothing downloaded yet: a render that needs a page asks for it."],
         "log": [],
     }
+
+
+@needs_pdfium
+def test_an_earlier_editions_jpeg_gets_no_pdf_retry(tmp_path: Path, pdf: FakeCdn) -> None:
+    """Today's paper isn't out, yesterday's JPEG is kept: only today's edition
+    is ever redrawn, so no retry is recorded or promised for yesterday's."""
+    pdf.pages = {_url("WSJ", 24): PAGE}
+    assert _fetch_settled(tmp_path, paper="WSJ")["date"] == "2026-10-24"
+    assert "WSJ" not in _state(tmp_path).get("pdf_retry", {})
+    assert _log(tmp_path)[-1] == (
+        "WSJ 2026-10-24: keeping the JPG, an earlier edition's PDF isn't asked for again"
+    )
+    status = server.downloads_view(tmp_path, None, ["WSJ"], today=TODAY)["status"]
+    assert not any("PDF again" in line for line in status)
 
 
 def test_the_admin_page_is_newspapers_and_shows_the_log(app: Flask, client: FlaskClient) -> None:

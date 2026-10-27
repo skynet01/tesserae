@@ -1432,7 +1432,12 @@ def _refresh(data_dir: Path, job: _Job) -> None:
             and isinstance(entry.get("day"), str)
             and entry["day"] >= oldest
         }
-        if blurry_day is not None:
+        if blurry_day is not None and blurry_day < job.today:
+            # Only today's edition is ever redrawn (_wants_sharper runs for
+            # today's page), so an earlier one gets no retry record.
+            retry.pop(job.code, None)
+            note(f"{blurry_day}: keeping the JPG, an earlier edition's PDF isn't asked for again")
+        elif blurry_day is not None:
             tries = _pdf_retry(state, job.code, blurry_day)[0] + 1
             wait = min(PDF_RETRY_S * 2 ** min(tries - 1, 16), PDF_RETRY_MAX_S)
             retry[job.code] = {"day": blurry_day.isoformat(), "tries": tries, "after": now + wait}
@@ -1781,10 +1786,19 @@ def _timezone() -> tzinfo | None:
         return None
 
 
-def downloads_view(data_dir: Path, tz: tzinfo | None) -> dict[str, Any]:
+def downloads_view(
+    data_dir: Path,
+    tz: tzinfo | None,
+    papers: list[str] | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
     """The admin page's Downloads card: what the worker is doing now, the
-    PDF retries it has waiting and the papers it has no page for (one
-    sentence each), and its log, oldest line first."""
+    PDF retries that will really run (today's edition of a listed paper,
+    still on its JPEG, with a rasteriser to draw the PDF) or have run out,
+    the listed papers with no page, and its log, oldest line first. Records
+    the worker no longer acts on (an earlier edition's retry, a paper taken
+    off the list) are summed up as history. ``papers`` are the codes in the
+    setting; None counts every code the state names."""
 
     def when(ts: float, fmt: str) -> str:
         try:
@@ -1792,8 +1806,11 @@ def downloads_view(data_dir: Path, tz: tzinfo | None) -> dict[str, Any]:
         except (OverflowError, OSError, ValueError):  # a hand-edited state file
             return "?"
 
+    today = today or _edition_today()
+    pages = data_dir / PAGES_DIR
     state = _read_json(data_dir / STATE_FILE)
     entries = _log_entries(state.get("log"))
+    listed = set(papers) if papers is not None else None
     status: list[str] = []
     line, _ = _line(data_dir)
     if line:
@@ -1803,35 +1820,48 @@ def downloads_view(data_dir: Path, tz: tzinfo | None) -> dict[str, Any]:
         status.append(f"Last activity {when(entries[-1]['at'], '%b %d, %H:%M')}.")
     else:
         status.append("Nothing downloaded yet: a render that needs a page asks for it.")
-    retries, spent = [], []
+    waiting, spent, history = [], [], []
     for code, entry in sorted(_section(state, "pdf_retry").items()):
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or not isinstance(entry.get("day"), str):
             continue
         tries, after = entry.get("tries"), entry.get("after")
         if isinstance(tries, bool) or not isinstance(tries, int):
             continue
         if not isinstance(after, (int, float)):
             continue
-        if tries < PDF_MAX_TRIES:
-            retries.append(
+        current = (
+            entry["day"] == today.isoformat()
+            and (listed is None or code in listed)
+            and rasteriser_available()
+            and (_saved_width(edition_path(pages, code, today)) or SHARP_MIN_WIDTH_PX)
+            < SHARP_MIN_WIDTH_PX
+        )
+        if not current:
+            history.append(f"{code}'s PDF retry for {entry['day']}")
+        elif tries < PDF_MAX_TRIES:
+            waiting.append(
                 f"{code} (try {tries + 1} of {PDF_MAX_TRIES}, after {when(after, '%H:%M')})"
             )
         else:
             spent.append(code)
-    if retries:
-        status.append(f"Waiting to ask for the PDF again: {', '.join(retries)}.")
+    if waiting:
+        status.append(f"Waiting to ask for the PDF again: {', '.join(waiting)}.")
     if spent:
         status.append(f"Out of PDF tries, keeping the JPG: {', '.join(spent)}.")
     reasons = {
         "unreachable": "Freedom Forum unreachable",
         "missing": f"none in the last {LOOKBACK_DAYS} days",
     }
-    failed = [
-        f"{code} ({reasons.get(str(why), str(why))})"
-        for code, why in sorted(_section(state, "failed").items())
-    ]
+    failed = []
+    for code, why in sorted(_section(state, "failed").items()):
+        if listed is None or code in listed:
+            failed.append(f"{code} ({reasons.get(str(why), str(why))})")
+        else:
+            history.append(f"{code}'s failed download")
     if failed:
         status.append(f"No page yet for {', '.join(failed)}.")
+    if history:
+        status.append(f"History, no longer acted on: {', '.join(history)}.")
     width = max((len(e["code"]) for e in entries), default=0)
     log = [
         f"{when(e['at'], '%b %d %H:%M:%S')}  {e['code'] or '-':<{width}}  {e['text']}"
@@ -1876,7 +1906,11 @@ def blueprint() -> Blueprint:
         return render_template(
             "news_front_pages/index.html",
             section=section,
-            downloads=downloads_view(Path(plugin.data_dir), _timezone()),
+            downloads=downloads_view(
+                Path(plugin.data_dir),
+                _timezone(),
+                [p.code for p in parse_papers(_settings().get("papers", DEFAULT_PAPERS))],
+            ),
         )
 
     @bp.get("/page/<name>")
