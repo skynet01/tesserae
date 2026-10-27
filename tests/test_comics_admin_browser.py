@@ -1,5 +1,5 @@
 """The Comics admin page in a live Chromium: it fits light, dark and phone
-widths, the settings fold and the strip rows open, and Import URL sends the
+widths, the strip rows open, and Import URL sends the
 address as typed (the page's own script) and turns the strip manual."""
 
 from __future__ import annotations
@@ -84,7 +84,6 @@ def test_comics_admin_fits_and_imports_the_typed_url(
             page.goto(f"{base}/plugins/comics_daily/", wait_until="networkidle")
             assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             card = page.locator("#plugin-comics_daily")
-            card.locator("summary.dx-section-head").click()
             rows = card.locator("[data-repeater-row]")
             assert rows.count() == 4
             rows.nth(1).locator("[data-repeater-open]").click()
@@ -125,7 +124,6 @@ def test_discard_brings_rows_back_with_their_extras(live: tuple[str, Flask]) -> 
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.goto(f"{base}/plugins/comics_daily/", wait_until="networkidle")
         card = page.locator("#plugin-comics_daily")
-        card.locator("summary.dx-section-head").click()
         rows = card.locator("[data-repeater-row]")
         slugs = lambda: [  # noqa: E731
             rows.nth(i).locator('[data-repeater-key="slug"]').input_value()
@@ -149,6 +147,41 @@ def test_discard_brings_rows_back_with_their_extras(live: tuple[str, Flask]) -> 
         rows.nth(1).locator("[data-repeater-open]").click()
         assert rows.nth(1).locator('[data-repeater-key="image_url"]').is_visible()
         browser.close()
+
+
+def test_far_side_panels_save_through_the_one_form(live: tuple[str, Flask]) -> None:
+    """Picking a panel count shows the save bar and saves with the rest;
+    typing cookies doesn't count as a settings change; the log opens on
+    its newest line."""
+    from playwright.sync_api import sync_playwright
+
+    base, app = live
+    plugin = app.config["PLUGIN_REGISTRY"].get("comics_daily")
+    store = plugin.server_module.images.Store(Path(plugin.data_dir))
+    for n in range(40):
+        store.append_log({"at": 1.0e9 + n, "source": "Garfield", "outcome": "ok", "text": f"n{n}"})
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{base}/plugins/comics_daily/", wait_until="networkidle")
+        bar = page.locator("[data-save-bar]")
+        log = page.locator(".cx-log")
+        assert log.evaluate("el => el.scrollHeight - el.scrollTop - el.clientHeight < 2")
+        page.locator("#cookies details").evaluate("d => { d.open = true; }")
+        page.locator("#cx-cookies").fill("session=1")
+        assert bar.is_hidden()
+        page.locator("#farside").get_by_text("2", exact=True).click()
+        assert bar.is_visible()
+        with page.expect_navigation():
+            bar.locator(".dx-save-bar-save").click()
+        page.wait_for_load_state("networkidle")
+        assert page.locator('input[name="far_side_count"][value="2"]').is_checked()
+        browser.close()
+    values = app.config["SETTINGS_STORE"].get_for_runtime(
+        "plugins", plugin.id, plugin.manifest["settings"]
+    )
+    assert values["far_side_count"] == 2
+    assert [r["slug"] for r in values["strips"]][:2] == ["dilbert", "garfield"]
 
 
 def _seed_strip(app: Flask) -> None:

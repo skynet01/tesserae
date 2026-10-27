@@ -183,10 +183,10 @@ def test_pollinations_url_uses_the_short_prompt(fake_net: FakeNet) -> None:
     parts = urllib.parse.urlsplit(call.url)
     prompt = urllib.parse.unquote(parts.path.removeprefix("/image/"))
     assert len(prompt) <= painters.SHORT_PROMPT_CHARS and prompt.endswith("...")
-    assert prompt.startswith("Far Side-style black and white ink comic")
+    assert prompt.startswith("Single-panel Far Side-style black and white ink gag cartoon")
     assert urllib.parse.parse_qs(parts.query) == {
-        "width": ["768"],
-        "height": ["1440"],
+        "width": ["784"],
+        "height": ["1408"],
         "model": ["flux"],
         "nologo": ["true"],
         "enhance": ["false"],
@@ -205,8 +205,8 @@ def test_huggingface_router_request(fake_net: FakeNet) -> None:
     )
     assert call.headers["Authorization"] == "Bearer hf-key"
     body = call.json()
-    assert body["parameters"] == {"width": 768, "height": 1440}
-    assert body["inputs"].startswith("Far Side-style")
+    assert body["parameters"] == {"width": 784, "height": 1408}
+    assert body["inputs"].startswith("Single-panel Far Side-style")
 
 
 def test_responses_that_are_not_pictures_are_rejected(fake_net: FakeNet) -> None:
@@ -269,13 +269,103 @@ def test_request_timeouts_shrink_with_the_budget(fake_net: FakeNet) -> None:
 
 def test_prompts() -> None:
     detailed, short = painters.prompts("Title", "Summary", "")
-    assert (
-        detailed.startswith("Single-panel Far Side-style") and "Topic: Title. Summary." in detailed
-    )
+    assert detailed.startswith("A single-panel gag cartoon in the style of Gary Larson's")
+    assert "Headline: Title\nStory: Summary\n" in detailed
+    assert "Tall portrait (9:16) picture that fills the whole canvas" in detailed
+    assert "{" not in detailed
     assert short == (
-        "Far Side-style black and white ink comic, crosshatching, bold outlines. Title. Summary. "
-        "No content in bottom 25% or near edges."
+        "Single-panel Far Side-style black and white ink gag cartoon, one visual joke, no text, "
+        "crosshatching, bold outlines, plain ground at the bottom. Title. Summary"
     )
+
+
+def test_a_custom_prompt_gets_the_shape() -> None:
+    detailed, _ = painters.prompts("T", "S", "{title} / {summary} / {shape}", "16:9")
+    assert detailed == "T / S / Wide landscape (16:9)"
+
+
+@pytest.mark.parametrize(
+    ("w", "h", "aspect"),
+    [
+        (1440, 2560, "9:16"),
+        (1600, 1200, "4:3"),
+        (800, 480, "16:9"),
+        (1200, 1200, "1:1"),
+        (1872, 1404, "4:3"),
+        (2560, 1080, "21:9"),
+        (0, 100, "9:16"),
+    ],
+)
+def test_nearest_aspect(w: int, h: int, aspect: str) -> None:
+    assert painters.nearest_aspect(w, h) == aspect
+
+
+def test_flux_sizes_follow_the_shape() -> None:
+    for aspect in painters.ASPECTS:
+        width, height = painters.flux_size(aspect)
+        assert width % 16 == 0 and height % 16 == 0
+        assert abs(width * height - painters.FLUX_PIXELS) / painters.FLUX_PIXELS < 0.05
+        want = painters._ratio(aspect)
+        assert abs(width / height - want) / want < 0.03
+
+
+def test_the_shape_reaches_every_provider(fake_net: FakeNet) -> None:
+    import dataclasses
+
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"code": 401, "msg": "no"}, 401))
+    fake_net.on(painters.GEMINI_URL.split("{")[0], ok_json({"error": {"message": "no"}}, 400))
+    fake_net.on(painters.POLLINATIONS_URL, ok("<html>no</html>"))
+    fake_net.on(painters.HUGGINGFACE_URL, ok(picture(1024, 768), "image/jpeg"))
+    settings = dataclasses.replace(_settings(*painters.PROVIDERS), aspect="4:3", image_prompt="")
+    got, _log = _paint(settings)
+    assert got is not None and got.provider == "huggingface" and got.size == (1024, 768)
+    kie = fake_net.to(painters.KIE_CREATE_URL)[0].json()
+    assert kie["input"]["image_size"] == "4:3"
+    gemini = fake_net.to(painters.GEMINI_URL.split("{")[0])[0].json()
+    assert gemini["generationConfig"]["imageConfig"]["aspectRatio"] == "4:3"
+    assert "Landscape (4:3)" in gemini["contents"][0]["parts"][0]["text"]
+    pol = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(fake_net.to(painters.POLLINATIONS_URL)[0].url).query
+    )
+    assert (pol["width"], pol["height"]) == (
+        [str(painters.flux_size("4:3")[0])],
+        [str(painters.flux_size("4:3")[1])],
+    )
+    hf = fake_net.to(painters.HUGGINGFACE_URL)[0].json()
+    assert (hf["parameters"]["width"], hf["parameters"]["height"]) == painters.flux_size("4:3")
+
+
+def test_gemini_reports_its_tokens(fake_net: FakeNet) -> None:
+    data = base64.b64encode(picture()).decode()
+    fake_net.on(
+        painters.GEMINI_URL.split("{")[0],
+        ok_json(
+            {
+                "candidates": [{"content": {"parts": [{"inlineData": {"data": data}}]}}],
+                "usageMetadata": {
+                    "promptTokenCount": 300,
+                    "candidatesTokenCount": 1290,
+                    "totalTokenCount": 1590,
+                },
+            }
+        ),
+    )
+    got, log = _paint(_settings("gemini"))
+    assert got is not None and got.usage == {"tokens": 1590}
+    assert any(line.endswith("picture, 1,590 tokens") for line in log)
+
+
+def test_kie_balance(fake_net: FakeNet) -> None:
+    fake_net.on(painters.KIE_CREDIT_URL, ok_json({"code": 200, "msg": "success", "data": 1180.5}))
+    assert painters.kie_balance("kie-key") == 1180.5
+    assert fake_net.calls[-1].headers["Authorization"] == "Bearer kie-key"
+    assert painters.kie_balance("") is None
+    fake_net.routes.clear()
+    fake_net.on(painters.KIE_CREDIT_URL, ok_json({"code": 401, "msg": "bad key"}, 401))
+    assert painters.kie_balance("kie-key") is None
+    fake_net.routes.clear()
+    fake_net.on(painters.KIE_CREDIT_URL, ok_json({"data": "lots"}))
+    assert painters.kie_balance("kie-key") is None
 
 
 def _kie_paint(

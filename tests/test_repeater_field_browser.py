@@ -341,10 +341,10 @@ def test_newspaper_rows_expand_toggle_validate_and_save(live):
 
 
 @pytest.mark.parametrize("live", ["news"], indirect=True)
-def test_ai_news_settings_fold_above_the_log(live):
-    """AI news: the settings card sits right above Last run, folded; it
-    opens from its head, keeps the save bar when folded again with unsaved
-    changes, and a save comes back to it open."""
+def test_ai_news_settings_save_and_come_back(live):
+    """AI news: the settings sit under Last run, open; an edit shows the save
+    bar, and a save comes back to the settings. (The page's own controls are
+    tested in plugins/news_illustrated/tests/test_admin_browser.py.)"""
     from playwright.sync_api import sync_playwright
 
     base, app = live
@@ -359,28 +359,21 @@ def test_ai_news_settings_fold_above_the_log(live):
         errors = []
         page.on("pageerror", lambda err: errors.append(str(err)))
         page.goto(f"{base}/plugins/news_illustrated/", wait_until="networkidle")
-        ids = page.locator(".settings-section-list > section").evaluate_all(
-            "els => els.map((el) => el.id)"
+        ids = page.evaluate(
+            "[...document.querySelector('.settings-section-list').children].map((el) => el.id)"
         )
-        assert ids[-2:] == ["plugin-news_illustrated", "last-run"]
-        card = page.locator("#plugin-news_illustrated")
-        sources = card.locator('[name="sources"]')
-        head = card.locator("summary.dx-section-head")
-        assert sources.is_hidden()
-        head.focus()
-        page.keyboard.press("Enter")
+        assert ids == ["stories", "last-run", "plugin-news_illustrated"]
+        form = page.locator("#plugin-news_illustrated")
+        sources = form.locator('[name="sources"]')
         assert sources.is_visible()
+        bar = form.locator("[data-save-bar]")
+        assert bar.is_hidden()
         sources.fill("Local | https://example.test/rss")
-        bar = card.locator("[data-save-bar]")
         assert bar.is_visible()
-        head.click()
-        assert sources.is_hidden()
-        assert bar.is_visible()  # unsaved changes are never folded away
         with page.expect_navigation():
             bar.locator(".dx-save-bar-save").click()
         page.wait_for_load_state("networkidle")
         assert page.url.endswith("#plugin-news_illustrated")
-        assert page.locator('#plugin-news_illustrated [name="sources"]').is_visible()
         # The log opens on its newest lines.
         page.locator("#last-run .dx-disclosure summary").click()
         assert page.locator("#last-run pre[data-log-tail]").is_visible()
@@ -494,9 +487,9 @@ def test_newspaper_rows_move_remove_and_discard_around_closed_rows(live):
 
 
 @pytest.mark.parametrize("live", ["news"], indirect=True)
-def test_ai_news_fold_opens_on_an_invalid_field(live):
-    """A field that fails validation inside the folded settings opens the
-    fold, so the browser can show and focus it; once fixed, the save goes."""
+def test_ai_news_invalid_field_is_shown_before_saving(live):
+    """A field that fails validation stops the save and gets the focus; once
+    fixed, the save goes."""
     from playwright.sync_api import sync_playwright
 
     base, app = live
@@ -504,20 +497,15 @@ def test_ai_news_fold_opens_on_an_invalid_field(live):
         browser = p.chromium.launch()
         page = browser.new_page(viewport={"width": 1280, "height": 900})
         page.goto(f"{base}/plugins/news_illustrated/", wait_until="networkidle")
-        card = page.locator("#plugin-news_illustrated")
-        head = card.locator("summary.dx-section-head")
-        words = card.locator('[name="summary_words"]')
-        head.click()
+        form = page.locator("#plugin-news_illustrated")
+        words = form.locator('[name="summary_words"]')
         words.fill("5")  # under the field's minimum
-        head.click()
-        assert words.is_hidden()
-        card.locator(".dx-save-bar-save").click()
+        form.locator(".dx-save-bar-save").click()
         page.wait_for_timeout(200)
-        assert words.is_visible()
         assert words.evaluate("el => el === document.activeElement && !el.validity.valid")
         words.fill("60")
         with page.expect_navigation():
-            card.locator(".dx-save-bar-save").click()
+            form.locator(".dx-save-bar-save").click()
         browser.close()
     plugin = app.config["PLUGIN_REGISTRY"].get("news_illustrated")
     saved = app.config["SETTINGS_STORE"].get_for_runtime(
@@ -530,7 +518,8 @@ def test_ai_news_fold_opens_on_an_invalid_field(live):
 def test_news_admin_pages_work_without_javascript(live):
     """No scripts: every paper's fields show (rows can't be folded), the
     page says the list needs JavaScript, and each settings card has a plain
-    Save button; the AI news fold is a native disclosure and saves."""
+    Save button; the AI news settings save without scripts too (the
+    provider order keeps its saved value)."""
     from playwright.sync_api import sync_playwright
 
     base, app = live
@@ -554,8 +543,6 @@ def test_news_admin_pages_work_without_javascript(live):
         page.goto(f"{base}/plugins/news_illustrated/", wait_until="networkidle")
         ai = page.locator("#plugin-news_illustrated")
         sources = ai.locator('[name="sources"]')
-        assert sources.is_hidden()
-        ai.locator("summary.dx-section-head").click()
         sources.fill("Local | https://example.test/rss")
         with page.expect_navigation():
             ai.locator("noscript button[type=submit]").click()
@@ -567,3 +554,4 @@ def test_news_admin_pages_work_without_javascript(live):
         "plugins", plugin.id, plugin.manifest["settings"]
     )
     assert saved["sources"] == "Local | https://example.test/rss"
+    assert saved["provider_order"] == "kie, gemini, pollinations, huggingface"

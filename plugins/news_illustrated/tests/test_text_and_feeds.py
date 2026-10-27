@@ -1,6 +1,9 @@
-"""Text normalisation, feed parsing and the article fetch with its paywall fallback."""
+"""Text normalisation, feed parsing (broken and hostile feeds included) and the
+article fetch with its paywall fallback."""
 
 from __future__ import annotations
+
+import pytest
 
 from plugins.news_illustrated import feeds, net, text
 from plugins.news_illustrated.tests.fakes import FakeNet, article_page, ok, rss
@@ -81,7 +84,7 @@ def test_feed_failing_twice_gives_nothing(fake_net: FakeNet) -> None:
     log: list[str] = []
     assert feeds.newest_item(feed, log.append, sleep=lambda s: None) is None
     assert len(fake_net.to(feed)) == 2
-    assert any("no story in the feed" in line for line in log)
+    assert any("the address is a web page, not a feed" in line for line in log)
 
 
 def _item(description: str = "The short feed description of the story.") -> feeds.Item:
@@ -176,3 +179,76 @@ def test_keys_with_whitespace_or_control_characters_are_not_clean() -> None:
     assert not text.is_clean_key("gsk_abc\nheader: x")
     assert not text.is_clean_key("two words")
     assert not text.is_clean_key("bell\x07")
+
+
+# ----------------------------------------------------------------------
+# Feeds that are broken, hostile or unreachable never raise
+
+
+def test_rss_1_rdf_feeds_are_read() -> None:
+    body = b"""<?xml version="1.0"?>
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xmlns="http://purl.org/rss/1.0/">
+  <channel><title>Feed</title></channel>
+  <item><title>RDF story</title><link>https://example.com/rdf</link>
+    <description>&lt;p&gt;Said so.&lt;/p&gt;</description></item>
+</rdf:RDF>"""
+    assert feeds.parse_first_item(body) == feeds.Item(
+        "RDF story", "https://example.com/rdf", "Said so."
+    )
+
+
+BAD_FEEDS = {
+    "truncated": (b"<?xml version='1.0'?><rss><channel><item><title>Half", "not valid XML"),
+    "garbage": (b"\x00\xff\xfe not xml at all", "not valid XML"),
+    "html page": (b"<!DOCTYPE html><html><body><p>Hi<br></body></html>", "a web page"),
+    "other xml": (
+        b"<?xml version='1.0'?><opml><body/></opml>",
+        "not an RSS or Atom feed (it starts with <opml>)",
+    ),
+    "empty feed": (b"<rss><channel><title>Nothing</title></channel></rss>", "no stories"),
+    "blank": (b"   ", "answered with nothing"),
+    "entities": (
+        b'<?xml version="1.0"?><!DOCTYPE lolz [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;">]>'
+        b"<rss><channel><item><title>&lol2;</title></item></channel></rss>",
+        "refused for safety",
+    ),
+    "external entity": (
+        b'<?xml version="1.0"?><!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]>'
+        b"<rss><channel><item><title>&x;</title></item></channel></rss>",
+        "refused for safety",
+    ),
+    "unknown encoding": (b'<?xml version="1.0" encoding="x-klingon"?><rss/>', "not valid XML"),
+}
+
+
+@pytest.mark.parametrize("name", list(BAD_FEEDS))
+def test_a_bad_feed_is_no_story_with_the_reason(fake_net: FakeNet, name: str) -> None:
+    body, reason = BAD_FEEDS[name]
+    assert feeds.parse_first_item(body) is None
+    assert reason in feeds.why_no_item(body)
+    url = "https://feeds.example.com/bad.xml"
+    fake_net.on(url, ok(body, "application/xml"))
+    log: list[str] = []
+    assert feeds.newest_item(url, log.append, sleep=lambda s: None) is None
+    assert sum(reason in line for line in log) == 2  # both attempts say why
+
+
+def test_an_unreachable_feed_is_no_story(fake_net: FakeNet) -> None:
+    log: list[str] = []
+    # No route: the fake answers like a dead host (status 0).
+    assert (
+        feeds.newest_item("https://gone.example.com/rss", log.append, sleep=lambda s: None) is None
+    )
+    assert len(log) == 2 and all("failed" in line for line in log)
+
+
+def test_a_parser_crash_is_caught(fake_net: FakeNet, monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(body: bytes, base_url: str = "") -> None:
+        raise RecursionError("deep")
+
+    monkeypatch.setattr(feeds, "parse_first_item", boom)
+    url = "https://feeds.example.com/deep.xml"
+    fake_net.on(url, ok(rss("x", "https://example.com/x"), "text/xml"))
+    log: list[str] = []
+    assert feeds.newest_item(url, log.append, sleep=lambda s: None) is None
+    assert any("could not read it (RecursionError)" in line for line in log)

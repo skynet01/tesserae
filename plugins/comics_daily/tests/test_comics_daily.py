@@ -1022,7 +1022,7 @@ def test_add_a_gocomics_strip_checks_it_and_fetches_it(
     client.get("/plugins/comics_daily/")
     _peanuts_routes(web)
     resp = client.post("/plugins/comics_daily/strips/add", data={"strip": f"{GC}/peanuts"})
-    assert resp.location == "/plugins/comics_daily/#plugin-comics_daily"
+    assert resp.location == "/plugins/comics_daily/#gocomics"
     rows = _settings(client)["strips"]
     assert rows[-1] == {
         "enabled": True,
@@ -1292,11 +1292,40 @@ def test_the_admin_page_shows_the_log(client: FlaskClient) -> None:
     body = client.get("/plugins/comics_daily/").get_data(as_text=True)
     log = body[body.index('id="log"') :]
     assert "data-log-tail" in log
-    assert re.search(r"Garfield\s+BLOCKED\s+nope &lt;b&gt;", log)
-    # The settings sit right above the log, folded.
+    # Shown open, a row per entry, a problem marked as one.
+    assert "<details" not in log[: log.index("</section>")]
+    assert re.search(
+        r'cx-log-line--bad">.*?>Garfield<.*?>BLOCKED<.*?>nope &lt;b&gt;<', log, re.DOTALL
+    )
+    # The settings sit between today's comics and the log.
     settings = body.index('id="plugin-comics_daily"')
     assert body.index('id="today"') < settings < body.index('id="log"')
-    assert '<details class="dx-section-fold" data-fold>' in body[settings:]
+
+
+def test_the_settings_are_one_form_over_a_card_per_source(client: FlaskClient) -> None:
+    """The Far Side, GoComics (strips and cookies) and Layout cards are one
+    form: every setting is drawn in it once, the cookies and strip tools
+    post forms of their own, and the cookies sit inside GoComics."""
+    client.get("/plugins/comics_daily/")
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    start = body.index('<form method="post" action="/settings/plugin-comics_daily"')
+    form = body[start : body.index("</form>", start)]
+    assert "<form" not in form[5:]  # nothing nested
+    assert form.index('id="farside"') < form.index('id="gocomics"') < form.index('id="layout"')
+    gocomics = form[form.index('id="gocomics"') : form.index('id="layout"')]
+    assert 'id="cookies"' in gocomics and "Get cookies.txt Locally" in gocomics
+    assert "free GoComics account" in gocomics
+    assert 'name="cookies"' in gocomics and 'form="cx-cookie-form"' in gocomics
+    assert body.count('id="cookies"') == 1
+    plugin = client.application.config["PLUGIN_REGISTRY"].get("comics_daily")
+    for field in plugin.manifest["settings"]:
+        assert f'name="{field["name"]}"' in form, field["name"]
+    # Panels is a choice of 1 to 4, the saved one picked.
+    radios = re.findall(r'name="far_side_count" value="(\d)"( checked)?', form)
+    assert [n for n, _ in radios] == ["1", "2", "3", "4"]
+    assert [n for n, on in radios if on] == ["4"]
+    # One save bar.
+    assert form.count("data-save-bar") == 1
 
 
 # -- GoComics cookies pasted on the Comics page --------------------------------

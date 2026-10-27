@@ -1,7 +1,8 @@
 """The story behind each illustration: a feed's newest item and its article text.
 
-Feeds are RSS 2.0 or Atom 1.0, parsed with defusedxml since the XML comes
-from anywhere. The article page is read best-effort with a short timeout: a
+Feeds are RSS 2.0, RSS 1.0 (RDF) or Atom 1.0, parsed with defusedxml since
+the XML comes from anywhere. A feed that is not XML, or XML of another kind,
+never raises: it is no story, with the reason in the run log. The article page is read best-effort with a short timeout: a
 paywall or a bot check answers with a challenge page instead of the story,
 so those (and every failure) fall back to the feed's own description.
 """
@@ -46,6 +47,8 @@ _SKIPPED_TAGS = frozenset(
     {"script", "style", "noscript", "nav", "header", "footer", "aside", "iframe", "form", "svg"}
 )
 _ATOM = "{http://www.w3.org/2005/Atom}"
+_RDF = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}RDF"
+_RSS1 = "{http://purl.org/rss/1.0/}"
 _XML_BASE = "{http://www.w3.org/XML/1998/namespace}base"
 _FEED_ACCEPT = "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.5"
 
@@ -82,10 +85,16 @@ def newest_item(
         if not reply.ok:
             log(f"Feed attempt {attempt} failed: {reply.reason()}")
         else:
-            item = parse_first_item(reply.body, base_url=url)
+            try:
+                item = parse_first_item(reply.body, base_url=url)
+            except Exception as err:  # a feed must never cost the run
+                item = None
+                log(f"Feed attempt {attempt}: could not read it ({type(err).__name__})")
+            else:
+                if item is None:
+                    log(f"Feed attempt {attempt}: {why_no_item(reply.body)}")
             if item is not None:
                 return item
-            log(f"Feed attempt {attempt}: no story in the feed (not RSS or Atom?)")
         if attempt == 1:
             sleep(FEED_RETRY_PAUSE_S)
     return None
@@ -107,6 +116,13 @@ def parse_first_item(body: bytes, base_url: str = "") -> Item | None:
         title = _child_text(node, "title")
         link = urljoin(base, _child_text(node, "link").strip())
         description = _child_text(node, "description")
+    elif root.tag == _RDF:
+        node = root.find(f"{_RSS1}item")
+        if node is None:
+            return None
+        title = _child_text(node, f"{_RSS1}title")
+        link = urljoin(base, _child_text(node, f"{_RSS1}link").strip())
+        description = _child_text(node, f"{_RSS1}description")
     elif root.tag == f"{_ATOM}feed":
         node = root.find(f"{_ATOM}entry")
         if node is None:
@@ -125,6 +141,29 @@ def parse_first_item(body: bytes, base_url: str = "") -> Item | None:
     if not title:
         return None
     return Item(title=title, link=link.strip(), description=text.clean_description(description))
+
+
+def why_no_item(body: bytes) -> str:
+    """Why ``body`` gave no story, in words for the run log."""
+    if not body.strip():
+        return "the feed address answered with nothing"
+    try:
+        root = fromstring(body)
+    except DefusedXmlException:
+        return "the feed uses XML features that are refused for safety"
+    except (ParseError, ValueError, LookupError) as err:
+        where = getattr(err, "position", None)
+        at = f" (line {where[0]}, column {where[1]})" if isinstance(where, tuple) else ""
+        head = body[:200].lstrip().lower()
+        if head.startswith((b"<!doctype html", b"<html")):
+            return "the address is a web page, not a feed"
+        return f"the feed is not valid XML{at}"
+    tag = root.tag.rpartition("}")[2] if isinstance(root.tag, str) else "?"
+    if root.tag in ("rss", _RDF, f"{_ATOM}feed"):
+        return "the feed has no stories in it"
+    if tag.lower() == "html":
+        return "the address is a web page, not a feed"
+    return f"not an RSS or Atom feed (it starts with <{tag[:30]}>)"
 
 
 def article(item: Item, log: Callable[[str], None]) -> Article:

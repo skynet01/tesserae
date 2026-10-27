@@ -23,7 +23,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
@@ -40,7 +40,7 @@ except ImportError:  # a Tesserae without the job tray
 logger = logging.getLogger(__name__)
 
 PLUGIN_ID = "news_illustrated"
-LABEL = "News, AI Illustrated"
+LABEL = "AI Illustrated News"
 DEFAULT_SOURCES = (
     "Tech | https://hnrss.org/frontpage?points=100\n"
     "Business | https://feeds.bbci.co.uk/news/business/rss.xml\n"
@@ -59,6 +59,10 @@ RUN_HISTORY = 30
 LOG_LINES = 200
 # While a paid picture waits to be collected, a run comes round this often.
 COLLECT_EVERY_S = 10 * 60
+# Who writes the summaries: Groq, or nobody (the article's opening words).
+SUMMARY_SERVICES = ("groq", "off")
+# "auto" draws pictures the shape of the frames that show them.
+IMAGE_SHAPES = ("auto", *painters.ASPECTS)
 
 
 # ----------------------------------------------------------------------
@@ -88,6 +92,8 @@ class Config:
     summary_words: int = DEFAULT_WORDS
     summary_prompt: str = ""
     run_at: str = DEFAULT_RUN_AT
+    summary_service: str = "groq"
+    image_shape: str = "auto"
     paint: painters.Settings = field(default_factory=lambda: painters.Settings(keys={}))
     # Every key as configured, for scrubbing anything logged or saved.
     secrets: tuple[str, ...] = field(default=(), repr=False)
@@ -114,16 +120,22 @@ class Config:
 
         keys = {name: key(f"{name}_api_key") for name in painters.PROVIDERS}
         groq_key = key("groq_api_key")
+        # Absent is the default list; saved blank means no sources at all.
+        raw_sources = (
+            DEFAULT_SOURCES if settings.get("sources") is None else str(settings["sources"])
+        )
+        problems.extend(source_problems(raw_sources))
+        service = get("summary_service", "groq").lower()
+        shape = get("image_shape", "auto")
         return cls(
-            # Absent is the default list; saved blank means no sources at all.
-            sources=parse_sources(
-                DEFAULT_SOURCES if settings.get("sources") is None else str(settings["sources"])
-            ),
+            sources=parse_sources(raw_sources),
             groq_key=groq_key,
             groq_model=get("groq_model", "openai/gpt-oss-120b"),
             summary_words=_whole(settings.get("summary_words"), DEFAULT_WORDS, 10, 300),
             summary_prompt=get("summary_prompt"),
             run_at=parse_run_at(get("run_at", DEFAULT_RUN_AT)),
+            summary_service=service if service in SUMMARY_SERVICES else "groq",
+            image_shape=shape if shape in IMAGE_SHAPES else "auto",
             paint=painters.Settings(
                 keys=keys,
                 order=parse_order(get("provider_order")),
@@ -141,6 +153,11 @@ class Config:
     def painters_ready(self) -> list[str]:
         """The providers in the cascade that have a key."""
         return [p for p in self.paint.order if self.paint.keys.get(p)]
+
+    @property
+    def summary_key(self) -> str:
+        """The key summaries are written with; "" when they are not."""
+        return self.groq_key if self.summary_service == "groq" else ""
 
 
 def parse_sources(raw: str) -> tuple[Source, ...]:
@@ -160,11 +177,44 @@ def parse_sources(raw: str) -> tuple[Source, ...]:
     return tuple(out)
 
 
+def source_problems(raw: str) -> list[str]:
+    """Each line of the Sources setting that is not used, and why, in words
+    for the run log and the widget's page."""
+    out: list[str] = []
+    for number, line in enumerate(raw.splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        _label, sep, url = line.rpartition("|")
+        url = url.strip() if sep else line
+        if not url.startswith(("http://", "https://")):
+            shown = url if len(url) <= 60 else url[:57] + "..."
+            out.append(
+                f"Sources line {number} is skipped: {shown or 'nothing'!r} is not an "
+                "http(s) feed address"
+            )
+    return out
+
+
 def parse_order(raw: str) -> tuple[str, ...]:
     """Provider names separated by commas or spaces, unknown ones dropped;
-    the default order when nothing usable is left."""
+    the default order when nothing usable is left. ``none`` turns every
+    provider off (the page saves that when no box is ticked)."""
     names = [n for n in re.split(r"[\s,>]+", raw.lower()) if n in painters.PROVIDERS]
+    if not names and re.fullmatch(r"\s*none\s*", raw.lower()):
+        return ()
     return tuple(dict.fromkeys(names)) or painters.PROVIDERS
+
+
+def pick_aspect(image_shape: str, frames: list[tuple[int, int]]) -> str:
+    """The picture shape for a run: the setting, or with "auto" the shape of
+    the biggest frame showing the widget lately (9:16 before any has)."""
+    if image_shape in painters.ASPECTS:
+        return image_shape
+    if not frames:
+        return painters.DEFAULT_ASPECT
+    width, height = max(frames, key=lambda wh: wh[0] * wh[1])
+    return painters.nearest_aspect(width, height)
 
 
 def parse_run_at(raw: str) -> str:
@@ -261,9 +311,11 @@ def make_story(
     log: Callable[[str], None],
     stopped: Callable[[], bool],
     budget: Callable[[], painters.Budget] = painters.Budget,
+    usage: Usage | None = None,
 ) -> tuple[dict[str, Any] | None, str, str]:
     """(the story to show for ``source``, what happened: one of the
     :class:`Outcome` counters, the id of the story attempted or "")."""
+    usage = usage if usage is not None else Usage()
     item = feeds.newest_item(source.feed, log)
     if item is None:
         log("Feed failed, keeping the previous story")
@@ -284,15 +336,20 @@ def make_story(
     else:
         found = feeds.article(item, log)
         log(f"Summarising {len(found.text)} characters from the {found.origin}")
+        summary_usage: dict[str, Any] = {}
         summary = summarise.summarise(
             item.title,
             found.text,
-            api_key=cfg.groq_key,
+            api_key=cfg.summary_key,
             model=cfg.groq_model,
             words=cfg.summary_words,
             template=cfg.summary_prompt,
             log=log,
+            usage=summary_usage.update,
+            off=cfg.summary_service == "off",
         )
+        if summary_usage:
+            usage.add("groq", summary_usage.get("tokens"))
         story = {
             "story_id": sid,
             "source_key": source.key,
@@ -304,6 +361,8 @@ def make_story(
             "image": "",
             "provider": "",
         }
+        if summary_usage:
+            story["usage"] = {"summary": {"provider": "groq", **summary_usage}}
         job = {"story": story}
         store.save_job(data_dir, sid, job)
     if stopped():
@@ -331,11 +390,88 @@ def make_story(
         log("No picture and nothing earlier with one, saving the story as text only")
         return {**story, "made": int(time.time())}, "made", sid
     image = store.save_image(data_dir, source.key, painting.jpeg)
+    usage.picture(painting)
     return (
-        {**story, "image": image, "provider": painting.provider, "made": int(time.time())},
+        {
+            **story,
+            "image": image,
+            "provider": painting.provider,
+            "size": list(painting.size),
+            "usage": {**(story.get("usage") or {}), "picture": _picture_usage(painting)},
+            "made": int(time.time()),
+        },
         "made",
         sid,
     )
+
+
+def _picture_usage(painting: painters.Painting) -> dict[str, Any]:
+    return {"provider": painting.provider, **painting.usage}
+
+
+@dataclass
+class Usage:
+    """What a run used, as far as the services say: tokens per service,
+    pictures per provider and kie.ai's credits before and after."""
+
+    tokens: dict[str, int] = field(default_factory=dict)
+    pictures: dict[str, int] = field(default_factory=dict)
+    kie_before: float | None = None
+    kie_after: float | None = None
+
+    def add(self, service: str, tokens: Any) -> None:
+        if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0:
+            self.tokens[service] = self.tokens.get(service, 0) + tokens
+
+    def picture(self, painting: painters.Painting) -> None:
+        self.pictures[painting.provider] = self.pictures.get(painting.provider, 0) + 1
+        self.add(painting.provider, painting.usage.get("tokens"))
+
+    def record(self) -> dict[str, Any]:
+        """For state.json's last run: only what is known."""
+        out: dict[str, Any] = {}
+        if self.tokens:
+            out["tokens"] = dict(self.tokens)
+        if self.pictures:
+            out["pictures"] = dict(self.pictures)
+        if self.kie_after is not None:
+            out["kie_balance"] = self.kie_after
+            if self.kie_before is not None and self.kie_before >= self.kie_after:
+                out["kie_used"] = round(self.kie_before - self.kie_after, 2)
+        return out
+
+    def sentence(self) -> str:
+        return usage_sentence(self.record())
+
+
+PROVIDER_NAMES = {
+    "groq": "Groq",
+    "kie": "kie.ai",
+    "gemini": "Gemini",
+    "pollinations": "Pollinations",
+    "huggingface": "HuggingFace",
+}
+
+
+def usage_sentence(record: dict[str, Any]) -> str:
+    """A run's usage in words: "Groq 3,940 tokens; 3 pictures from kie.ai
+    (12 credits, 1,180.5 left)". "" when nothing is known."""
+    if not isinstance(record, dict):
+        return ""
+    bits: list[str] = []
+    for service, count in (record.get("tokens") or {}).items():
+        if isinstance(count, int):
+            bits.append(f"{PROVIDER_NAMES.get(service, service)} {count:,} tokens")
+    for provider, count in (record.get("pictures") or {}).items():
+        if not isinstance(count, int):
+            continue
+        what = f"{count} picture{'s' if count != 1 else ''} from {PROVIDER_NAMES.get(provider, provider)}"
+        if provider == "kie" and isinstance(record.get("kie_balance"), int | float):
+            used = record.get("kie_used")
+            spent = f"{used:,g} credits, " if isinstance(used, int | float) else ""
+            what += f" ({spent}{record['kie_balance']:,g} left)"
+        bits.append(what)
+    return "; ".join(bits)
 
 
 def holds(job: dict[str, Any], now: float) -> bool:
@@ -391,6 +527,7 @@ def collect_owed(
     stopped: Callable[[], bool] = lambda: False,
     log: Callable[[str], None] = logger.info,
     budget: Callable[[], painters.Budget] = painters.Budget,
+    usage: Usage | None = None,
 ) -> Outcome:
     """Collect the kie.ai pictures already paid for, and do nothing else: no
     feed, no Groq, never a new task. A picture goes up with the story it was
@@ -433,10 +570,14 @@ def collect_owed(
             outcome.count("kept")
             continue
         image = store.save_image(data_dir, str(story["source_key"]), painting.jpeg)
+        if usage is not None:
+            usage.picture(painting)
         stories[story["source_key"]] = {
             **story,
             "image": image,
             "provider": painting.provider,
+            "size": list(painting.size),
+            "usage": {**(story.get("usage") or {}), "picture": _picture_usage(painting)},
             "made": int(time.time()),
         }
         store.save_stories(data_dir, [stories[s.key] for s in cfg.sources if s.key in stories])
@@ -464,6 +605,7 @@ def run_edition(
     log: Callable[[str], None] = logger.info,
     progress: Callable[[int, int, str], None] = lambda done, total, label: None,
     budget: Callable[[], painters.Budget] = painters.Budget,
+    usage: Usage | None = None,
 ) -> Outcome:
     """Make one story per source, saving after each so panels see new
     stories as they land and a crash loses at most the one under way."""
@@ -491,6 +633,7 @@ def run_edition(
                 log=log,
                 stopped=stopped,
                 budget=budget,
+                usage=usage,
             )
         except Exception as err:  # one bad source must not cost the others their stories
             log(
@@ -633,12 +776,20 @@ class Runner:
 
         outcome: Outcome | None = None
         failure = ""
+        usage = Usage()
+        kie_key = cfg.paint.keys.get("kie", "") if "kie" in cfg.painters_ready else ""
         try:
             log(f"Run started ({reason})")
             for problem in cfg.problems:
                 log(problem)
+            aspect = pick_aspect(cfg.image_shape, store.frame_sizes(run.data_dir, time.time()))
+            cfg = replace(cfg, paint=replace(cfg.paint, aspect=aspect))
+            log(f"Pictures are drawn {aspect}")
+            usage.kie_before = painters.kie_balance(kie_key)
             if reason == "collect":
-                outcome = collect_owed(cfg, run.data_dir, stopped=run.stop.is_set, log=log)
+                outcome = collect_owed(
+                    cfg, run.data_dir, stopped=run.stop.is_set, log=log, usage=usage
+                )
             else:
                 outcome = run_edition(
                     cfg,
@@ -648,8 +799,13 @@ class Runner:
                     stopped=run.stop.is_set,
                     log=log,
                     progress=progress,
+                    usage=usage,
                 )
             log(f"Run finished: {outcome.sentence()}")
+            if usage.kie_before is not None:
+                usage.kie_after = painters.kie_balance(kie_key)
+            used = usage.sentence()
+            log(f"Used: {used}" if used else "Used: nothing the services reported")
         except Exception as err:  # a bug must not leave the lock held
             failure = text.redact(f"{type(err).__name__}: {str(err)[:200]}", cfg.secrets)
             # No traceback: exception text can quote a key. Where it broke is enough.
@@ -659,7 +815,7 @@ class Runner:
             log(f"Run failed: {failure}")
         finally:
             try:
-                _record_run(run, reason, started, outcome, failure, lines)
+                _record_run(run, reason, started, outcome, failure, lines, usage.record())
             finally:
                 self._finish(run)
                 _tray_close(run, outcome, failure)
@@ -688,6 +844,7 @@ def _record_run(
     outcome: Outcome | None,
     failure: str,
     lines: list[str],
+    usage: dict[str, Any] | None = None,
 ) -> None:
     state = store.load_state(run.data_dir)
     edition_run = reason != "collect"
@@ -700,11 +857,15 @@ def _record_run(
         "outcome": failure or (outcome.sentence() if outcome else ""),
         "stopped": run.stop.is_set(),
         "failed": bool(failure),
+        "usage": usage or {},
         "log": lines,
     }
     # Every run (each try of an edition included) in a line, for the page.
-    earlier = state.get("runs") if isinstance(state.get("runs"), list) else []
+    got = state.get("runs")
+    earlier: list[Any] = got if isinstance(got, list) else []
     summary = {k: state["last_run"][k] for k in ("reason", "started", "outcome", "failed")}
+    if usage:
+        summary["usage"] = usage
     state["runs"] = [*[r for r in earlier if isinstance(r, dict)], summary][-RUN_HISTORY:]
     try:
         store.save_state(run.data_dir, state)

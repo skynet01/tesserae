@@ -134,3 +134,34 @@ def test_stories_round_trip_and_bad_files_read_as_empty(tmp_path: Path) -> None:
     (tmp_path / store.STORIES).write_text("{not json", encoding="utf-8")
     assert store.load_stories(tmp_path) == []
     assert not list(tmp_path.glob(".*.tmp")), "no temp files left behind"
+
+
+def test_frames_are_remembered_cheaply_and_forgotten(tmp_path: Path) -> None:
+    store.note_frame(tmp_path, "hall", 1440, 2560, now=T0)
+    store.note_frame(tmp_path, "desk", 800, 480, now=T0)
+    assert sorted(store.frame_sizes(tmp_path, T0 + 60)) == [(800, 480), (1440, 2560)]
+    path = tmp_path / store.FRAMES
+    before = path.stat().st_mtime_ns
+    time.sleep(0.01)
+    store.note_frame(tmp_path, "hall", 1440, 2560, now=T0 + 60)
+    assert path.stat().st_mtime_ns == before, "unchanged within a day: no write"
+    store.note_frame(tmp_path, "hall", 1600, 1200, now=T0 + 120)
+    assert (1600, 1200) in store.frame_sizes(tmp_path, T0 + 120)
+    # The desk frame not seen for a month is forgotten; the hall was seen since.
+    store.note_frame(tmp_path, "hall", 1600, 1200, now=T0 + store.FRAMES_KEEP_S - 10)
+    assert store.frame_sizes(tmp_path, T0 + store.FRAMES_KEEP_S + 1) == [(1600, 1200)]
+    store.note_frame(tmp_path, "zero", 0, 0, now=T0)
+    assert "zero" not in path.read_text(encoding="utf-8")
+
+
+def test_broken_frames_file_is_ignored(tmp_path: Path) -> None:
+    (tmp_path / store.FRAMES).write_text(
+        '{"a": {"w": "x", "h": 1}, "b": [], "c": {"w": 10, "h": 20, "at": "soon"},'
+        f' "d": {{"w": 300, "h": 200, "at": {T0}}}}}',
+        encoding="utf-8",
+    )
+    assert store.frame_sizes(tmp_path, T0) == [(300, 200)]
+    store.note_frame(tmp_path, "e", 100, 100, now=T0)
+    assert sorted(store.frame_sizes(tmp_path, T0)) == [(100, 100), (300, 200)]
+    (tmp_path / store.FRAMES).write_text("[1, 2]", encoding="utf-8")
+    assert store.frame_sizes(tmp_path, T0) == []

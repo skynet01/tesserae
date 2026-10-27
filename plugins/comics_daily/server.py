@@ -1979,6 +1979,10 @@ def screens_view(
     return out
 
 
+# How the admin page's log marks an outcome: a problem, or one to watch.
+LOG_TONES = {"blocked": "bad", "error": "bad", "stale": "warn", "partial": "warn"}
+
+
 def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
     """Everything the admin page shows besides the settings form."""
     today = _today().isoformat()
@@ -2036,16 +2040,22 @@ def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
     if attempts and max(attempts) > 0:
         lede.append(f"Last fetch {_when(max(attempts), tz, today)}.")
 
-    entries = store.log()
-    width = min(22, max((len(str(e.get("source") or "")) for e in entries), default=0))
+    # The log, oldest first, as columns: when, source, outcome, what.
     log = []
-    for entry in entries:
+    for entry in store.log():
         when = "?"
         with contextlib.suppress(TypeError, ValueError, OverflowError, OSError):
             when = datetime.fromtimestamp(float(entry["at"]), tz).strftime("%b %d %H:%M:%S")
-        source_name = str(entry.get("source") or "-")[:width]
-        outcome = str(entry.get("outcome") or "").upper()
-        log.append(f"{when}  {source_name:<{width}}  {outcome:<8} {entry['text']}")
+        outcome = str(entry.get("outcome") or "").lower()
+        log.append(
+            {
+                "when": when,
+                "source": str(entry.get("source") or "-")[:40],
+                "outcome": outcome,
+                "tone": LOG_TONES.get(outcome, ""),
+                "text": str(entry["text"]),
+            }
+        )
     return {
         "lede": " ".join(lede),
         "screens": screens_view(config, farside, preview),
@@ -2107,7 +2117,7 @@ def _set_row(
 
 
 def _back() -> Response:
-    return redirect(url_for(f"{PLUGIN_ID}_media.index", _anchor=f"plugin-{PLUGIN_ID}"))
+    return redirect(url_for(f"{PLUGIN_ID}_media.index", _anchor="gocomics"))
 
 
 def _keep_manual(
@@ -2159,14 +2169,9 @@ def blueprint() -> Blueprint:
 
         plugin = _admin_plugin()
         settings = ensure_settings() or {}
-        section = settings_section(
-            plugin,
-            title="Settings",
-            blurb="The strips in your order, the Far Side and the layout, for every comics cell.",
-            icon="sliders-horizontal",
-            fold="closed",
-            repeater_layout="list",
-        )
+        # The page splits the settings over a card per source and Layout,
+        # all in one form saved through the settings endpoint.
+        section = settings_section(plugin)
         store = images.Store(Path(plugin.data_dir))
         with contextlib.suppress(Exception):
             store.prune_if_due(wanted_keys(config_from_settings(settings)))

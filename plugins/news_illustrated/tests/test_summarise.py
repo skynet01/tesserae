@@ -101,3 +101,49 @@ def test_only_text_content_counts_as_a_summary(fake_net: FakeNet) -> None:
     )
     assert _run(words=3)[0] == "The council voted"
     assert _run(words=3)[0] == "Parts."
+
+
+def test_groq_usage_is_reported_and_logged(fake_net: FakeNet) -> None:
+    fake_net.on(
+        summarise.GROQ_URL,
+        ok_json(
+            {
+                **_answer("A short summary."),
+                "usage": {"prompt_tokens": 1100, "completion_tokens": 212, "total_tokens": 1312},
+            }
+        ),
+    )
+    heard: list[dict[str, int]] = []
+    log: list[str] = []
+    out = summarise.summarise(
+        "T",
+        ARTICLE,
+        api_key="k",
+        model="m",
+        words=50,
+        template="",
+        log=log.append,
+        usage=heard.append,
+    )
+    assert out == "A short summary."
+    assert heard == [{"tokens": 1312, "in": 1100, "out": 212}]
+    assert "Summary: about 3 words, Groq 1,312 tokens" in log
+
+
+def test_tokens_used_reads_only_real_counts() -> None:
+    assert summarise.tokens_used({"usage": {"total_tokens": 5, "prompt_tokens": True}}) == {
+        "tokens": 5
+    }
+    assert summarise.tokens_used({"usage": {"prompt_tokens": 5}}) == {}
+    assert summarise.tokens_used({"usage": "lots"}) == {}
+    assert summarise.tokens_used(None) == {}
+
+
+def test_summaries_off_says_so(fake_net: FakeNet) -> None:
+    log: list[str] = []
+    out = summarise.summarise(
+        "T", ARTICLE, api_key="", model="m", words=4, template="", log=log.append, off=True
+    )
+    assert out == "The council voted on"
+    assert fake_net.calls == []
+    assert "Summaries are off, using the start of the source text" in log

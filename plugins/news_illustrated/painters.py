@@ -52,12 +52,77 @@ KIE_UNANSWERED_S = 2 * 3600
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 POLLINATIONS_URL = "https://gen.pollinations.ai/image/"
 HUGGINGFACE_URL = "https://router.huggingface.co/hf-inference/models/"
-# 768x1440 is an exact 8:15 portrait; the FLUX providers take explicit sizes.
-FLUX_WIDTH, FLUX_HEIGHT = 768, 1440
+KIE_CREDIT_URL = "https://api.kie.ai/api/v1/chat/credit"
+# The picture shapes every provider here can draw (kie.ai's image_size and
+# Gemini's aspectRatio both take these), as width:height.
+ASPECTS = ("9:16", "2:3", "3:4", "4:5", "1:1", "5:4", "4:3", "3:2", "16:9", "21:9")
+DEFAULT_ASPECT = "9:16"
+# The FLUX providers take explicit sizes: about this many pixels, both edges
+# a multiple of 16 (768x1440 before shapes followed the frame).
+FLUX_PIXELS = 768 * 1440
+# What a shape is called in a prompt ({shape}).
+SHAPE_WORDS = {
+    "9:16": "Tall portrait (9:16)",
+    "2:3": "Portrait (2:3)",
+    "3:4": "Portrait (3:4)",
+    "4:5": "Portrait (4:5)",
+    "1:1": "Square (1:1)",
+    "5:4": "Landscape (5:4)",
+    "4:3": "Landscape (4:3)",
+    "3:2": "Landscape (3:2)",
+    "16:9": "Wide landscape (16:9)",
+    "21:9": "Very wide landscape (21:9)",
+}
+# One joke a reader gets from the headline alone, drawn so it fills the
+# picture and leaves the foot plain for the caption the frame lays over it.
+# (The old prompt asked for an empty bottom 10%, and the models left a third
+# of the picture blank; it fed only the summary, so they drew every fact in
+# it, labels and all, instead of a joke.)
 DEFAULT_IMAGE_PROMPT = (
-    "Single-panel Far Side-style black and white ink comic. Topic: {title}. {summary}. "
-    "No content in bottom 25%."
+    "A single-panel gag cartoon in the style of Gary Larson's The Far Side, about this news story.\n"
+    "Headline: {title}\n"
+    "Story: {summary}\n\n"
+    "First decide the joke: the one absurd or ironic truth behind the headline that everyone "
+    "thinks but nobody says. Show it as ONE visual gag that someone who has only read the "
+    "headline gets in two seconds: take a phrase from the story literally, swap who is in "
+    "charge, or show where this ends up if nobody stops it. Ordinary people, animals or "
+    "objects in an everyday place work best, rather than likenesses of the people named. "
+    "Leave out the rest of the story's details.\n\n"
+    "Rules: one scene, no panels, borders or split screens. Two or three characters at most, "
+    "each with the right number of arms, hands and legs. At most one short line of text in "
+    "the whole picture (one speech bubble or one sign, under eight words, spelled correctly); "
+    "no labels, logos or captions.\n"
+    "Style: black and white ink, bold clean outlines, crosshatched shading, plain white "
+    "background, high contrast. {shape} picture that fills the whole canvas edge to edge. "
+    "Keep the bottom quarter simple, just floor, ground or sky with no faces or text, "
+    "because the headline is printed over it."
 )
+
+
+def nearest_aspect(width: float, height: float) -> str:
+    """The drawable shape closest to ``width`` x ``height`` (by ratio)."""
+    import math
+
+    if width <= 0 or height <= 0:
+        return DEFAULT_ASPECT
+    want = math.log(width / height)
+    return min(ASPECTS, key=lambda a: abs(math.log(_ratio(a)) - want))
+
+
+def _ratio(aspect: str) -> float:
+    w, _, h = aspect.partition(":")
+    try:
+        return float(w) / float(h)
+    except (ValueError, ZeroDivisionError):
+        return 9 / 16
+
+
+def flux_size(aspect: str) -> tuple[int, int]:
+    """A FLUX picture size for ``aspect``: about FLUX_PIXELS, edges a multiple of 16."""
+    ratio = _ratio(aspect)
+    width = round((FLUX_PIXELS * ratio) ** 0.5 / 16) * 16
+    height = round((FLUX_PIXELS / ratio) ** 0.5 / 16) * 16
+    return max(256, width), max(256, height)
 
 
 class PaintError(Exception):
@@ -120,6 +185,8 @@ class Attempt:
     stopped: Callable[[], bool]
     memo: TaskMemo
     log: Callable[[str], None]
+    # Filled in by a provider that reports what the call used.
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -133,6 +200,8 @@ class Settings:
     pollinations_model: str = "flux"
     huggingface_model: str = "black-forest-labs/FLUX.1-schnell"
     image_prompt: str = ""
+    # The picture's shape, one of ASPECTS (the run picks it from the frames).
+    aspect: str = DEFAULT_ASPECT
 
 
 @dataclass(frozen=True)
@@ -140,16 +209,22 @@ class Painting:
     jpeg: bytes
     provider: str
     size: tuple[int, int]
+    # What the provider said the picture cost, when it says: {"tokens": n, ...}.
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
-def prompts(title: str, summary: str, template: str) -> tuple[str, str]:
+def prompts(
+    title: str, summary: str, template: str, aspect: str = DEFAULT_ASPECT
+) -> tuple[str, str]:
     """(detailed prompt for instruction-following models, short keyword-style
     prompt for the FLUX diffusion models)."""
+    shape = SHAPE_WORDS.get(aspect, SHAPE_WORDS[DEFAULT_ASPECT])
     detailed = (template or DEFAULT_IMAGE_PROMPT).replace("{title}", title)
+    detailed = detailed.replace("{shape}", shape)
     detailed = detailed.replace("{summary}", summary).strip()
     short = (
-        "Far Side-style black and white ink comic, crosshatching, bold outlines. "
-        f"{title}. {summary}. No content in bottom 25% or near edges."
+        "Single-panel Far Side-style black and white ink gag cartoon, one visual joke, "
+        f"no text, crosshatching, bold outlines, plain ground at the bottom. {title}. {summary}"
     )
     if len(short) > SHORT_PROMPT_CHARS:
         short = short[: SHORT_PROMPT_CHARS - 3].rstrip() + "..."
@@ -168,7 +243,7 @@ def paint(
 ) -> Painting | None:
     """The first provider's picture, as a JPEG; None when none produced one."""
     memo = memo or TaskMemo()
-    detailed, short = prompts(title, summary, settings.image_prompt)
+    detailed, short = prompts(title, summary, settings.image_prompt, settings.aspect)
     for name in settings.order:
         key = settings.keys.get(name, "")
         if name not in _CALLS or not key:
@@ -180,8 +255,9 @@ def paint(
             log(f"Image time budget used up ({left:.0f}s left), skipping the other providers")
             return None
         log(f"Painting with {name}")
+        attempt = Attempt(settings, key, detailed, short, budget, stopped, memo, log)
         try:
-            raw = _CALLS[name](Attempt(settings, key, detailed, short, budget, stopped, memo, log))
+            raw = _CALLS[name](attempt)
         except PaintError as err:
             log(f"{name}: {err}")
             continue
@@ -192,8 +268,8 @@ def paint(
             if name == "kie":
                 memo.remember(None)  # collecting that task again would give the same bytes
             continue
-        log(f"{name}: {size[0]}x{size[1]} picture")
-        return Painting(jpeg, name, size)
+        log(f"{name}: {size[0]}x{size[1]} picture{usage_note(attempt.usage)}")
+        return Painting(jpeg, name, size, dict(attempt.usage))
     return None
 
 
@@ -319,7 +395,10 @@ def _kie_create(a: Attempt, auth: dict[str, str]) -> str:
     a.memo.remember({"unanswered": True, "at": a.memo.clock()})
     created = net.post_json(
         KIE_CREATE_URL,
-        {"model": a.settings.kie_model, "input": {"prompt": a.detailed, "image_size": "9:16"}},
+        {
+            "model": a.settings.kie_model,
+            "input": {"prompt": a.detailed, "image_size": a.settings.aspect},
+        },
         timeout=a.budget.timeout(30),
         headers=auth,
     )
@@ -345,7 +424,9 @@ def gemini(a: Attempt) -> bytes:
         GEMINI_URL.format(model=urllib.parse.quote(a.settings.gemini_model, safe="-._")),
         {
             "contents": [{"parts": [{"text": a.detailed}]}],
-            "generationConfig": {"imageConfig": {"aspectRatio": "9:16", "imageSize": "2K"}},
+            "generationConfig": {
+                "imageConfig": {"aspectRatio": a.settings.aspect, "imageSize": "2K"}
+            },
         },
         timeout=a.budget.timeout(90),
         # The header rather than ?key= keeps the key out of any URL that gets logged.
@@ -357,6 +438,9 @@ def gemini(a: Attempt) -> bytes:
         raise PaintError(_message(answer) or reply.reason())
     if not reply.ok:
         raise PaintError(reply.reason())
+    tokens = _dig(answer, "usageMetadata", "totalTokenCount")
+    if isinstance(tokens, int) and not isinstance(tokens, bool):
+        a.usage["tokens"] = tokens
     parts = _dig(answer, "candidates", 0, "content", "parts")
     for part in parts if isinstance(parts, list) else []:
         data = _dig(part, "inlineData", "data")
@@ -370,10 +454,11 @@ def gemini(a: Attempt) -> bytes:
 
 def pollinations(a: Attempt) -> bytes:
     """Pollinations (FLUX): a GET whose path is the prompt."""
+    width, height = flux_size(a.settings.aspect)
     query = urllib.parse.urlencode(
         {
-            "width": FLUX_WIDTH,
-            "height": FLUX_HEIGHT,
+            "width": width,
+            "height": height,
             "model": a.settings.pollinations_model,
             "nologo": "true",
             # Keep the prompt as written rather than letting the service rewrite it.
@@ -393,9 +478,10 @@ def pollinations(a: Attempt) -> bytes:
 
 def huggingface(a: Attempt) -> bytes:
     """HuggingFace Inference (FLUX.1-schnell): the picture is the response body."""
+    width, height = flux_size(a.settings.aspect)
     reply = net.post_json(
         HUGGINGFACE_URL + urllib.parse.quote(a.settings.huggingface_model, safe="/-._"),
-        {"inputs": a.short, "parameters": {"width": FLUX_WIDTH, "height": FLUX_HEIGHT}},
+        {"inputs": a.short, "parameters": {"width": width, "height": height}},
         timeout=a.budget.timeout(90),
         headers={"Authorization": f"Bearer {a.key}", "Accept": "image/jpeg"},
     )
@@ -411,6 +497,24 @@ _CALLS: dict[str, Callable[[Attempt], bytes]] = {
     "pollinations": pollinations,
     "huggingface": huggingface,
 }
+
+
+def kie_balance(key: str, timeout: float = 10.0) -> float | None:
+    """The kie.ai account's credits left, or None when kie.ai does not say.
+    Free to ask; a run asks before and after to say what it used."""
+    if not key:
+        return None
+    reply = net.request(KIE_CREDIT_URL, timeout=timeout, headers={"Authorization": f"Bearer {key}"})
+    value = _dig(reply.json(), "data") if reply.ok else None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def usage_note(usage: dict[str, Any]) -> str:
+    """ ", 1,290 tokens" for a log line, or "" when nothing was reported."""
+    tokens = usage.get("tokens")
+    return f", {tokens:,} tokens" if isinstance(tokens, int) else ""
 
 
 def _kie_result_url(result: Any) -> str:
