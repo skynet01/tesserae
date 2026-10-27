@@ -113,6 +113,49 @@ def _flatten(img: Image.Image) -> Image.Image:
     return img
 
 
+def header_size(raw: bytes) -> tuple[int, int] | None:
+    """A PNG, GIF, WebP or JPEG's pixel size read from its header bytes, or
+    None for anything else. Read before Pillow opens the file: Pillow sets
+    up some decoders (WebP's animation decoder and its canvas) inside
+    ``Image.open``, so a size check after it comes too late."""
+    if raw[:8] == b"\x89PNG\r\n\x1a\n" and raw[12:16] == b"IHDR" and len(raw) >= 24:
+        return int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
+    if raw[:6] in (b"GIF87a", b"GIF89a") and len(raw) >= 10:
+        return int.from_bytes(raw[6:8], "little"), int.from_bytes(raw[8:10], "little")
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP" and len(raw) >= 30:
+        chunk = raw[12:16]
+        if chunk == b"VP8X":
+            return 1 + int.from_bytes(raw[24:27], "little"), 1 + int.from_bytes(
+                raw[27:30], "little"
+            )
+        if chunk == b"VP8 ":
+            return (
+                int.from_bytes(raw[26:28], "little") & 0x3FFF,
+                int.from_bytes(raw[28:30], "little") & 0x3FFF,
+            )
+        if chunk == b"VP8L" and raw[20] == 0x2F:
+            bits = int.from_bytes(raw[21:25], "little")
+            return 1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF)
+        return None
+    if raw[:2] == b"\xff\xd8":
+        at = 2
+        while at + 9 < len(raw):
+            if raw[at] != 0xFF:
+                return None
+            marker = raw[at + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                at += 2
+                continue
+            length = int.from_bytes(raw[at + 2 : at + 4], "big")
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                return (
+                    int.from_bytes(raw[at + 7 : at + 9], "big"),
+                    int.from_bytes(raw[at + 5 : at + 7], "big"),
+                )
+            at += 2 + length
+    return None
+
+
 def normalise(raw: bytes, max_edge: int = MAX_EDGE_PX) -> Picture:
     """Decode a downloaded picture and re-encode it for the renderer.
 
@@ -122,8 +165,15 @@ def normalise(raw: bytes, max_edge: int = MAX_EDGE_PX) -> Picture:
     hard edges). Raises ValueError when ``raw`` is not a picture at all,
     the usual sign of an error or challenge page served in its place.
     """
+    size = header_size(raw)
+    if size is None or size[0] < 1 or size[1] < 1:
+        raise ValueError("not a PNG, GIF, WebP or JPEG picture")
+    if size[0] * size[1] > MAX_PIXELS:
+        raise ValueError("too many pixels")
     try:
         with Image.open(io.BytesIO(raw)) as img:
+            if img.format not in ("PNG", "GIF", "WEBP", "JPEG"):
+                raise ValueError("not a PNG, GIF, WebP or JPEG picture")
             if img.width * img.height > MAX_PIXELS:
                 raise ValueError("too many pixels")
             img.load()

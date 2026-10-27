@@ -1439,3 +1439,28 @@ def test_an_oversized_upload_is_refused_before_the_form_is_read(
     assert parsed == []  # never parsed
     assert any("That picture is over" in m for m in _messages(client))
     assert "manual:garfield" not in _store(client).sources()
+
+
+@pytest.mark.parametrize("fmt", ["PNG", "GIF", "WEBP", "JPEG"])
+def test_picture_sizes_are_read_from_the_header(fmt: str) -> None:
+    buf = io.BytesIO()
+    Image.new("RGB", (321, 123), "white").save(buf, format=fmt)
+    assert images.header_size(buf.getvalue()) == (321, 123)
+
+
+def test_a_huge_picture_is_refused_before_pillow_opens_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A WebP claiming a 16384 x 16384 canvas: refused on its header, so
+    Pillow never sets up a decoder (or a canvas) for it."""
+    canvas = (16383).to_bytes(3, "little") * 2
+    body = b"VP8X" + (10).to_bytes(4, "little") + b"\x10\x00\x00\x00" + canvas
+    webp = b"RIFF" + (len(body) + 4).to_bytes(4, "little") + b"WEBP" + body
+    assert images.header_size(webp) == (16384, 16384)
+    opened: list[bytes] = []
+    monkeypatch.setattr(images.Image, "open", lambda *a, **k: opened.append(b"") or None)
+    with pytest.raises(ValueError, match="too many pixels"):
+        images.normalise(webp)
+    with pytest.raises(ValueError):
+        images.normalise(b"BM" + b"\x00" * 64)  # a BMP: not one of the four
+    assert opened == []
