@@ -1192,6 +1192,7 @@ def _build_canvas_els(
     ch: int,
     *,
     target_device_id: str = "",
+    page_id: str = "",
     fresh: bool = False,
     preview: bool = True,
 ) -> list[dict[str, Any]]:
@@ -1233,8 +1234,18 @@ def _build_canvas_els(
     # the same place explicitly.
     fetch_memo: dict[str, Any] = {}
 
-    def _shared_fetch(plugin_id: str, opts: dict[str, Any], cell_w: int, cell_h: int) -> Any:
+    def _shared_fetch(
+        plugin_id: str, opts: dict[str, Any], cell_w: int, cell_h: int, element_id: str
+    ) -> Any:
+        placement = f"{page_id}/{element_id}" if page_id else element_id
+        if target_device_id:
+            placement += f"@{target_device_id}"
         memo_key = f"{plugin_id}::{json.dumps(opts, sort_keys=True, default=str)}"
+        plugin = registry.get(plugin_id)
+        # Fitted payloads and rotation state belong to this placement. Ordinary
+        # data sources still share one fetch across widgets, fields and binds.
+        if plugin and plugin.manifest.get("render", {}).get("per_placement"):
+            memo_key += f"::{placement}::{cell_w}x{cell_h}"
         if memo_key in fetch_memo:
             return fetch_memo[memo_key]
         try:
@@ -1248,6 +1259,7 @@ def _build_canvas_els(
                 cell_h=cell_h,
                 fresh=fresh,
                 target_device_id=target_device_id,
+                placement=placement,
             )
         except Exception:
             fetched = None
@@ -1255,14 +1267,14 @@ def _build_canvas_els(
         return fetched
 
     def _resolve_source(
-        plugin_id: str, raw_options: dict[str, Any], cell_w: int, cell_h: int
+        plugin_id: str, raw_options: dict[str, Any], cell_w: int, cell_h: int, element_id: str
     ) -> tuple[dict[str, Any], Any, str]:
         """Resolve options + fetch, classifying the result as ``live`` (real
         fetch), ``sample`` (demo fallback because nothing was configured), or
         ``error``. The classification is carried into the DOM so the render
         report can tell the agent which it got."""
         opts = _resolved_options(plugin_id, raw_options)
-        data = _shared_fetch(plugin_id, opts, cell_w, cell_h)
+        data = _shared_fetch(plugin_id, opts, cell_w, cell_h, element_id)
         if isinstance(data, dict) and not data.get("error"):
             return opts, data, "live"
         if not _location_configured(raw_options):
@@ -1293,7 +1305,7 @@ def _build_canvas_els(
         for b in getattr(el, "bind", None) or []:
             if not b.source:
                 continue
-            _, bdata, _ = _resolve_source(b.source, b.options, el.w, el.h)
+            _, bdata, _ = _resolve_source(b.source, b.options, el.w, el.h, el.id)
             patch = apply_binding(b, bdata)
             if patch:
                 out.update(patch)
@@ -1308,7 +1320,7 @@ def _build_canvas_els(
             ddata: Any = None
             dsrc = "none"
             if e.source:
-                _, ddata, dsrc = _resolve_source(e.source, e.options, e.w, e.h)
+                _, ddata, dsrc = _resolve_source(e.source, e.options, e.w, e.h, e.id)
             els_out.append(
                 {
                     "id": e.id,
@@ -1358,7 +1370,7 @@ def _build_canvas_els(
                     sdata, sstate = _resolve_url_source(s.url, getattr(s, "headers", {}) or {})
                     cdata[s.name or "data"] = sdata
                 elif s.key:
-                    _, sdata, sstate = _resolve_source(s.key, s.options, e.w, e.h)
+                    _, sdata, sstate = _resolve_source(s.key, s.options, e.w, e.h, e.id)
                     cdata[s.name or s.key] = sdata
                 else:
                     continue
@@ -1471,7 +1483,7 @@ def _build_canvas_els(
             "strings": {},
         }
         if e.widget:
-            opts, data, wsrc = _resolve_source(e.widget, e.options, e.w, e.h)
+            opts, data, wsrc = _resolve_source(e.widget, e.options, e.w, e.h, e.id)
             item["options"] = opts
             item["data"] = data
             item["data_source"] = wsrc
@@ -1520,6 +1532,7 @@ def _render_canvas(
     target_w: int,
     target_h: int,
     target_device_id: str = "",
+    page_id: str = "",
     fresh: bool = False,
     preview: bool = True,
 ) -> str:
@@ -1545,7 +1558,13 @@ def _render_canvas(
     registry = current_app.config["PLUGIN_REGISTRY"]
     font = _resolve_font(layout.font or None, registry)
     els = _build_canvas_els(
-        layout.els, cw, ch, target_device_id=target_device_id, fresh=fresh, preview=preview
+        layout.els,
+        cw,
+        ch,
+        target_device_id=target_device_id,
+        page_id=page_id,
+        fresh=fresh,
+        preview=preview,
     )
     return render_template(
         "panels_compose.html",
@@ -1737,6 +1756,7 @@ def compose(page_id: str) -> Response:
         return _uncacheable(
             _render_canvas(
                 page.canvas,
+                page_id=page.id,
                 target_w=target_w,
                 target_h=target_h,
                 target_device_id=target_device_id,
@@ -2083,7 +2103,7 @@ def compose_canvas(canvas_id: str) -> str:
     doc = store.get(canvas_id) if store is not None else None
     if doc is None:
         abort(404)
-    return _render_canvas(doc.to_layout(), target_w=doc.w, target_h=doc.h)
+    return _render_canvas(doc.to_layout(), target_w=doc.w, target_h=doc.h, page_id=doc.id)
 
 
 @bp.get("/_test/render")

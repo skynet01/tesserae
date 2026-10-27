@@ -250,6 +250,9 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   without it the picker guesses from the family in the name and otherwise
   files the widget under Utility. Older servers ignore the field.
 * **`render.needs_network`**, hint for the renderer (not enforced).
+* **`render.per_placement`**, fetch separately for each canvas element and its
+  dimensions when the payload depends on its fit or rotation. By default,
+  elements with the same widget and resolved options share one data fetch.
 * **`updates.on_change`**, optional data-change sources this widget knows how
   to consume. Declaring one only exposes a host-owned, per-placement **Refresh
   when this widget's data changes** switch; it does not enable refreshes by

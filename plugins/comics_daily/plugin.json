@@ -204,6 +204,7 @@
     }
   ],
   "render": {
+    "per_placement": true,
     "dither": "floyd-steinberg",
     "needs_network": true,
     "full_bleed": true,

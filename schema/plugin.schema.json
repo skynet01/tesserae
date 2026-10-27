@@ -290,6 +290,7 @@
       "properties": {
         "dither": { "enum": ["none", "floyd-steinberg", "ordered"] },
         "full_bleed": { "type": "boolean" },
+        "per_placement": { "type": "boolean", "description": "Fetch data separately for each canvas placement and its dimensions instead of sharing by plugin and options." },
         "needs_network": { "type": "boolean" }
       }
     },

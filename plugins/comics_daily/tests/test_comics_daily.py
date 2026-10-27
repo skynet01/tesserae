@@ -1968,6 +1968,65 @@ def test_the_composer_gives_each_grid_cell_its_placement(app: Any) -> None:
     assert sorted(seen) == ["p9/a@dev1", "p9/b@dev1"]
 
 
+def test_canvas_comics_fit_and_rotate_per_placement(
+    app: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import composer
+    from app.state.page_store import Page
+    from app.state.panel_store import CanvasLayout, Element
+
+    plugin = app.config["PLUGIN_REGISTRY"].get("comics_daily")
+    monkeypatch.setattr(plugin.server_module, "_today", lambda: TODAY)
+    monkeypatch.setattr(plugin.server_module, "_enqueue", lambda *a, **k: None)
+    store = images.Store(plugin.data_dir)
+    for slug in ("garfield", "peanuts", "bc"):
+        _keep_picture(store, f"gocomics:{slug}", (1200, 380))
+    app.config["SETTINGS_STORE"].update_section(
+        "plugins",
+        {
+            "comics_daily": {
+                "far_side": False,
+                "strips": [{"slug": s} for s in ("garfield", "peanuts", "bc")],
+            }
+        },
+    )
+    page = Page(
+        id="p9",
+        name="Comics canvas",
+        layout_kind="canvas",
+        canvas=CanvasLayout(
+            w=1440,
+            h=2560,
+            els=[
+                Element(id="a", widget="comics_daily", w=800, h=300),
+                Element(id="b", widget="comics_daily", w=800, h=300),
+                Element(id="c", widget="comics_daily", w=1440, h=2560),
+            ],
+        ),
+    )
+    app.config["PAGE_STORE"].save(page)
+    monkeypatch.setattr(composer, "render_template", lambda template, **ctx: json.dumps(ctx["els"]))
+
+    def render(device: str) -> list[list[str]]:
+        response = app.test_client().get(f"/compose/p9?for_push=1&device_id={device}")
+        assert response.status_code == 200
+        return [[s["id"] for s in el["data"]["strips"]] for el in json.loads(response.data)]
+
+    assert render("dev1") == [["garfield"], ["garfield"], ["garfield", "peanuts", "bc"]]
+    assert render("dev2") == [["garfield"], ["garfield"], ["garfield", "peanuts", "bc"]]
+    turns = json.loads((store.root / images.ROTATION_FILE).read_text())
+    assert set(turns) == {
+        "p9/a@dev1",
+        "p9/b@dev1",
+        "p9/c@dev1",
+        "p9/a@dev2",
+        "p9/b@dev2",
+        "p9/c@dev2",
+    }
+    assert turns["p9/a@dev1"]["shown"] == 1
+    assert turns["p9/c@dev1"]["shown"] == 3
+
+
 def test_an_all_manual_setup_still_cleans_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1991,4 +2050,26 @@ def test_an_all_manual_setup_still_cleans_up(
     assert (store.image_dir / kept).exists()
     assert not (store.image_dir / orphan).exists()
     # Not again within the hour.
+    assert store.prune_if_due({"manual:garfield"}, later + 60) is None
+
+
+def test_disabled_sources_still_clean_up_removed_pictures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(srv, "_enqueue", lambda *a, **k: pytest.fail("nothing to fetch"))
+    store = images.Store(tmp_path)
+    kept = _keep_picture(store, "manual:garfield", age=3 * 3600)
+    orphan = _keep_picture(store, "manual:peanuts", (61, 20), age=3 * 3600)
+    settings = {
+        "far_side": False,
+        "strips": [{"slug": s, "enabled": False} for s in ("garfield", "dilbert")],
+    }
+    ctx = {"data_dir": str(tmp_path)}
+    assert "error" in srv.fetch({}, settings, ctx=ctx)
+    assert set(store.sources()) == {"manual:garfield"}
+    later = time.time() + images.CLEANUP_EVERY_S + images.PRUNE_GRACE_S + 60
+    monkeypatch.setattr(srv.time, "time", lambda: later)
+    assert "error" in srv.fetch({}, settings, ctx=ctx)
+    assert (store.image_dir / kept).exists()
+    assert not (store.image_dir / orphan).exists()
     assert store.prune_if_due({"manual:garfield"}, later + 60) is None

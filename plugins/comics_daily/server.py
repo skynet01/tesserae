@@ -1475,6 +1475,8 @@ def fetch(
     config = resolve_config(options, settings)
     wanted, problems = sources_for(config)
     if not wanted:
+        with contextlib.suppress(Exception):
+            store.prune_if_due(wanted_keys(config))
         if problems:
             return {"error": f"{problems[0].name}: {problems[0].message}"}
         return {"error": "Turn on a strip or the Far Side under Widgets → Admin pages → Comics."}
