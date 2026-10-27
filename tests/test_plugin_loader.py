@@ -496,3 +496,37 @@ def test_host_version_is_the_checkouts_not_stale_package_metadata(monkeypatch):
     )["project"]["version"]
     assert plugin_loader.host_version() == want
     assert plugin_loader.too_new_for_host(want) is None
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        (None, "Toy"),  # not set: the name
+        ("  Toy   pages \n", "Toy pages"),  # whitespace tidied
+        ("   ", "Toy"),  # blank: the name
+        (42, "Toy"),  # not a string (a manifest that skipped the schema)
+        ("x" * 80, "x" * plugin_loader.ADMIN_TITLE_MAX),
+    ],
+)
+def test_admin_title_falls_back_to_the_name(given: object, expected: str) -> None:
+    manifest = {"name": "Toy"}
+    if given is not None:
+        manifest["admin_title"] = given  # type: ignore[assignment]
+    plugin = plugin_loader.Plugin(
+        id="toy", path=Path("."), manifest=manifest, data_dir=Path("."), server_module=None
+    )
+    assert plugin.admin_title == expected
+
+
+def test_the_schema_refuses_a_bad_admin_title(tmp_path: Path, schema_path: Path) -> None:
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir()
+    _write_minimal_plugin(plugins_dir, "fine", {"admin_title": "Toys"})
+    _write_minimal_plugin(plugins_dir, "long", {"admin_title": "x" * 61})
+    _write_minimal_plugin(plugins_dir, "empty", {"admin_title": ""})
+    _write_minimal_plugin(plugins_dir, "number", {"admin_title": 7})
+    registry = plugin_loader.discover(
+        plugins_dir, schema_path=schema_path, data_root=tmp_path / "data"
+    )
+    assert registry.plugins["fine"].admin_title == "Toys"
+    assert sorted(err.plugin_id for err in registry.errors) == ["empty", "long", "number"]

@@ -87,3 +87,14 @@ def test_an_admin_page_is_titled_like_its_widget_unless_it_says_otherwise(app):
     registry = app.config["PLUGIN_REGISTRY"]
     assert registry.get("news_illustrated").admin_title == "News, AI Illustrated"
     assert registry.get("news_front_pages").admin_title == "Newspapers"
+
+
+def test_the_admin_title_is_escaped_in_the_menu(app, client):
+    plugin = app.config["PLUGIN_REGISTRY"].get("news_front_pages")
+    plugin.manifest["admin_title"] = "<b>Papers</b> & co"
+    try:
+        body = client.get("/plugins/news_illustrated/").get_data(as_text=True)
+    finally:
+        plugin.manifest["admin_title"] = "Newspapers"
+    assert "&lt;b&gt;Papers&lt;/b&gt; &amp; co" in body
+    assert "<b>Papers</b>" not in body
