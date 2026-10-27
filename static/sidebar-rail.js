@@ -76,6 +76,11 @@
     const open = flyouts.find((d) => d.open);
     if (open) { open.open = false; open.querySelector('summary').focus(); }
   });
+  // The dropdown holding the current page is drawn open (_base.html): on
+  // the open sidebar that shows where you are; folded, it would be a
+  // flyout hanging open, so it starts closed and opens again on unfolding.
+  const current = flyouts.filter((d) => d.classList.contains('is-active'));
+  if (isFolded()) closeFlyouts();
   btn.addEventListener('click', () => {
     const folded = !root.classList.contains('sidebar-collapsed');
     clearTimeout(slideTimer);
@@ -87,6 +92,7 @@
       else localStorage.removeItem('tesserae-sidebar');
     } catch { /* not remembered */ }
     closeFlyouts();
+    if (!folded) current.forEach((d) => { d.open = true; });
     hideTip();
     paint();
   });

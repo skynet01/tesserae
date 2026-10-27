@@ -492,16 +492,19 @@ def test_themes_strip_still_shows_disabled_themes(app: Flask) -> None:
 
 def test_themes_live_under_settings_not_the_top_nav(app: Flask) -> None:
     """Themes moved from the top nav into Settings: the nav has no Themes
-    item, the Settings tab strip does, and the Themes page renders with
-    the Settings head and that tab active."""
+    item of its own (the Paper sidebar's Settings dropdown lists it), the
+    Settings tab strip does, and the Themes page renders with the Settings
+    head and that tab active."""
     client = app.test_client()
     _sign_in(client)
     body = client.get("/themes").get_data(as_text=True)
     assert "<span>Settings</span>" in body
     assert 'class="tab is-active"' in body
     nav = body.split('<nav class="tabs')[0]
-    # A link, not any mention: the design switch's return field carries the path.
-    assert 'href="/themes"' not in nav.split("topnav")[-1] or "ph-palette" not in nav
+    # Not a top-level nav item (those carry a <span> label); the Paper
+    # sidebar lists it inside the Settings dropdown, marked current.
+    assert "<span>Themes</span>" not in nav
+    assert '<a class="nav-dropdown-link is-active" href="/themes" aria-current="page">' in nav
     tabs = body.split('<nav class="tabs', 1)[1].split("</nav>", 1)[0]
     assert "Themes" in tabs and 'href="/themes"' in tabs
     # The composer points at it from the theme picker.

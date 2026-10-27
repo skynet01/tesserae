@@ -1380,18 +1380,27 @@ def test_devices_reveal_token_stashes_in_session_and_logs(app_with_gate: Flask) 
 # -- topnav highlighting ---------------------------------------------------
 
 
+_SETTINGS_DROPDOWN = re.compile(
+    r'<details class="nav-dropdown ([^"]*)"([^>]*)>\s*<summary>\s*<i class="ph ph-gear-six"'
+)
+
+
 @pytest.mark.parametrize(
-    "path",
+    ("path", "area"),
     [
-        "/settings/server",
-        "/settings/devices",
-        "/settings/firmware",
-        "/settings/relay",
-        "/settings/companion",
+        ("/settings/server", "Server"),
+        ("/settings/devices", "Devices"),
+        ("/settings/firmware", "Firmware"),
+        ("/settings/relay", "Cloud relay"),
+        ("/settings/companion", "Companion app"),
     ],
 )
-def test_settings_pages_highlight_the_settings_nav_item(app_with_gate: Flask, path: str) -> None:
-    """Every page in the settings area marks Settings as the current section.
+def test_settings_pages_highlight_the_settings_nav_item(
+    app_with_gate: Flask, path: str, area: str
+) -> None:
+    """Every page in the settings area marks Settings as the current section,
+    and (in the Paper sidebar, where Settings is a dropdown) opens it with the
+    current area marked.
 
     The standalone pages (Firmware, Cloud relay, Companion app) aren't
     ``settings_area`` routes, so an endpoint-list check left the whole nav
@@ -1401,18 +1410,36 @@ def test_settings_pages_highlight_the_settings_nav_item(app_with_gate: Flask, pa
     client = app_with_gate.test_client()
     client.post("/setup", data={"password": "abcdefgh", "password_confirm": "abcdefgh"})
     body = client.get(path).get_data(as_text=True)
+    dropdown = _SETTINGS_DROPDOWN.search(body)
+    assert dropdown is not None, "settings nav dropdown missing"
+    assert "is-active" in dropdown.group(1), f"{path} left the nav unhighlighted"
+    assert "open" in dropdown.group(2), f"{path} left the Settings dropdown closed"
+    current = re.findall(
+        r'<a class="nav-dropdown-link is-active"[^>]*aria-current="page">\s*'
+        r"<i[^>]*></i>([^<]+)</a>",
+        body,
+    )
+    assert [c.strip() for c in current] == [area]
+
+
+def test_classic_design_keeps_the_settings_link(app_with_gate: Flask) -> None:
+    app_with_gate.config["SETTINGS_STORE"].patch_section("app", {"ui_design": "classic"})
+    client = app_with_gate.test_client()
+    client.post("/setup", data={"password": "abcdefgh", "password_confirm": "abcdefgh"})
+    body = client.get("/settings/server").get_data(as_text=True)
     settings_link = re.search(r'<a href="/settings"[^>]*>', body)
-    assert settings_link is not None, "settings nav link missing"
-    assert "is-active" in settings_link.group(0), f"{path} left the nav unhighlighted"
+    assert settings_link is not None and "is-active" in settings_link.group(0)
+    assert _SETTINGS_DROPDOWN.search(body) is None
 
 
 def test_non_settings_page_does_not_highlight_settings(app_with_gate: Flask) -> None:
     client = app_with_gate.test_client()
     client.post("/setup", data={"password": "abcdefgh", "password_confirm": "abcdefgh"})
     body = client.get("/send").get_data(as_text=True)
-    settings_link = re.search(r'<a href="/settings"[^>]*>', body)
-    assert settings_link is not None
-    assert "is-active" not in settings_link.group(0)
+    dropdown = _SETTINGS_DROPDOWN.search(body)
+    assert dropdown is not None
+    assert "is-active" not in dropdown.group(1) and "open" not in dropdown.group(2)
+    assert 'class="nav-dropdown-link is-active"' not in body
 
 
 def test_update_quiet_hours_persists_days_all_day_and_sleep(
