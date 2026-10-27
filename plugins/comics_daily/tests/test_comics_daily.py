@@ -848,7 +848,9 @@ def test_legacy_options_become_rows() -> None:
     assert not srv.customised({})
 
 
-def test_settings_decide_what_shows_and_the_layout(tmp_path: Path) -> None:
+def test_settings_decide_what_shows_and_the_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     settings = {
         "far_side": False,
         "far_side_count": 9,
@@ -869,11 +871,23 @@ def test_settings_decide_what_shows_and_the_layout(tmp_path: Path) -> None:
         ("manual:dilbert", "Dilbert"),
     ]
     assert [p.message for p in problems] == ["Give it an image URL first."]
+    queued: list[tuple[list[str], str | None]] = []
+    # No network: the render's work is captured, not started.
+    monkeypatch.setattr(
+        srv,
+        "_enqueue",
+        lambda root, sources, today, force=False, pasted=None: queued.append(
+            ([s.key for s in sources], pasted)
+        ),
+    )
     out = srv.fetch({"strips": "peanuts"}, settings, ctx={"data_dir": str(tmp_path)})
     assert out["layout"]["far_side"] is False and out["layout"]["gap"] == 12
+    # The cell's own options are ignored when settings are given.
+    assert queued == [(["gocomics:garfield"], "")]  # no pasted cookies without a host
     # The manual strip has no picture yet: noted, never fetched.
-    assert {"label": "Dilbert", "state": "missing"}.items() <= out["notes"][0].items()
-    assert srv._RUNS[str(tmp_path)].queue == [] or True
+    notes = {note["label"]: note for note in out["notes"]}
+    assert notes["Dilbert"]["state"] == "missing"
+    assert notes["Dilbert"]["message"] == "No picture uploaded yet."
 
 
 def test_settings_are_seeded_from_the_first_customised_cell(client: FlaskClient) -> None:
