@@ -1412,3 +1412,30 @@ def test_renders_and_fetch_now_hand_the_cookies_to_the_worker(
     with client.application.test_request_context():
         module.fetch({}, {}, ctx={"data_dir": _plugin(client).data_dir})
     assert handed == [SHIELD, SHIELD]
+
+
+def test_an_oversized_upload_is_refused_before_the_form_is_read(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(client)
+    monkeypatch.setattr(module.images, "MAX_UPLOAD_BYTES", 1000)
+    monkeypatch.setattr(module, "UPLOAD_OVERHEAD_BYTES", 1000)
+    client.get("/plugins/comics_daily/")
+    parsed: list[bool] = []
+    request_class = client.application.request_class
+    real = request_class.files
+
+    monkeypatch.setattr(
+        request_class,
+        "files",
+        property(lambda self: parsed.append(True) or real.__get__(self, request_class)),
+    )
+    data = {"file": (io.BytesIO(b"x" * 20_000), "big.png")}
+    client.post(
+        "/plugins/comics_daily/strips/garfield/upload",
+        data=data,
+        content_type="multipart/form-data",
+    )
+    assert parsed == []  # never parsed
+    assert any("That picture is over" in m for m in _messages(client))
+    assert "manual:garfield" not in _store(client).sources()

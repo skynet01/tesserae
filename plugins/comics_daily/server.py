@@ -68,6 +68,7 @@ from flask import (
     send_file,
     url_for,
 )
+from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.wrappers import Response
 
 try:
@@ -1572,6 +1573,8 @@ def _store() -> Any:
 # folded above the log of every fetch, upload and import.
 
 ADMIN_SETTINGS = True
+# Room for the multipart framing around an uploaded picture.
+UPLOAD_OVERHEAD_BYTES = 64 * 1024
 # The strip a session is set up on while checking a new name: one that
 # surely exists, so a name that doesn't can be told apart.
 WARM_STRIP = "garfield"
@@ -2050,8 +2053,20 @@ def blueprint() -> Blueprint:
 
     @bp.post("/strips/<slug>/upload")
     def upload_strip(slug: str) -> Response:
+        # Refuse an oversized body before the form is parsed: parsing spools
+        # every byte of it to disk first. The header decides when it is
+        # sent; the parser's own limit catches a body without one.
+        limit = images.MAX_UPLOAD_BYTES + UPLOAD_OVERHEAD_BYTES
+        if request.content_length is not None and request.content_length > limit:
+            flash(f"That picture is over {images.MAX_UPLOAD_BYTES // 1048576} MB.", "error")
+            return _back()
+        request.max_content_length = limit
         plugin, rows, row = _row_for(slug)
-        upload = request.files.get("file")
+        try:
+            upload = request.files.get("file")
+        except RequestEntityTooLarge:
+            flash(f"That picture is over {images.MAX_UPLOAD_BYTES // 1048576} MB.", "error")
+            return _back()
         if upload is None or not upload.filename:
             flash("Choose a picture to upload first.", "error")
             return _back()
