@@ -9,6 +9,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+from flask import Flask
+
+from app import ha_hooks
 from app.ha_discovery import (
     CMD_TOPIC_AUTOMATION,
     CMD_TOPIC_NOTIFY,
@@ -21,7 +25,7 @@ from app.ha_discovery import (
     HaHooks,
     HomeAssistantDiscovery,
 )
-from app.push import PushResult
+from app.push import PushManager, PushResult
 from app.state.deck_model import Deck, DeckPage
 from app.state.deck_nav_store import DeckNavStore
 from app.state.deck_store import DeckStore
@@ -1396,6 +1400,46 @@ def test_commands_for_a_display_run_in_the_order_sent(tmp_path: Path) -> None:
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/action", b"prev")
     assert ha._wait_commands_idle()
     assert events == ["push weather", "step 1", "notify hi", "push home refresh", "step -1"]
+
+
+@pytest.mark.parametrize("notify_all", [False, True])
+def test_notify_deadline_frees_command_worker_and_reports_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, notify_all: bool
+) -> None:
+    devices = _FakeRegistry([_FakeDevice("lounge", "Lounge")])
+    app = Flask(__name__)
+    ha, client, _, pages = _wire(
+        tmp_path,
+        devices=devices,
+        hooks=HaHooks(notify_fn=lambda device_id, msg: ha_hooks._notify(app, device_id, msg)),
+    )
+    manager = PushManager(
+        registry=MagicMock(),
+        page_store=pages,
+        transport=MagicMock(),
+        settings=SettingsStore(tmp_path / "settings.json"),
+        event_log=MagicMock(),
+        renders_dir=tmp_path / "renders",
+        base_url_fn=lambda: "http://lan.test:8000",
+    )
+    app.config.update(DEVICE_REGISTRY=devices, PUSH_MANAGER=manager)
+    monkeypatch.setattr(ha_hooks, "HA_PUSH_LOCK_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(ha_hooks, "render_notice", lambda *_args: b"notice")
+    ha.start()
+    manager._lock.acquire()
+    try:
+        if notify_all:
+            ha._on_notify_all_cmd(CMD_TOPIC_NOTIFY, b"Hello")
+        else:
+            ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/notify", b"Hello")
+        assert ha._wait_commands_idle(timeout=1)
+        error = _payload_for(client, "tesserae/ha/state/last_error")
+        assert error and error.startswith(b"Notify: Lounge:") and b"renderer busy" in error
+        assert _payload_for(client, "tesserae/ha/state/busy") == b"0"
+        assert manager._lock.locked()
+    finally:
+        manager._lock.release()
+        ha.stop()
 
 
 def test_queued_command_failures_reach_last_error(tmp_path: Path) -> None:

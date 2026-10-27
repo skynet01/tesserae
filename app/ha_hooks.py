@@ -380,13 +380,14 @@ def _notify(app: Flask, device_id: str | None, message: str) -> str | None:
                 device_id=device.id,
                 fit="fit",
                 source="home_assistant",
+                lock_timeout_s=HA_PUSH_LOCK_TIMEOUT_S,
             )
         except Exception as exc:
             logger.exception("HA hooks: notify render/push failed for %s", device.id)
             errors.append(f"{device.display_name}: {exc}")
             continue
-        if result.status == "failed":
-            errors.append(f"{device.display_name}: {result.error or 'push failed'}")
+        if result.status in ("failed", "busy"):
+            errors.append(f"{device.display_name}: {result.error or f'push {result.status}'}")
         else:
             sent += 1
     if errors and not sent:
