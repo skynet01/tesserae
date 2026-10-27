@@ -453,7 +453,13 @@ class ButtonService:
         return None
 
     def step(
-        self, *, device_id: str, forward: bool, source: str = "home_assistant"
+        self,
+        *,
+        device_id: str,
+        forward: bool,
+        source: str = "home_assistant",
+        lock_timeout_s: float | None = None,
+        settle_max_s: float | None = None,
     ) -> ButtonHandleResult:
         """Move one display a page forward or back on behalf of something
         other than the panel (Home Assistant's per-display Next / Previous).
@@ -487,7 +493,12 @@ class ButtonService:
         while automation is paused, like every user-initiated action. A
         manually pushed page doesn't change the lineup position, so a step
         from one goes to the page after the one the lineup was on. Every
-        outcome, no-ops included, writes a History row under ``source``."""
+        outcome, no-ops included, writes a History row under ``source``.
+
+        ``lock_timeout_s`` / ``settle_max_s`` bound the render-lock waits
+        (promoting a warmed frame, the push) and the settle, so a caller
+        such as Home Assistant's command worker can't block on a stuck
+        render; past them the step reports the renderer busy."""
         label = "next" if forward else "previous"
         with navigation_locked(self._deck_nav, [device_id], timeout=NAV_LOCK_TIMEOUT_S) as held:
             if not held:
@@ -499,9 +510,18 @@ class ButtonService:
                     f"{NAV_LOCK_TIMEOUT_S:.0f}s",
                     error="Display busy, try again.",
                 )
-            return self._step_locked(device_id=device_id, forward=forward, source=source)
+            deadlines: dict[str, Any] = {}
+            if lock_timeout_s is not None:
+                deadlines["lock_timeout_s"] = lock_timeout_s
+            if settle_max_s is not None:
+                deadlines["settle_max_s"] = settle_max_s
+            return self._step_locked(
+                device_id=device_id, forward=forward, source=source, deadlines=deadlines
+            )
 
-    def _step_locked(self, *, device_id: str, forward: bool, source: str) -> ButtonHandleResult:
+    def _step_locked(
+        self, *, device_id: str, forward: bool, source: str, deadlines: dict[str, Any]
+    ) -> ButtonHandleResult:
         """:meth:`step` with the display's navigation lock held."""
         button = "right" if forward else "left"
         label = "next" if forward else "previous"
@@ -541,6 +561,7 @@ class ButtonService:
                 origin_extra={"button": label, "deck_id": deck.id},
                 source=source,
                 remote=True,
+                deadlines=deadlines,
             )
         rotation = self._resolve_rotation(device_id)
         if rotation is None:
@@ -573,6 +594,7 @@ class ButtonService:
             origin_extra={"button": label},
             record_press=False,
             commit_on_delivery=True,
+            push_deadlines=deadlines,
         )
         push = result.push_result
         if self._push_getter() is None:
@@ -896,6 +918,7 @@ class ButtonService:
         origin_extra: dict[str, Any],
         source: str = "deck",
         remote: bool = False,
+        deadlines: dict[str, Any] | None = None,
     ) -> ButtonHandleResult:
         """Move the device to ``target_page`` within ``deck``: promote the
         pre-warmed frame when there is one (instant), else render on the fly.
@@ -911,9 +934,11 @@ class ButtonService:
         position and this commit."""
         pusher = self._push_getter()
         push_result: PushResult | None = None
+        deadlines = deadlines or {}
+        lock_kw = {k: v for k, v in deadlines.items() if k == "lock_timeout_s"}
         if pusher is not None:
             promoter = getattr(pusher, "promote_deck_page", None)
-            if not (callable(promoter) and promoter(device_id, target_page)):
+            if not (callable(promoter) and promoter(device_id, target_page, **lock_kw)):
                 # No warmed frame ready: render on the fly (Phase 4's refresh
                 # keeps decks warm so this is the cold-start / miss path).
                 push_result = pusher.push(
@@ -921,6 +946,7 @@ class ButtonService:
                     device_ids={device_id},
                     respect_quiet_hours=False,
                     source=source,
+                    **deadlines,
                 )
         delivered = pusher is not None and (
             push_result is None or push_result.status in DELIVERED_STATUSES
@@ -2079,6 +2105,7 @@ class ButtonService:
         origin_extra: dict[str, object],
         record_press: bool = True,
         commit_on_delivery: bool = False,
+        push_deadlines: dict[str, Any] | None = None,
     ) -> ButtonHandleResult:
         """Shared dispatch tail for button presses and touch strokes:
         run the action, persist rotation state, push the resolved page
@@ -2208,6 +2235,7 @@ class ButtonService:
                         device_ids={device_id},
                         respect_quiet_hours=False,
                         source=origin,
+                        **(push_deadlines or {}),
                     )
                     if push_result.status in DELIVERED_STATUSES:
                         if commit_on_delivery:

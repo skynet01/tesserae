@@ -47,9 +47,12 @@ class FakePush:
     block_on: str | None = None
     started: threading.Event = field(default_factory=threading.Event)
     release: threading.Event = field(default_factory=threading.Event)
+    promote_kwargs: list[dict[str, Any]] = field(default_factory=list)
+    push_kwargs: list[dict[str, Any]] = field(default_factory=list)
 
     def push(self, page_id: str, **kw: Any) -> PushResult:
         self.calls.append(page_id)
+        self.push_kwargs.append(kw)
         if page_id == self.block_on:
             self.started.set()
             assert self.release.wait(5), "test never released the push"
@@ -65,7 +68,8 @@ class FakePush:
             error=None if status in ("sent", "no_change") else f"{page_id} {status}",
         )
 
-    def promote_deck_page(self, _device_id: str, _page_id: str) -> bool:
+    def promote_deck_page(self, _device_id: str, _page_id: str, **kw: Any) -> bool:
+        self.promote_kwargs.append(kw)
         return False
 
     def device_in_quiet_hours(self, _device_id: str) -> bool:
@@ -431,3 +435,28 @@ def test_state_patch_is_field_level_and_compare_and_set(tmp_path: Path) -> None:
     assert states.get("frame").step_index == 2
     assert states.patch("frame", {"step_index": 3}, expect={"step_index": 2}) is not None
     assert states.get("frame").step_index == 3
+
+
+# ---------- Home Assistant's steps carry deadlines all the way down ----------
+
+
+def test_a_home_assistant_step_bounds_promote_and_push(tmp_path: Path) -> None:
+    from flask import Flask
+
+    from app import ha_hooks
+
+    rig = _rig(tmp_path)
+    rig.decks.upsert(_cycle("cycle", ["a", "b"]))
+    rig.nav.set("frame", "cycle", "a")
+    app = Flask(__name__)
+    device = type("D", (), {"id": "frame", "display_name": "Frame", "kind_of": "x"})()
+    app.config["DEVICE_REGISTRY"] = type("R", (), {"get": staticmethod(lambda _id: device)})()
+    app.config["BUTTON_SERVICE"] = rig.svc
+    assert ha_hooks._step_device(app, "frame", 1) is None
+    assert rig.push.promote_kwargs == [{"lock_timeout_s": 60.0}]
+    assert rig.push.push_kwargs[-1]["lock_timeout_s"] == 60.0
+    assert rig.push.push_kwargs[-1]["settle_max_s"] == 30.0
+    # A physical press is unchanged: no deadlines.
+    rig.svc.handle_button(device_id="frame", button="right", event_id=1)
+    assert rig.push.promote_kwargs[-1] == {}
+    assert "lock_timeout_s" not in rig.push.push_kwargs[-1]

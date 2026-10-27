@@ -1610,3 +1610,49 @@ def test_home_assistant_pushes_carry_deadlines(tmp_path: Path) -> None:
     assert _payload_for(client, "tesserae/ha/state/last_error") == (
         b"Lounge: another push kept the renderer busy for over 60s"
     )
+
+
+def test_lineup_actions_bound_their_renderer_waits(tmp_path: Path) -> None:
+    import time
+
+    from app import ha_discovery as ha_module
+
+    decks, nav, settings = _stores(tmp_path)
+    decks.upsert(_deck(pages=[DeckPage(page_id=p) for p in ("home", "weather", "a", "b")]))
+    nav.set("lounge", "morning", "home")
+    ha, client, pm, _ = _wire(
+        tmp_path,
+        devices=_FakeRegistry([_FakeDevice("lounge", "Lounge")]),
+        hooks=HaHooks(
+            deck_store=decks,
+            deck_nav_store=nav,
+            settings_store=settings,
+            invalidate_deck_fn=lambda _d: "renderer busy; warmed frames for lounge not cleared",
+        ),
+    )
+
+    def slow_warm(_page: str, _device: str, *, lock_timeout_s: float) -> bool:
+        time.sleep(min(lock_timeout_s, 0.15))  # waits its whole share
+        return False
+
+    pm.warm_deck_page.side_effect = slow_warm
+    ha.start()
+    original = ha_module.HA_WARM_BUDGET_S
+    ha_module.HA_WARM_BUDGET_S = 0.2
+    try:
+        ha._on_lineup_cmd("tesserae/ha/lineup/morning/cmd/action", b"push")
+        assert ha._wait_commands_idle()
+    finally:
+        ha_module.HA_WARM_BUDGET_S = original
+    # The budget ran out after two warms; the entry page still went out.
+    assert pm.warm_deck_page.call_count == 2
+    assert all(c.kwargs["lock_timeout_s"] <= 0.2 for c in pm.warm_deck_page.call_args_list)
+    assert pm.push.call_args.kwargs["lock_timeout_s"] == 60.0
+    ha._on_lineup_cmd("tesserae/ha/lineup/morning/cmd/action", b"next")
+    assert ha._wait_commands_idle()
+    assert pm.promote_deck_page.call_args.kwargs == {"lock_timeout_s": 60.0}
+    ha._on_lineup_cmd("tesserae/ha/lineup/morning/cmd/enabled", b"OFF")
+    assert ha._wait_commands_idle()
+    assert _payload_for(client, "tesserae/ha/state/last_error") == (
+        b"Morning: renderer busy; warmed frames for lounge not cleared"
+    )

@@ -375,9 +375,10 @@ def test_step_device_resolves_the_button_service_per_call(tmp_path: Path) -> Non
     app.config["BUTTON_SERVICE"] = svc
     assert hooks.step_device_fn("lounge", 1) is None
     assert hooks.step_device_fn("lounge", -1) is None
+    deadlines = {"lock_timeout_s": 60.0, "settle_max_s": 30.0}
     assert [c.kwargs for c in svc.step.call_args_list] == [
-        {"device_id": "lounge", "forward": True, "source": "home_assistant"},
-        {"device_id": "lounge", "forward": False, "source": "home_assistant"},
+        {"device_id": "lounge", "forward": True, "source": "home_assistant", **deadlines},
+        {"device_id": "lounge", "forward": False, "source": "home_assistant", **deadlines},
     ]
 
 
@@ -409,3 +410,17 @@ def test_publish_toggles_are_default_on_settings_fields() -> None:
         "ha_discovery_lineup_controls",
         "ha_discovery_dashboard_buttons",
     ]
+
+
+def test_invalidating_a_lineup_reports_a_busy_renderer(tmp_path: Path) -> None:
+    app = _app(tmp_path, _Device("lounge"))
+    push = MagicMock()
+    push.clear_deck_cache.return_value = False  # lock not free in time
+    app.config["PUSH_MANAGER"] = push
+    app.config["DECK_NAV_STORE"] = MagicMock()
+    deck = MagicMock(device_ids=["lounge"])
+    error = ha_hooks._invalidate_deck(app, deck)
+    assert error and "renderer busy" in error and "lounge" in error
+    assert push.clear_deck_cache.call_args.kwargs == {"lock_timeout_s": 60.0}
+    push.clear_deck_cache.return_value = True
+    assert ha_hooks._invalidate_deck(app, deck) is None

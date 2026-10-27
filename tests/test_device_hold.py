@@ -681,3 +681,111 @@ def test_push_lock_wait_is_bounded_and_reports_busy(tmp_path: Path) -> None:
         is None
     )
     manager._lock.release()
+
+
+# ---------- coalescing tickets that time out ----------
+
+
+def _hog(manager: Any):
+    import threading
+
+    held, release = threading.Event(), threading.Event()
+
+    def run() -> None:
+        with manager._lock:
+            held.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert held.wait(5)
+    return thread, release
+
+
+def test_sends_that_gave_up_never_supersede_one_still_waiting(tmp_path: Path) -> None:
+    # Sol's case: A waits normally, B and C queue behind it, B then C time
+    # out; the ticket fell back to B's abandoned one and A came back
+    # "superseded" although nothing newer was delivered.
+    import threading
+
+    manager, _events = _real_push_manager(tmp_path)
+    hog, release = _hog(manager)
+    outcome: dict[str, Any] = {}
+
+    def a() -> None:
+        outcome["a"] = manager._acquire_or_supersede(
+            device_id="hallway", source="t", target="home", bypass_coalesce=False
+        )
+
+    waiter = threading.Thread(target=a)
+    waiter.start()
+    threading.Event().wait(0.1)  # A's ticket is issued and waiting
+    results: dict[str, Any] = {}
+
+    def give_up(name: str, wait: float) -> None:
+        results[name] = manager._acquire_or_supersede(
+            device_id="hallway",
+            source="t",
+            target="home",
+            bypass_coalesce=False,
+            lock_timeout_s=wait,
+        )
+
+    # B and C queue together behind A; B gives up first, then C.
+    b = threading.Thread(target=give_up, args=("b", 0.3))
+    b.start()
+    threading.Event().wait(0.05)
+    c = threading.Thread(target=give_up, args=("c", 0.5))
+    c.start()
+    b.join(5)
+    c.join(5)
+    assert results == {"b": "busy", "c": "busy"}
+    release.set()
+    hog.join(5)
+    waiter.join(5)
+    assert outcome["a"] is None  # A got the lock and proceeds
+    manager._lock.release()
+
+
+def test_a_newer_waiting_send_still_supersedes(tmp_path: Path) -> None:
+    import threading
+
+    manager, _events = _real_push_manager(tmp_path)
+    hog, release = _hog(manager)
+    outcome: dict[str, Any] = {}
+
+    def send(name: str) -> None:
+        got = manager._acquire_or_supersede(
+            device_id="hallway", source="t", target="home", bypass_coalesce=False
+        )
+        outcome[name] = got
+        if got is None:
+            manager._lock.release()
+
+    first = threading.Thread(target=send, args=("first",))
+    first.start()
+    threading.Event().wait(0.1)
+    second = threading.Thread(target=send, args=("second",))
+    second.start()
+    threading.Event().wait(0.1)
+    release.set()
+    for thread in (hog, first, second):
+        thread.join(5)
+    assert outcome == {"first": "superseded", "second": None}
+
+
+def test_deck_cache_operations_give_up_when_the_renderer_stays_busy(tmp_path: Path) -> None:
+    import time
+
+    manager, _events = _real_push_manager(tmp_path)
+    hog, release = _hog(manager)
+    try:
+        started = time.monotonic()
+        assert manager.promote_deck_page("hallway", "home", lock_timeout_s=0.1) is False
+        assert manager.warm_deck_page("home", "hallway", lock_timeout_s=0.1) is False
+        assert manager.clear_deck_cache("hallway", lock_timeout_s=0.1) is False
+        assert time.monotonic() - started < 2.0
+    finally:
+        release.set()
+        hog.join(5)
+    assert manager.clear_deck_cache("hallway", lock_timeout_s=1.0) is True

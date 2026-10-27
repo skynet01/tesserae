@@ -49,7 +49,10 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   that doesn't land shows on Last error, and so does one still running
   after two minutes. A Home Assistant send gives up as busy after waiting a
   minute for another render, and waits at most 30 seconds for its widgets
-  to finish. Commands still waiting when discovery stops (on a settings
+  to finish; the same limits cover showing a pre-rendered page, Push now's
+  pre-renders and clearing a lineup's pre-rendered pages. A send that gave
+  up no longer makes an earlier one that was still waiting count as
+  replaced. Commands still waiting when discovery stops (on a settings
   save) are cancelled and named on Last error. Hold and the app switches
   still apply at once.
 - A display's lineup position follows daily and interval lineups too, so a

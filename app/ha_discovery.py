@@ -136,6 +136,9 @@ COMMAND_TIME_LIMIT_S = 120.0
 # settle (the default allows 300 s; follow-ups finish a page sent early).
 HA_PUSH_LOCK_TIMEOUT_S = 60.0
 HA_SETTLE_MAX_S = 30.0
+# Push now warms every page of the lineup first; together those warms get
+# this long before the entry page is pushed anyway.
+HA_WARM_BUDGET_S = 60.0
 # How long a stop waits for the command in progress before returning.
 COMMAND_STOP_WAIT_S = 10.0
 
@@ -242,7 +245,7 @@ class HaHooks:
     telemetry: Any = None
     button_service: Any = None
     timezone_fn: Callable[[], tzinfo | None] | None = None
-    invalidate_deck_fn: Callable[[Any], None] | None = None
+    invalidate_deck_fn: Callable[[Any], str | None] | None = None
     set_device_quiet_override_fn: Callable[[str, bool], str | None] | None = None
     device_config_fn: Callable[[str], dict[str, Any]] | None = None
     set_device_config_fn: Callable[[str, dict[str, Any]], str | None] | None = None
@@ -1452,26 +1455,35 @@ class HomeAssistantDiscovery:
 
     def _set_lineup_enabled_by_id(self, deck_id: str, enabled: bool) -> str | None:
         deck = self._deck(deck_id)
-        if deck is not None:
-            self._set_lineup_enabled(deck, enabled)
-        return None
+        return self._set_lineup_enabled(deck, enabled) if deck is not None else None
 
-    def _set_lineup_enabled(self, deck: Any, enabled: bool) -> None:
+    def _set_lineup_enabled(self, deck: Any, enabled: bool) -> str | None:
+        """Lineup switch; returns why its warmed frames couldn't be dropped,
+        if they couldn't (the renderer stayed busy past its deadline)."""
         store = self._hooks.deck_store
         if store is None or bool(deck.enabled) == enabled:
-            return
+            return None
         logger.info("HA discovery: lineup %r %s", deck.id, "enabled" if enabled else "disabled")
         updated = deck.model_copy(update={"enabled": enabled})
         store.upsert(updated)
-        if self._hooks.invalidate_deck_fn is not None:
-            with contextlib.suppress(Exception):
-                self._hooks.invalidate_deck_fn(updated)
+        error = self._invalidate(updated)
         # The store listener republishes configs + states; publish the
         # switch state directly too so a store without listeners still
         # reflects the change immediately.
         self._publish_str(
             _lineup_state(str(deck.id), "enabled"), "ON" if enabled else "OFF", retain=True
         )
+        return error
+
+    def _invalidate(self, deck: Any) -> str | None:
+        fn = self._hooks.invalidate_deck_fn
+        if fn is None:
+            return None
+        try:
+            return fn(deck)
+        except Exception:
+            logger.exception("HA discovery: invalidating lineup %r failed", deck.id)
+            return "couldn't drop the lineup's warmed frames"
 
     def _lineup_go_live(self, deck: Any, device_ids: set[str]) -> str | None:
         """Warm every page for the devices, push the entry page, and record
@@ -1484,10 +1496,18 @@ class HomeAssistantDiscovery:
         try:
             warm = getattr(pusher, "warm_deck_page", None)
             if callable(warm):
+                # One budget for all the warms (each waits only for what's
+                # left of it): past it the rest are skipped, the lineup's
+                # background warm fills them in, and the push goes ahead.
+                warm_deadline = time.monotonic() + HA_WARM_BUDGET_S
                 for device_id in device_ids:
                     for page in deck.pages:
+                        left = warm_deadline - time.monotonic()
+                        if left <= 0:
+                            logger.info("HA discovery: lineup %r warm budget spent", deck.id)
+                            break
                         with contextlib.suppress(Exception):
-                            warm(page.page_id, device_id)
+                            warm(page.page_id, device_id, lock_timeout_s=left)
             entry = getattr(deck, "resolved_entry_page_id", None) or deck.pages[0].page_id
             nav = self._hooks.deck_nav_store
             # Deliver and record together under the displays' navigation
@@ -1543,7 +1563,10 @@ class HomeAssistantDiscovery:
                     idx = 0
                 target = order[(idx + delta) % len(order)]
                 promoter = getattr(pusher, "promote_deck_page", None)
-                promoted = bool(callable(promoter) and promoter(device_id, target))
+                promoted = bool(
+                    callable(promoter)
+                    and promoter(device_id, target, lock_timeout_s=HA_PUSH_LOCK_TIMEOUT_S)
+                )
                 if not promoted:
                     result = pusher.push(
                         target,
@@ -1650,21 +1673,20 @@ class HomeAssistantDiscovery:
             return None
         device_id = str(device.id)
         if name == LINEUP_NONE:
+            error: str | None = None
             for deck in self._decks():
                 if device_id in deck.device_ids:
                     updated = deck.model_copy(
                         update={"device_ids": [d for d in deck.device_ids if d != device_id]}
                     )
                     store.upsert(updated)
-                    if self._hooks.invalidate_deck_fn is not None:
-                        with contextlib.suppress(Exception):
-                            self._hooks.invalidate_deck_fn(deck)
+                    error = self._invalidate(deck) or error
             nav = self._hooks.deck_nav_store
             if nav is not None:
                 with contextlib.suppress(Exception):
                     nav.clear(device_id)
             self._publish_device_runtime(device)
-            return None
+            return error
         deck = self._deck_by_name(name)
         if deck is None:
             return None

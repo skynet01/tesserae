@@ -45,7 +45,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -545,7 +545,14 @@ class PushManager:
         # ``bypass_coalesce=True`` (user-initiated pushes so a
         # panic-click Send never gets silently dropped).
         self._gen_lock = threading.Lock()
+        # Coalescing tickets per device (``None`` = multi-device pushes):
+        # the last one issued, those still waiting for the lock, and the
+        # newest that got the lock. A waiter is superseded only by a newer
+        # ticket that is still waiting or got the lock; one that gave up
+        # (``lock_timeout_s``) supersedes nobody.
         self._device_gens: dict[str | None, int] = {}
+        self._waiting_tickets: dict[str | None, set[int]] = {}
+        self._granted_ticket: dict[str | None, int] = {}
         # Renders accumulate in renders_dir as events age out (the event-log
         # cap evicts rows but not their artifacts). Sweep orphans on a
         # rolling basis so the dir stays bounded without a restart.
@@ -950,15 +957,23 @@ class PushManager:
         pending = re.search(r'name="tesserae-pending" content="(\d+)"', html)
         return (int(hint.group(1)) if hint else 0), (int(pending.group(1)) if pending else 0)
 
-    def warm_deck_page(self, page_id: str, device_id: str) -> bool:
+    def warm_deck_page(
+        self, page_id: str, device_id: str, *, lock_timeout_s: float | None = None
+    ) -> bool:
         """Render a deck page for a device into the pre-render cache WITHOUT
         changing the frame the device is currently serving. Returns True when a
         frame was cached; best-effort, a render miss / failure returns False.
 
         Renders under the push lock (like a normal push), so warms serialise
-        with real pushes rather than racing them."""
+        with real pushes rather than racing them. With ``lock_timeout_s`` a
+        warm that can't get the lock in time is skipped (False)."""
         stamp: dict[str, dict[str, Any]] = {}
-        with self._lock:
+        with self._render_lock_within(lock_timeout_s) as held:
+            if not held:
+                logger.info(
+                    "deck warm skipped page=%s device=%s: renderer busy", page_id, device_id
+                )
+                return False
             try:
                 result = self._push_page_locked(
                     page_id,
@@ -988,11 +1003,17 @@ class PushManager:
             self._deck_renders.setdefault(device_id, {})[page_id] = info
         return True
 
-    def promote_deck_page(self, device_id: str, page_id: str) -> bool:
+    def promote_deck_page(
+        self, device_id: str, page_id: str, *, lock_timeout_s: float | None = None
+    ) -> bool:
         """Swap a pre-warmed deck frame into the device's live slot so the next
         ``/frame`` serves it with no render. Returns False on a cache miss, the
-        caller should then fall back to an on-the-fly push."""
-        with self._lock:
+        caller should then fall back to an on-the-fly push. With
+        ``lock_timeout_s``, also False when the lock isn't free in time (the
+        fallback push then reports the renderer busy)."""
+        with self._render_lock_within(lock_timeout_s) as held:
+            if not held:
+                return False
             info = self._deck_renders.get(device_id, {}).get(page_id)
             if info is None:
                 return False
@@ -1043,21 +1064,44 @@ class PushManager:
             info = self._deck_renders.get(device_id, {}).get(page_id)
             return dict(info) if info is not None else None
 
-    def clear_deck_cache(self, device_id: str, *, keep_pages: set[str] | None = None) -> None:
+    def clear_deck_cache(
+        self,
+        device_id: str,
+        *,
+        keep_pages: set[str] | None = None,
+        lock_timeout_s: float | None = None,
+    ) -> bool:
         """Drop warmed frames for a device: all of them, or all except
         ``keep_pages``. Used when a deck's page set changes or a device unbinds
-        so stale warmed frames don't linger (and stop pinning their artifacts)."""
-        with self._lock:
+        so stale warmed frames don't linger (and stop pinning their artifacts).
+        False only when ``lock_timeout_s`` passed before the lock was free
+        (nothing was dropped)."""
+        with self._render_lock_within(lock_timeout_s) as held:
+            if not held:
+                return False
             if keep_pages is None:
                 self._deck_renders.pop(device_id, None)
-                return
+                return True
             per = self._deck_renders.get(device_id)
             if per is None:
-                return
+                return True
             for pid in [p for p in per if p not in keep_pages]:
                 per.pop(pid, None)
             if not per:
                 self._deck_renders.pop(device_id, None)
+        return True
+
+    @contextlib.contextmanager
+    def _render_lock_within(self, lock_timeout_s: float | None) -> Iterator[bool]:
+        """Hold the render lock for the body, waiting at most
+        ``lock_timeout_s`` (forever when None); yields whether it's held."""
+        timeout = -1.0 if lock_timeout_s is None else max(0.0, lock_timeout_s)
+        held = self._lock.acquire(timeout=timeout)
+        try:
+            yield held
+        finally:
+            if held:
+                self._lock.release()
 
     # -- offline-album frame cache (frame-cache collections, #177) -------
 
@@ -3542,18 +3586,31 @@ class PushManager:
         with self._gen_lock:
             my_gen = self._device_gens.get(device_id, 0) + 1
             self._device_gens[device_id] = my_gen
+            self._waiting_tickets.setdefault(device_id, set()).add(my_gen)
         if not self._lock.acquire(timeout=timeout):
             with self._gen_lock:
-                if self._device_gens.get(device_id) == my_gen:
-                    self._device_gens[device_id] = my_gen - 1
+                # Withdraw only this ticket: an expired ticket never stands
+                # in for a newer send, whichever order they expire in.
+                self._drop_ticket_locked(device_id, my_gen)
             return "busy"
         with self._gen_lock:
-            latest = self._device_gens.get(device_id, 0)
-        if my_gen < latest:
+            self._drop_ticket_locked(device_id, my_gen)
+            newer_waiting = max(self._waiting_tickets.get(device_id, ()), default=0)
+            newer = max(newer_waiting, self._granted_ticket.get(device_id, 0))
+            if newer <= my_gen:
+                self._granted_ticket[device_id] = my_gen
+        if newer > my_gen:
             self._lock.release()
             self._log_superseded(source=source, target=target)
             return "superseded"
         return None
+
+    def _drop_ticket_locked(self, device_id: str | None, ticket: int) -> None:
+        waiting = self._waiting_tickets.get(device_id)
+        if waiting is not None:
+            waiting.discard(ticket)
+            if not waiting:
+                self._waiting_tickets.pop(device_id, None)
 
     def _log_failure(
         self,
