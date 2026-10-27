@@ -1896,3 +1896,73 @@ def test_an_incomplete_far_side_set_counts_as_a_failed_try(tmp_path: Path) -> No
     # Out of tries for today, however long it waits.
     assert not srv.is_due(srv.FARSIDE, record, TODAY.isoformat(), now + 20 * 3600)
     assert srv.is_due(srv.FARSIDE, record, "2026-10-26", now + 20 * 3600)
+
+
+def test_identical_cells_on_different_screens_keep_their_own_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sol's collision: two cells with the same options (one ``cell_id``),
+    a big panel's render must not move the small screen's turn."""
+    monkeypatch.setattr(srv, "_today", lambda: TODAY)
+    monkeypatch.setattr(srv, "_enqueue", lambda *a, **k: None)
+    store = images.Store(tmp_path)
+    ok = {"fetched_on": TODAY.isoformat(), "last_success": time.time(), "error": None}
+    for key in ("gocomics:garfield", "gocomics:peanuts", "gocomics:bc"):
+        name = store.add(key, images.normalise(_png((1200, 380))))
+        store.update(
+            key,
+            lambda e, name=name: e.update(
+                pictures=[{"file": name, "w": 1200, "h": 380}], edition=TODAY.isoformat(), **ok
+            ),
+        )
+    settings = {"far_side": False, "strips": [{"slug": s} for s in ("garfield", "peanuts", "bc")]}
+
+    def render(placement: str, w: int, h: int) -> list[str]:
+        ctx = {
+            "data_dir": str(tmp_path),
+            "cell_w": w,
+            "cell_h": h,
+            "cell_id": "same",
+            "settled": True,
+        }
+        if placement:
+            ctx["placement_id"] = placement
+        return [s["id"] for s in srv.fetch({}, settings, ctx=ctx)["strips"]]
+
+    assert render("page1/c1@small", 800, 300) == ["garfield"]
+    assert render("page2/c1@big", 1440, 2560) == ["garfield", "peanuts", "bc"]
+    # Without a placement id, the cell's size keeps them apart too.
+    render("", 800, 300)
+    render("", 1440, 2560)
+    turns = json.loads((tmp_path / images.ROTATION_FILE).read_text())
+    assert set(turns) == {"page1/c1@small", "page2/c1@big", "same:800x300", "same:1440x2560"}
+    assert turns["page1/c1@small"]["shown"] == 1 and turns["page2/c1@big"]["shown"] == 3
+
+
+def test_the_composer_gives_each_grid_cell_its_placement(app: Any) -> None:
+    from app import composer
+
+    seen: list[str] = []
+
+    def fake_fetch(plugin_id: str, *a: Any, placement: str = "", **k: Any) -> Any:
+        seen.append(placement)
+        return {}
+
+    with app.app_context():
+        original = composer._fetch_plugin_data
+        composer._fetch_plugin_data = fake_fetch  # type: ignore[assignment]
+        try:
+            composer._parallel_fetch_plugin_data(
+                [
+                    {"plugin_id": "comics_daily", "resolved_options": {}, "cell": {"id": "a"}},
+                    {"plugin_id": "comics_daily", "resolved_options": {}, "cell": {"id": "b"}},
+                ],
+                1440,
+                2560,
+                False,
+                target_device_id="dev1",
+                page_id="p9",
+            )
+        finally:
+            composer._fetch_plugin_data = original  # type: ignore[assignment]
+    assert sorted(seen) == ["p9/a@dev1", "p9/b@dev1"]

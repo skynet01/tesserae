@@ -593,6 +593,7 @@ def _parallel_fetch_plugin_data(
     target_device_id: str = "",
     page_name: str = "",
     page_icon: str = "",
+    page_id: str = "",
 ) -> dict[int, Any]:
     """Run each cell's ``server.py`` fetch() in a worker thread.
 
@@ -605,7 +606,7 @@ def _parallel_fetch_plugin_data(
     """
     import concurrent.futures
 
-    indexed: list[tuple[int, str, dict[str, Any], int, int]] = []
+    indexed: list[tuple[int, str, dict[str, Any], int, int, str]] = []
     sample_results: dict[int, Any] = {}
     for idx, meta in enumerate(cells_meta):
         plugin_id = meta["plugin_id"]
@@ -630,7 +631,10 @@ def _parallel_fetch_plugin_data(
         cell = meta.get("cell") or {}
         cell_w = int(cell.get("w") or 0)
         cell_h = int(cell.get("h") or 0)
-        indexed.append((idx, plugin_id, meta["resolved_options"], cell_w, cell_h))
+        placement = f"{page_id}/{cell.get('id') or idx}" if page_id else ""
+        if placement and target_device_id:
+            placement += f"@{target_device_id}"
+        indexed.append((idx, plugin_id, meta["resolved_options"], cell_w, cell_h, placement))
 
     if not indexed:
         return sample_results
@@ -640,7 +644,9 @@ def _parallel_fetch_plugin_data(
     # local proxy and won't follow us off the request thread.
     app = current_app._get_current_object()  # type: ignore[attr-defined]
 
-    def _worker(plugin_id: str, options: dict[str, Any], cell_w: int, cell_h: int) -> Any:
+    def _worker(
+        plugin_id: str, options: dict[str, Any], cell_w: int, cell_h: int, placement: str
+    ) -> Any:
         with app.app_context():
             return _fetch_plugin_data(
                 plugin_id,
@@ -655,6 +661,7 @@ def _parallel_fetch_plugin_data(
                 target_device_id=target_device_id,
                 page_name=page_name,
                 page_icon=page_icon,
+                placement=placement,
             )
 
     results: dict[int, Any] = {}
@@ -679,8 +686,8 @@ def _parallel_fetch_plugin_data(
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
     try:
         futures = {
-            pool.submit(_worker, plugin_id, options, cw, ch): idx
-            for idx, plugin_id, options, cw, ch in indexed
+            pool.submit(_worker, plugin_id, options, cw, ch, placement): idx
+            for idx, plugin_id, options, cw, ch, placement in indexed
         }
         try:
             for fut in concurrent.futures.as_completed(futures, timeout=_HYDRATE_OVERALL_TIMEOUT_S):
@@ -723,7 +730,7 @@ def _parallel_fetch_plugin_data(
     # returned error states), stash it under its (plugin, options,
     # panel) key. If we synthesised the error (executor exception or
     # overall timeout), try to serve the previous successful result.
-    for idx, plugin_id, options, _cw, _ch in indexed:
+    for idx, plugin_id, options, _cw, _ch, _placement in indexed:
         result = results.get(idx)
         if result is None:
             continue
@@ -755,6 +762,7 @@ def _fetch_plugin_data(
     target_device_id: str = "",
     page_name: str = "",
     page_icon: str = "",
+    placement: str = "",
 ) -> Any:
     """Call the plugin's server.py fetch() if present. Returns None on miss.
 
@@ -826,6 +834,12 @@ def _fetch_plugin_data(
         "cell_id": cell_id_of(plugin_id, _client_safe_options(plugin_id, options)),
         "settled": (not preview) if settled is None else settled,
     }
+    # Which placement this is (page, cell, device), when the caller knows:
+    # unlike ``cell_id``, two identical cells on different pages or screens
+    # get different ones, so per-placement state (a rotation's turn) doesn't
+    # collide between a big panel and a small one.
+    if placement:
+        ctx["placement_id"] = placement
     # ``fresh`` (from ?fresh=1 on the probe / render) tells a widget to bypass
     # its own data_dir cache, so an edit to server.py is instantly verifiable.
     # Widgets opt in by checking ctx.get("fresh"); the field is absent otherwise
@@ -1060,6 +1074,7 @@ def _hydrate_page(
         target_device_id=str(page_dict.get("target_device_id") or ""),
         page_name=str(page_dict.get("name") or ""),
         page_icon=str(page_dict.get("icon") or ""),
+        page_id=str(page_dict.get("id") or ""),
     )
 
     # #243: remember when a widget says its own output goes stale, so the

@@ -1528,7 +1528,12 @@ def fit_screen(
     if len(items) < 2:
         return payload
     settled = bool(ctx.get("settled", not ctx.get("preview")))
-    placement = str(ctx.get("cell_id") or "default")
+    # The placement's own turn: the host's placement id (page, cell,
+    # device) when it gives one; else the options' id with the cell's size,
+    # so identical cells on a big panel and a small one never share a turn.
+    placement = str(ctx.get("placement_id") or "") or (
+        f"{ctx.get('cell_id') or 'default'}:{ctx.get('cell_w') or 0}x{ctx.get('cell_h') or 0}"
+    )
 
     def decide(start: int) -> Any:
         return screen.plan(
