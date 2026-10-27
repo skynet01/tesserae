@@ -398,11 +398,9 @@ def test_home_assistant_hold_pauses_and_resumes_the_display(tmp_path: Path) -> N
 # ---------- the push manager's own exclusion ----------
 
 
-def test_push_manager_excludes_held_displays(tmp_path: Path) -> None:
-    import io
-    from unittest.mock import patch
-
-    from PIL import Image
+def _real_push_manager(tmp_path: Path) -> tuple[Any, Any]:
+    """A real PushManager over the bundled devices, one esp32 instance
+    ``hallway`` and a page ``home`` bound to it."""
 
     from app import device_loader, device_service, renderer_loader
     from app.main import REPO_ROOT
@@ -469,6 +467,16 @@ def test_push_manager_excludes_held_displays(tmp_path: Path) -> None:
         base_url_fn=lambda: "http://broker.local:8000",
         devices=devices,
     )
+    return manager, events
+
+
+def test_push_manager_excludes_held_displays(tmp_path: Path) -> None:
+    import io
+    from unittest.mock import patch
+
+    from PIL import Image
+
+    manager, events = _real_push_manager(tmp_path)
     png = io.BytesIO()
     Image.new("RGB", (10, 10), (0, 0, 0)).save(png, format="PNG")
     with patch("app.push.render_to_png") as rtp:
@@ -639,3 +647,37 @@ def test_a_deleted_schedule_is_not_replayed(tmp_path: Path) -> None:
     rig.schedules.delete("news")
     rig.sched._tick_once(at(10, 21))
     assert rig.push.calls == []
+
+
+def test_push_lock_wait_is_bounded_and_reports_busy(tmp_path: Path) -> None:
+    import threading
+    import time
+
+    manager, _events = _real_push_manager(tmp_path)
+    held, release = threading.Event(), threading.Event()
+
+    def hog() -> None:  # another push holding the render lock
+        with manager._lock:
+            held.set()
+            release.wait(5)
+
+    thread = threading.Thread(target=hog)
+    thread.start()
+    assert held.wait(5)
+    try:
+        started = time.monotonic()
+        result = manager.push("home", lock_timeout_s=0.2, settle=False)
+        assert time.monotonic() - started < 2.0
+    finally:
+        release.set()
+        thread.join(5)
+    assert result.status == "busy"
+    assert "busy" in (result.error or "")
+    # The withdrawn ticket doesn't supersede anyone later.
+    assert (
+        manager._acquire_or_supersede(
+            device_id=None, source="t", target="home", bypass_coalesce=False, lock_timeout_s=1.0
+        )
+        is None
+    )
+    manager._lock.release()

@@ -124,11 +124,20 @@ HOLD_MAX_MINUTES = 720
 # is plenty; more are refused with a Last error.
 COMMAND_QUEUE_MAX = 32
 
-# A command running longer than this is reported on Last error and left to
-# finish on its own thread while a fresh worker takes the rest of the
-# queue, so one stuck render can't hold up every display's commands. Above
-# the navigation-lock wait (30 s) and a typical settle, below forever.
+# A command still running after this long is reported on Last error (it
+# keeps running; nothing is abandoned). What actually bounds a command is
+# the deadline on each thing it can wait for: the push lock and settle caps
+# below, the button service's navigation-lock timeout (30 s), and the
+# render's own timeouts (Playwright navigation 15 s, compose signal 25 s,
+# 3 attempts, the browser pool's per-request budget).
 COMMAND_TIME_LIMIT_S = 120.0
+# Home Assistant's pushes give up as "busy" after waiting this long for the
+# push manager's render lock, and wait at most this long for widgets to
+# settle (the default allows 300 s; follow-ups finish a page sent early).
+HA_PUSH_LOCK_TIMEOUT_S = 60.0
+HA_SETTLE_MAX_S = 30.0
+# How long a stop waits for the command in progress before returning.
+COMMAND_STOP_WAIT_S = 10.0
 
 # App-section switches (Settings -> Server -> Network & integrations) that
 # trim what's published. Both default ON when absent, so an install that
@@ -881,13 +890,15 @@ class HomeAssistantDiscovery:
         self._commands: queue.Queue[tuple[str, Callable[[], str | None]] | None] = queue.Queue(
             maxsize=COMMAND_QUEUE_MAX
         )
-        # The thread that owns the queue. It clears this itself on exit;
-        # a worker that finds it isn't the owner any more (abandoned over
-        # a stuck job) stops after its current job.
+        # The one thread that owns the queue; it clears this itself on exit.
         self._command_worker: threading.Thread | None = None
         self._command_worker_lock = threading.Lock()
         self._commands_stopping = threading.Event()
         self._command_time_limit_s = COMMAND_TIME_LIMIT_S
+        # Token of the job running now, so a late watchdog never reports
+        # on the job after it.
+        self._job_seq = 0
+        self._running_job: int | None = None
         self._ticker: threading.Thread | None = None
 
     # -- device helpers -------------------------------------------------
@@ -1334,8 +1345,15 @@ class HomeAssistantDiscovery:
 
     def _push_and_report(self, page_id: str, **kwargs: Any) -> str | None:
         """Push from the command worker; the reason when it didn't reach a
-        display (failed, superseded, page gone, bound to nothing...)."""
-        result = self._push_manager.push(page_id, source="home_assistant", **kwargs)
+        display (failed, superseded, page gone, bound to nothing, the
+        renderer busy past ``HA_PUSH_LOCK_TIMEOUT_S``...)."""
+        result = self._push_manager.push(
+            page_id,
+            source="home_assistant",
+            lock_timeout_s=HA_PUSH_LOCK_TIMEOUT_S,
+            settle_max_s=HA_SETTLE_MAX_S,
+            **kwargs,
+        )
         if result.status in DELIVERED_STATUSES:
             return None
         return result.error or f"push {result.status}"
@@ -1481,6 +1499,8 @@ class HomeAssistantDiscovery:
                     respect_quiet_hours=False,
                     force_publish=True,
                     source="home_assistant",
+                    lock_timeout_s=HA_PUSH_LOCK_TIMEOUT_S,
+                    settle_max_s=HA_SETTLE_MAX_S,
                 )
                 if nav is not None and result.status in DELIVERED_STATUSES:
                     for device_id in device_ids:
@@ -1530,6 +1550,8 @@ class HomeAssistantDiscovery:
                         device_ids={device_id},
                         respect_quiet_hours=False,
                         source="home_assistant",
+                        lock_timeout_s=HA_PUSH_LOCK_TIMEOUT_S,
+                        settle_max_s=HA_SETTLE_MAX_S,
                     )
                     if result.status not in DELIVERED_STATUSES:
                         # The panel didn't move: leave its position alone.
@@ -1769,25 +1791,43 @@ class HomeAssistantDiscovery:
             worker.start()
 
     def _stop_command_worker(self) -> None:
-        """Ask the worker to finish what's queued and exit (bounded wait).
-        The stop is an Event, so a full queue can't swallow it; the
-        sentinel only wakes an idle worker sooner. The worker keeps owning
-        the queue until it has actually exited."""
+        """Stop the worker: commands still queued are cancelled (and named on
+        Last error), the one in progress gets up to ``COMMAND_STOP_WAIT_S``
+        to finish. Stopping is an Event, so a full queue can't swallow it,
+        and the worker keeps owning the queue until it has exited (a start
+        before then takes it back rather than running a second one)."""
         with self._command_worker_lock:
             worker = self._command_worker
             self._commands_stopping.set()
+        cancelled: list[str] = []
+        while True:
+            try:
+                item = self._commands.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                cancelled.append(item[0])
+            self._commands.task_done()
+        if cancelled:
+            logger.warning(
+                "HA discovery: stopping; cancelled %d queued command(s): %s",
+                len(cancelled),
+                ", ".join(cancelled),
+            )
+            self._publish_str(
+                STATE_TOPIC_LAST_ERROR,
+                f"Cancelled when Home Assistant discovery stopped: {', '.join(cancelled)}"[:240],
+                retain=True,
+            )
         if worker is None or not worker.is_alive():
             return
         with contextlib.suppress(queue.Full):
-            self._commands.put_nowait(None)
-        worker.join(timeout=2.0)
+            self._commands.put_nowait(None)  # wakes an idle worker sooner
+        worker.join(timeout=COMMAND_STOP_WAIT_S)
 
     def _command_worker_loop(self) -> None:
         me = threading.current_thread()
         while True:
-            with self._command_worker_lock:
-                if self._command_worker is not me:
-                    return  # abandoned over a stuck job; a new worker has the queue
             try:
                 item = self._commands.get(timeout=0.2)
             except queue.Empty:
@@ -1805,8 +1845,12 @@ class HomeAssistantDiscovery:
                 self._commands.task_done()
 
     def _run_command(self, label: str, job: Callable[[], str | None]) -> None:
-        me = threading.current_thread()
-        watchdog = threading.Timer(self._command_time_limit_s, self._command_overran, (me, label))
+        with self._command_worker_lock:
+            self._job_seq += 1
+            token = self._running_job = self._job_seq
+        watchdog = threading.Timer(
+            self._command_time_limit_s, self._command_overran, (token, label)
+        )
         watchdog.daemon = True
         watchdog.start()
         self._publish_str(STATE_TOPIC_BUSY, "1", retain=True)
@@ -1817,32 +1861,29 @@ class HomeAssistantDiscovery:
             err = "failed"
         finally:
             watchdog.cancel()
+            with self._command_worker_lock:
+                self._running_job = None
             self._publish_str(STATE_TOPIC_BUSY, "0", retain=True)
         if err:
             # Hooks that already name the display don't get it twice.
             message = err if err.startswith(f"{label}:") else f"{label}: {err}"
             self._publish_str(STATE_TOPIC_LAST_ERROR, message[:240], retain=True)
 
-    def _command_overran(self, worker: threading.Thread, label: str) -> None:
-        """A job ran past the time limit: say so, and hand the rest of the
-        queue to a fresh worker. The stuck one finishes its job and exits."""
+    def _command_overran(self, token: int, label: str) -> None:
+        """Watchdog, report only: the job ``token`` names is still running
+        past the time limit. Checked under the worker lock, so a timer that
+        fires late never speaks for the job after it."""
         with self._command_worker_lock:
-            if self._command_worker is not worker:
+            if self._running_job != token:
                 return
-            self._command_worker = None
-        logger.warning(
-            "HA discovery: %s still running after %.0fs; later commands go ahead",
-            label,
-            self._command_time_limit_s,
-        )
-        self._publish_str(
-            STATE_TOPIC_LAST_ERROR,
-            f"{label}: still running after {self._command_time_limit_s:.0f}s; "
-            "later commands go ahead"[:240],
-            retain=True,
-        )
-        if not self._commands_stopping.is_set():
-            self._ensure_command_worker()
+            logger.warning(
+                "HA discovery: %s still running after %.0fs", label, self._command_time_limit_s
+            )
+            self._publish_str(
+                STATE_TOPIC_LAST_ERROR,
+                f"{label}: still running after {self._command_time_limit_s:.0f}s"[:240],
+                retain=True,
+            )
 
     def _wait_commands_idle(self, timeout: float = 5.0) -> bool:
         """Block until every queued command has run (tests, shutdown)."""

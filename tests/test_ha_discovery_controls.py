@@ -239,6 +239,8 @@ def test_lineup_push_action_warms_and_pushes_entry(tmp_path: Path) -> None:
         respect_quiet_hours=False,
         force_publish=True,
         source="home_assistant",
+        lock_timeout_s=60.0,
+        settle_max_s=30.0,
     )
     assert (
         nav.get("lounge") == {"deck_id": "morning", "page_id": "home"}
@@ -576,6 +578,8 @@ def test_refresh_action_pushes_the_page_on_glass(tmp_path: Path) -> None:
         force_publish=True,
         bypass_coalesce=True,
         source="home_assistant",
+        lock_timeout_s=60.0,
+        settle_max_s=30.0,
     )
 
 
@@ -1463,13 +1467,29 @@ def test_lineup_toggle_returns_at_once_while_invalidation_waits(tmp_path: Path) 
     assert decks.get("morning").enabled is False
 
 
-def test_stop_with_a_full_queue_still_ends_the_worker(tmp_path: Path) -> None:
+def _worker_threads(before: set | None = None) -> list:
+    """Live command workers, minus those that existed at ``before``
+    (other tests' instances in this process)."""
+    import threading
+
+    return [
+        t
+        for t in threading.enumerate()
+        if t.name == "ha-discovery-commands" and t not in (before or set())
+    ]
+
+
+def test_stop_during_a_long_command_cancels_and_reports_the_queue(tmp_path: Path) -> None:
+    # Sol's case: a stop while a command overran stranded the queued ones.
+    # Now they're cancelled explicitly and named on Last error, the stop
+    # waits a bounded time for the running one, and the worker then exits.
     import threading
 
     from app import ha_discovery as ha_module
 
-    ha, _client, _pm, _ = _wire(tmp_path)
+    ha, client, _pm, _ = _wire(tmp_path)
     ha.start()
+    ha._command_time_limit_s = 0.1
     gate, started, done = threading.Event(), threading.Event(), []
 
     def first() -> str | None:
@@ -1479,57 +1499,114 @@ def test_stop_with_a_full_queue_still_ends_the_worker(tmp_path: Path) -> None:
         return None
 
     ha._enqueue("first", first)
-    assert started.wait(5)  # the worker holds it, so the queue can fill
+    assert started.wait(5)
     for i in range(ha_module.COMMAND_QUEUE_MAX):
         ha._enqueue(f"j{i}", lambda i=i: done.append(f"j{i}"))
     worker = ha._command_worker
     assert worker is not None and ha._commands.full()
-    stopper = threading.Thread(target=ha.stop)
-    stopper.start()
-    # Past the old sentinel's 1 s put timeout: a stop that relied on the
-    # sentinel alone lost it to the full queue and the worker never exited.
-    threading.Event().wait(1.5)
+    threading.Event().wait(0.3)  # "first" is now over its time limit
+    original_wait = ha_module.COMMAND_STOP_WAIT_S
+    ha_module.COMMAND_STOP_WAIT_S = 0.2
+    try:
+        ha._stop_command_worker()  # returns although "first" still runs
+    finally:
+        ha_module.COMMAND_STOP_WAIT_S = original_wait
+    error = _payload_for(client, "tesserae/ha/state/last_error") or b""
+    assert error.startswith(b"Cancelled when Home Assistant discovery stopped: j0, j1")
     gate.set()
-    stopper.join(5)
     worker.join(5)
-    assert not worker.is_alive()
-    assert ha._command_worker is None
-    assert len(done) == ha_module.COMMAND_QUEUE_MAX + 1  # queued work still ran
+    assert not worker.is_alive() and ha._command_worker is None
+    assert done == ["first"]  # cancelled commands never ran
+    assert ha._commands.unfinished_tasks == 0
 
 
-def test_restart_keeps_command_order(tmp_path: Path) -> None:
-    # The reproduced reordering: after a stop / start the replacement worker
-    # ran jobs alongside the old one (second, first, third).
+def test_restart_during_a_stop_takes_the_worker_back(tmp_path: Path) -> None:
     import threading
 
+    from app import ha_discovery as ha_module
+
+    before = set(_worker_threads())
     ha, _client, _pm, _ = _wire(tmp_path)
     ha.start()
     gate, done = threading.Event(), []
     _gated_jobs(ha, ["first", "second"], gate, done)
+    for _ in range(50):  # until the worker is running "first"
+        if ha._running_job is not None:
+            break
+        threading.Event().wait(0.05)
     old = ha._command_worker
-    ha._stop_command_worker()  # times out: "first" is still running
-    _gated_jobs(ha, ["third"], gate, done)  # restart before the old one exited
-    assert ha._command_worker is old  # handed back, not a second worker
+    original_wait = ha_module.COMMAND_STOP_WAIT_S
+    ha_module.COMMAND_STOP_WAIT_S = 0.1
+    try:
+        ha._stop_command_worker()  # "first" still running; "second" cancelled
+    finally:
+        ha_module.COMMAND_STOP_WAIT_S = original_wait
+    _gated_jobs(ha, ["third"], gate, done)  # started again before it exited
+    assert ha._command_worker is old
+    assert len(_worker_threads(before)) == 1
     gate.set()
     assert ha._wait_commands_idle()
-    assert done == ["first", "second", "third"]
+    assert done == ["first", "third"]
 
 
-def test_a_stuck_command_is_reported_and_later_ones_go_ahead(tmp_path: Path) -> None:
+def test_a_long_command_is_reported_without_spawning_threads(tmp_path: Path) -> None:
+    # Sol's case: every overrun used to spawn a replacement worker, and the
+    # stuck ones piled up (5 blocked threads). Now the watchdog only reports;
+    # one worker, later commands wait their turn.
+    import threading
+
+    before = set(_worker_threads())
+    ha, client, _pm, _ = _wire(tmp_path)
+    ha.start()
+    ha._command_time_limit_s = 0.1
+    gates = [threading.Event() for _ in range(5)]
+    done: list[int] = []
+    for i, gate in enumerate(gates):
+        ha._enqueue(f"Job {i}", lambda i=i, gate=gate: (gate.wait(5), done.append(i))[0] and None)
+    threading.Event().wait(0.5)
+    assert len(_worker_threads(before)) == 1
+    assert done == []
+    assert (_payload_for(client, "tesserae/ha/state/last_error") or b"").startswith(
+        b"Job 0: still running after"
+    )
+    for gate in gates:
+        gate.set()
+    assert ha._wait_commands_idle()
+    assert done == [0, 1, 2, 3, 4]
+    assert len(_worker_threads(before)) == 1
+
+
+def test_a_late_watchdog_never_reports_the_next_command(tmp_path: Path) -> None:
+    # Sol's case: the timer checked the worker, not the job, so one firing
+    # late spoke for (and handed off) the command after it.
     import threading
 
     ha, client, _pm, _ = _wire(tmp_path)
     ha.start()
-    ha._command_time_limit_s = 0.2
-    gate, done = threading.Event(), []
-    _gated_jobs(ha, ["Lounge", "Hall"], gate, done)
-    for _ in range(50):
-        if done == ["Hall"]:
-            break
-        threading.Event().wait(0.1)
-    assert done == ["Hall"]  # ran while the stuck one was still going
-    error = _payload_for(client, "tesserae/ha/state/last_error") or b""
-    assert error.startswith(b"Lounge: still running after")
+    tokens: list[int | None] = []
+    gate = threading.Event()
+    ha._enqueue("First", lambda: tokens.append(ha._running_job) and None)
+    ha._enqueue("Second", lambda: (gate.wait(5), None)[1])
+    threading.Event().wait(0.3)  # "Second" is running now
+    before = _payload_for(client, "tesserae/ha/state/last_error")
+    ha._command_overran(tokens[0], "First")  # First's timer, firing late
+    assert _payload_for(client, "tesserae/ha/state/last_error") == before
+    worker = ha._command_worker
     gate.set()
     assert ha._wait_commands_idle()
-    assert done == ["Hall", "Lounge"]
+    assert ha._command_worker is worker
+
+
+def test_home_assistant_pushes_carry_deadlines(tmp_path: Path) -> None:
+    ha, client, pm, _ = _wire(tmp_path, devices=_FakeRegistry([_FakeDevice("lounge", "Lounge")]))
+    pm.push.return_value = PushResult(
+        status="busy", page_id="weather", error="another push kept the renderer busy for over 60s"
+    )
+    ha.start()
+    ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/push", b"Weather")
+    assert ha._wait_commands_idle()
+    kwargs = pm.push.call_args.kwargs
+    assert kwargs["lock_timeout_s"] == 60.0 and kwargs["settle_max_s"] == 30.0
+    assert _payload_for(client, "tesserae/ha/state/last_error") == (
+        b"Lounge: another push kept the renderer busy for over 60s"
+    )

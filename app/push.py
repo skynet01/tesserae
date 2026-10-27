@@ -1731,6 +1731,8 @@ class PushManager:
         followup: int = 0,
         settle: bool = True,
         exclude_device_ids: set[str] | None = None,
+        lock_timeout_s: float | None = None,
+        settle_max_s: float | None = None,
     ) -> PushResult:
         """Render a saved Page through the composer and publish.
 
@@ -1761,10 +1763,17 @@ class PushManager:
         fan-out, after binding and quiet-hours resolution. The scheduler
         passes the displays on a per-display automation hold. When nothing
         is left the push returns ``status="held"`` without rendering or
-        writing a History row (the caller retries on its own cadence)."""
+        writing a History row (the caller retries on its own cadence).
+
+        ``lock_timeout_s`` (optional): give up with ``status="busy"`` when
+        another push holds the render lock for longer than this, instead of
+        waiting it out (a render is bounded by its own timeouts, but a queue
+        of them isn't). ``settle_max_s`` caps the settle wait below
+        ``SETTLE_MAX_S``. Home Assistant's commands pass both so a command
+        can't block its worker indefinitely."""
         waited: tuple[float, int] = (0.0, 0)
         if settle and followup == 0 and source not in ("follow-up", "deck_warm", "album_warm"):
-            waited = self.settle_page(page_id)
+            waited = self.settle_page(page_id, max_s=settle_max_s)
         # v0.69 coalescing: page pushes with a single-device target
         # coalesce against that device_id (later pushes for the same
         # device supersede earlier ones). Multi-device or unbound
@@ -1780,8 +1789,15 @@ class PushManager:
             source=source,
             target=page_id,
             bypass_coalesce=bypass_coalesce,
+            lock_timeout_s=lock_timeout_s,
         )
-        if supersede is not None:
+        if supersede == "busy":
+            result = PushResult(
+                status="busy",
+                page_id=page_id,
+                error=f"another push kept the renderer busy for over {lock_timeout_s:.0f}s",
+            )
+        elif supersede is not None:
             result = PushResult(
                 status="superseded",
                 page_id=page_id,
@@ -3498,6 +3514,7 @@ class PushManager:
         source: str,
         target: str,
         bypass_coalesce: bool,
+        lock_timeout_s: float | None = None,
     ) -> str | None:
         """Coalesce + acquire pattern shared across the push entry
         points. Returns ``None`` when the caller can proceed (lock is
@@ -3514,14 +3531,22 @@ class PushManager:
         The old non-blocking ``self._lock.acquire(blocking=False)``
         pattern that returned ``"busy"`` on contention is retired
         here: a coalescing wait is more forgiving for the "user hits
-        Send while a schedule fires" race."""
+        Send while a schedule fires" race.
+
+        With ``lock_timeout_s`` the wait for the lock is bounded: past it
+        the caller gets ``"busy"`` (no lock held, nothing logged) and its
+        coalescing ticket is withdrawn so it can't supersede anyone."""
+        timeout = -1.0 if lock_timeout_s is None else max(0.0, lock_timeout_s)
         if bypass_coalesce:
-            self._lock.acquire()
-            return None
+            return None if self._lock.acquire(timeout=timeout) else "busy"
         with self._gen_lock:
             my_gen = self._device_gens.get(device_id, 0) + 1
             self._device_gens[device_id] = my_gen
-        self._lock.acquire()
+        if not self._lock.acquire(timeout=timeout):
+            with self._gen_lock:
+                if self._device_gens.get(device_id) == my_gen:
+                    self._device_gens[device_id] = my_gen - 1
+            return "busy"
         with self._gen_lock:
             latest = self._device_gens.get(device_id, 0)
         if my_gen < latest:
