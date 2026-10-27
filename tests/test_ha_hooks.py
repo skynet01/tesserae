@@ -198,11 +198,13 @@ def test_notify_renders_and_pushes_per_display(tmp_path: Path) -> None:
     assert push.push_image.call_count == 2
     kwargs = push.push_image.call_args.kwargs
     assert kwargs["source"] == "home_assistant"
+    assert all(c.kwargs["lock_timeout_s"] == 60.0 for c in push.push_image.call_args_list)
     assert kwargs["device_id"] in ("lounge", "hall")
     assert Image.open(io.BytesIO(push.push_image.call_args.args[0])).size == (800, 480)
     push.push_image.reset_mock()
     assert ha_hooks._notify(app, "lounge", "Just you") is None
     assert push.push_image.call_args.kwargs["device_id"] == "lounge"
+    assert push.push_image.call_args.kwargs["lock_timeout_s"] == 60.0
     assert ha_hooks._notify(app, "ghost", "x")
 
 

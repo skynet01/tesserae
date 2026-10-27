@@ -1993,6 +1993,7 @@ class PushManager:
         source: str = "file",
         framing: dict[str, float] | None = None,
         page_id: str | None = None,
+        lock_timeout_s: float | None = None,
     ) -> PushResult:
         """Hand arbitrary image bytes to every renderer.
 
@@ -2024,14 +2025,25 @@ class PushManager:
         the caller composed a page itself (the MCP push route). Recorded
         on the live-render entry so the touch-v3 spec and the post-action
         reconcile can find the page behind the frame; without it the
-        frame is an anonymous image and the spec comes back empty."""
+        frame is an anonymous image and the spec comes back empty.
+
+        ``lock_timeout_s`` (optional): give up with ``status="busy"`` when
+        the render lock stays held longer than this. Omitted, wait for it
+        indefinitely, as other user-initiated image pushes do."""
         supersede = self._acquire_or_supersede(
             device_id=device_id,
             source=source,
             target=source_label,
             bypass_coalesce=bypass_coalesce,
+            lock_timeout_s=lock_timeout_s,
         )
-        if supersede is not None:
+        if supersede == "busy":
+            result = PushResult(
+                status="busy",
+                page_id=source_label,
+                error=f"another push kept the renderer busy for over {lock_timeout_s:.0f}s",
+            )
+        elif supersede is not None:
             result = PushResult(
                 status="superseded",
                 page_id=source_label,
