@@ -1,5 +1,5 @@
 {% extends "_base.html" %}
-{% from "_components.html" import button, section_card %}
+{% from "_components.html" import auto_field, button, repeater_field, section_card with context %}
 {% block title %}Comics, Tesserae{% endblock %}
 {% block head_extra %}<script src="{{ url_for('static', filename='pages/settings.js') }}" defer></script>{% endblock %}
 
@@ -37,6 +37,24 @@
   {%- endif %}
 {%- endmacro %}
 
+{#- A switch setting as the settings card draws it: label and line on the
+    left, the switch on the right. -#}
+{% macro toggle_row(spec, label=none, help=none, extra_class='') -%}
+  {%- set field_id = section.id ~ '-' ~ spec.name %}
+  <div class="dx-toggle-row{% if extra_class %} {{ extra_class }}{% endif %}">
+    <div class="dx-toggle-row-text">
+      <label class="dx-toggle-row-label" for="{{ field_id }}">{{ label or spec.label }}</label>
+      {%- set line = help if help is not none else spec.get('help') %}
+      {%- if line %}<p class="dx-toggle-row-desc">{{ line }}</p>{% endif %}
+    </div>
+    <label class="dx-toggle-switch" for="{{ field_id }}">
+      <input id="{{ field_id }}" type="checkbox" name="{{ spec.name }}" value="on"
+             {% if section.state.get(spec.name, spec.get('default')) %}checked{% endif %}>
+      <span class="dx-toggle-track" aria-hidden="true"><span class="dx-toggle-knob"></span></span>
+    </label>
+  </div>
+{%- endmacro %}
+
 {% macro cookie_hint(item) -%}
   {%- if item.cookies_help %} <a href="#cookies">Paste GoComics cookies</a> to get past it, or upload today's strip.{% endif -%}
 {%- endmacro %}
@@ -56,6 +74,10 @@
 {%- endmacro %}
 
 {% block main %}
+{#- The settings by name, and those the source cards place themselves. -#}
+{%- set F = {} %}
+{%- for field in section.fields %}{% set _ = F.update({field.name: field}) %}{% endfor %}
+{%- set PLACED = ['strips', 'far_side', 'far_side_count', 'captions'] %}
 <div class="page-head">
   <h1><i class="ph ph-smiley" aria-hidden="true"></i> Comics</h1>
   <p class="page-blurb">The Far Side's daily panels and your strips, fetched once a day for every comics cell. When a site blocks a download, the last good strip stays up and you can upload or import the day's picture.</p>
@@ -126,49 +148,112 @@
   </div>
 {% endcall %}
 
-{% call section_card(icon='cookie', title='GoComics cookies', id='cookies',
-                     description="GoComics checks for a browser before it serves a strip. Tesserae passes the check itself and keeps the session; paste a browser's cookies only when that gets blocked.") %}
-  <dl class="cx-cookie-status">
-    <dt>Browser check</dt>
-    <dd>{{ chip(view.session) }}<span>{{ view.session.line }}</span></dd>
-    <dt>Pasted</dt>
-    <dd>{{ chip(view.cookies) }}<span>{{ view.cookies.line }}</span></dd>
-  </dl>
-  <details class="dx-disclosure cx-paste"{% if view.cookies.set or view.session.chip != 'Saved' or view.preview | selectattr('cookies_help') | list %} open{% endif %}>
-    <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>{{ 'Replace pasted cookies' if view.cookies.set else 'Paste cookies' }}</span></summary>
-    <div class="dx-disclosure-body">
-      <form method="post" action="{{ url_for('comics_daily_media.save_cookies') }}" class="cx-cookie-form">
-        <div class="field">
-          <label for="cx-cookies" class="sr-only">Cookies</label>
-          <textarea id="cx-cookies" name="cookies" rows="3" required
-                    autocomplete="off" autocapitalize="off" spellcheck="false"
-                    placeholder="Stored encrypted and never shown again."></textarea>
-          <p class="field-help">In Chrome, add the <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener noreferrer">Get cookies.txt Locally</a> extension, open gocomics.com, click the extension and choose Copy All, then paste it here. A JSON cookie export or a Cookie header works too.</p>
-        </div>
-        <div class="cx-cookie-actions">
-          <button type="submit" class="dx-btn-ghost-sm"><i class="ph ph-floppy-disk" aria-hidden="true"></i><span>Save cookies</span></button>
-          {% if view.cookies.set %}
-          <button type="submit" class="dx-btn-ghost-sm cx-clear" formaction="{{ url_for('comics_daily_media.clear_cookies') }}" formnovalidate><i class="ph ph-x" aria-hidden="true"></i><span>Clear</span></button>
-          {% endif %}
-        </div>
-      </form>
+{#- The settings: one form (one save bar, one save through the settings
+    endpoint) around three cards, one per kind of source plus the layout.
+    Each card draws its own settings with the shared field macros; the
+    Layout card draws whatever setting no other card placed, so a new one
+    always shows somewhere. Forms of their own (cookies, strip tools, Add
+    strip) sit at the foot and their controls point at them with form=. -#}
+<form method="post" action="{{ section.endpoint }}" id="{{ section.id }}"
+      class="form dx-legacy-server-form cx-settings" data-dirty-form>
+
+{% call section_card(icon='cow', title='The Far Side', id='farside', extra_class='cx-farside',
+                     description="The daily panels from thefarside.com.") %}
+  {{ toggle_row(F.far_side, 'Show The Far Side', "Today's panels, in a row above the strips.") }}
+  <div class="dx-toggle-row cx-dep">
+    <div class="dx-toggle-row-text">
+      <span class="dx-toggle-row-label" id="{{ section.id }}-far_side_count-label">Panels</span>
+      <p class="dx-toggle-row-desc">How many in the row. A narrow cell shows fewer.</p>
     </div>
-  </details>
+    {%- set spec = F.far_side_count %}
+    {%- set lo, hi = spec.get('min', 1)|int, spec.get('max', 4)|int %}
+    {%- set current = [[section.state.get(spec.name, spec.get('default'))|int, lo]|max, hi]|min %}
+    <div class="seg cx-seg" role="radiogroup" aria-labelledby="{{ section.id }}-far_side_count-label">
+      {%- for n in range(lo, hi + 1) %}
+      <label class="seg-item"><input type="radio" class="sr-only" name="{{ spec.name }}" value="{{ n }}"{% if n == current %} checked{% endif %}><span>{{ n }}</span></label>
+      {%- endfor %}
+    </div>
+  </div>
+  {{ toggle_row(F.captions, 'Captions', 'The caption under each panel.', extra_class='cx-dep') }}
 {% endcall %}
 
-{% set repeater_row_extra = strip_extra %}
-{% set repeater_foot_extra = add_strip %}
-{% include "_plugin_admin_settings.html" %}
+{% call section_card(icon='film-strip', title='GoComics', id='gocomics',
+                     description="Your strips, top to bottom under the Far Side. Switch one off to keep it in the list without showing it. Dilbert comes from an archive of old strips and sits in the same list.") %}
+  {{ repeater_field(section.id ~ '-strips', 'strips', F.strips.label, F.strips, section.state.get('strips', F.strips.get('default')),
+                    layout='list', row_extra=strip_extra, foot_extra=add_strip) }}
 
-{% call section_card(icon='list-checks', title='Fetches', id='log') %}
-  <p class="lede">Each fetch per source (OK, stale, blocked or error) with its date, size and time taken, and every upload, import and added strip.</p>
-  {% if view.log %}
-  <details class="dx-disclosure">
-    <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Log</span></summary>
-    <div class="dx-disclosure-body">
-      <pre class="dx-code dx-log-view dx-log-view--wrap" data-log-tail>{{ view.log | join('\n') }}</pre>
+  <div class="cx-cookies" id="cookies">
+    <p class="device-subhead dx-section-group">Browser check</p>
+    <p class="cx-note">GoComics checks for a real browser before it serves a strip. Tesserae passes the check by itself and keeps the session, so usually there's nothing to do. If GoComics blocks it anyway, you need a free GoComics account: sign in and paste its cookies here.</p>
+    <dl class="cx-cookie-status">
+      <dt>Session</dt>
+      <dd>{{ chip(view.session) }}<span>{{ view.session.line }}</span></dd>
+      <dt>Pasted</dt>
+      <dd>{{ chip(view.cookies) }}<span>{{ view.cookies.line }}</span></dd>
+    </dl>
+    <details class="dx-disclosure cx-paste"{% if view.cookies.set or view.session.chip != 'Saved' or view.preview | selectattr('cookies_help') | list %} open{% endif %}>
+      <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>{{ 'Replace pasted cookies' if view.cookies.set else 'Paste cookies' }}</span></summary>
+      <div class="dx-disclosure-body">
+        <ol class="cx-steps">
+          <li>Make a free account at <a href="https://www.gocomics.com/" target="_blank" rel="noopener noreferrer">gocomics.com</a> and sign in, in Chrome.</li>
+          <li>Add the <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener noreferrer">Get cookies.txt Locally</a> extension.</li>
+          <li>On gocomics.com, click the extension, choose Copy All and paste it below.</li>
+        </ol>
+        <div class="field cx-cookie-field">
+          <label for="cx-cookies" class="sr-only">Cookies</label>
+          <textarea id="cx-cookies" name="cookies" rows="3" required form="cx-cookie-form"
+                    autocomplete="off" autocapitalize="off" spellcheck="false"
+                    placeholder="Stored encrypted and never shown again."></textarea>
+          <p class="field-help">A JSON cookie export or a Cookie header works too.</p>
+        </div>
+        <div class="cx-cookie-actions">
+          <button type="submit" form="cx-cookie-form" class="dx-btn-ghost-sm"><i class="ph ph-floppy-disk" aria-hidden="true"></i><span>Save cookies</span></button>
+          {% if view.cookies.set %}
+          <button type="submit" form="cx-cookie-form" class="dx-btn-ghost-sm cx-clear" formaction="{{ url_for('comics_daily_media.clear_cookies') }}" formnovalidate><i class="ph ph-x" aria-hidden="true"></i><span>Clear</span></button>
+          {% endif %}
+        </div>
+      </div>
+    </details>
+  </div>
+{% endcall %}
+
+{% call section_card(icon='layout', title='Layout', id='layout',
+                     description="How the comics share a cell, in every comics cell.") %}
+  {%- set ns = namespace(row=none) %}
+  {%- for field in section.fields if field.name not in PLACED %}
+    {%- set this_row = field.get('row') if field.type not in ('switch', 'repeater') else none %}
+    {%- if ns.row and this_row != ns.row %}</div>{% set ns.row = none %}{% endif %}
+    {%- if this_row and this_row != ns.row %}<div class="dx-field-row">{% set ns.row = this_row %}{% endif %}
+    {%- if field.type == 'switch' %}
+    {{ toggle_row(field) }}
+    {%- else %}
+    {{ auto_field(section.id ~ '-' ~ field.name, field.name, field, section.state.get(field.name, field.get('default', ''))) }}
+    {%- endif %}
+  {%- endfor %}
+  {%- if ns.row %}</div>{% endif %}
+{% endcall %}
+
+  <div class="dx-save-bar dx-save-bar--server" data-save-bar hidden>
+    <span class="dx-save-bar-msg">You have unsaved changes</span>
+    <div class="dx-save-bar-actions">
+      <button type="reset" class="dx-save-bar-discard">Discard</button>
+      <button type="submit" class="dx-save-bar-save">
+        <i class="ph ph-floppy-disk" aria-hidden="true"></i>
+        <span>Save changes</span>
+      </button>
     </div>
-  </details>
+  </div>
+  <noscript><div class="actions"><button type="submit" class="primary">Save changes</button></div></noscript>
+</form>
+
+{% call section_card(icon='list-checks', title='Fetches', id='log',
+                     description="Every fetch (OK, stale, blocked or error) with its date, size and time taken, and every upload, import and added strip. Newest at the bottom.") %}
+  {% if view.log %}
+  <div class="dx-code dx-log-view cx-log" data-log-tail tabindex="0" aria-label="Fetch log">
+    {%- for e in view.log %}
+    <div class="cx-log-line{% if e.tone %} cx-log-line--{{ e.tone }}{% endif %}"><span class="cx-log-when">{{ e.when }}</span><span class="cx-log-source">{{ e.source }}</span><span class="cx-log-outcome">{{ e.outcome | upper }}</span><span class="cx-log-text">{{ e.text }}</span></div>
+    {%- endfor %}
+  </div>
   {% else %}
   <p class="field-help">Nothing fetched yet.</p>
   {% endif %}
@@ -177,6 +262,7 @@
 
 {#- The forms the strip tools and Add strip post (outside the settings form,
     which can't hold another form). -#}
+<form id="cx-cookie-form" method="post" action="{{ url_for('comics_daily_media.save_cookies') }}" data-comics-form hidden></form>
 <form id="cx-add" method="post" action="{{ url_for('comics_daily_media.add_strip') }}" data-comics-form hidden></form>
 {% for slug in view.strips %}
 <form id="cx-upload-{{ slug }}" method="post" enctype="multipart/form-data" data-comics-form hidden
@@ -190,7 +276,7 @@
   // Image URL as typed (it may not be saved yet), and ask before dropping
   // other unsaved changes to the settings.
   (function () {
-    var settings = document.querySelector('#plugin-comics_daily form');
+    var settings = document.getElementById('plugin-comics_daily');
     document.querySelectorAll('form[data-comics-form]').forEach(function (form) {
       form.addEventListener('submit', function (ev) {
         var slug = form.getAttribute('data-import-for');
@@ -207,6 +293,12 @@
         }
       });
     });
+    // The log shows open: start it on its newest lines.
+    function tail() {
+      document.querySelectorAll('.cx-log[data-log-tail]').forEach(function (log) { log.scrollTop = log.scrollHeight; });
+    }
+    tail();
+    window.addEventListener('load', tail);
   })();
 </script>
 
@@ -245,12 +337,45 @@
   .cx-add { display: flex; align-items: center; gap: 8px; flex: 1 1 340px; min-width: 0; }
   .cx-add input { flex: 1 1 auto; min-width: 0; }
   form[data-dirty] [data-comics-action] { opacity: 0.6; }
+  /* The settings form holds three cards: space them like the page's. */
+  .cx-settings { display: flex; flex-direction: column; gap: 16px; }
+  /* Panels, 1 to 4: radios drawn as a segmented control. */
+  .cx-seg { flex: none; }
+  .cx-seg .seg-item { min-width: 34px; justify-content: center; font-variant-numeric: tabular-nums; }
+  .cx-seg .seg-item:has(input:checked) { background: var(--t-surface); color: var(--t-fg); box-shadow: 0 1px 2px rgba(0, 0, 0, .12); }
+  .cx-seg .seg-item:has(input:focus-visible) { outline: 2px solid var(--t-accent); outline-offset: 1px; }
+  /* With the Far Side off, its options fade (still saved as set). */
+  .cx-dep { transition: opacity 150ms ease-out; }
+  .cx-farside:has(#plugin-comics_daily-far_side:not(:checked)) .cx-dep { opacity: 0.45; }
+  .cx-cookies { margin-top: 20px; padding-top: 4px; border-top: 1px solid var(--t-border); }
+  .cx-cookies > .dx-section-group { margin: 14px 0 0; }
+  .cx-note { margin: 4px 0 14px; max-width: 72ch; font-size: 13px; line-height: 1.5; color: var(--t-fg-soft); }
   .cx-cookie-status { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 16px; align-items: start; margin: 0; font-size: 13px; color: var(--t-fg-soft); }
-  .cx-cookie-status dt { padding-top: 3px; font-family: var(--t-font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--t-muted); }
+  .cx-cookie-status dt { padding-top: 5px; font-family: var(--t-font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--t-muted); }
   .cx-cookie-status dd { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 0; }
   .cx-paste { margin-top: 14px; }
+  .cx-steps { margin: 0 0 4px; padding-left: 20px; font-size: 13px; line-height: 1.6; color: var(--t-fg-soft); }
+  .cx-steps li + li { margin-top: 2px; }
+  .dx-section-body .cx-cookie-field { padding-bottom: 0; }
   #cx-cookies { font-family: var(--t-font-mono); font-size: 12.5px; }
   .cx-cookie-actions { display: flex; gap: 8px; margin-top: 10px; }
   .cx-clear:hover { color: var(--t-danger); }
+  /* The log: one grid, a row per entry (when, source, outcome, what), so
+     the columns line up and a long line wraps in its own column. On a
+     phone the what drops under the other three. */
+  .cx-log { display: grid; grid-template-columns: max-content max-content max-content minmax(0, 1fr); column-gap: 2ch; row-gap: 3px; align-content: start; margin: 4px 0 0; max-height: 360px; white-space: normal; }
+  .cx-log-line { display: contents; }
+  .cx-log-when, .cx-log-outcome { color: var(--t-muted); white-space: nowrap; }
+  .cx-log-source { white-space: nowrap; }
+  .cx-log-text { overflow-wrap: anywhere; }
+  .cx-log-line--bad .cx-log-outcome { color: var(--t-danger); font-weight: 600; }
+  .cx-log-line--warn .cx-log-outcome { color: color-mix(in oklab, var(--t-warn) 80%, var(--t-fg)); font-weight: 600; }
+  .cx-log:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; }
+  @media (max-width: 640px) {
+    .cx-log { grid-template-columns: max-content minmax(0, 1fr) max-content; row-gap: 0; font-size: 11.5px; }
+    .cx-log-text { grid-column: 1 / -1; margin-bottom: 8px; }
+    .cx-log-source { overflow: hidden; text-overflow: ellipsis; }
+  }
+  @media (prefers-reduced-motion: reduce) { .cx-dep { transition: none; } }
 </style>
 {% endblock %}
