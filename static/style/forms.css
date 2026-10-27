@@ -2792,6 +2792,13 @@ input[type="range"].slider:focus::-moz-range-thumb {
 .repeater--list .repeater-row.is-off .repeater-row-title { color: var(--t-muted); }
 /* The section body styles every label in a field; the switch is not one. */
 .field--repeater .repeater-row-head .repeater-row-toggle { display: inline-block; margin: 0; }
+/* The move buttons sit left of the switch: quiet until the row is hovered
+   or focused, so a long list doesn't read as a column of arrows. */
+.repeater-row-moves { flex: none; display: inline-flex; gap: 2px; }
+.repeater-row-moves .dx-btn-icon-only { opacity: 0.55; }
+.repeater-row-head:hover .repeater-row-moves .dx-btn-icon-only,
+.repeater-row-moves .dx-btn-icon-only:focus-visible { opacity: 1; }
+.repeater-row-moves [aria-disabled="true"] { visibility: hidden; }
 .repeater-row-chev {
   flex: none;
   display: inline-flex;
@@ -2825,6 +2832,8 @@ input[type="range"].slider:focus::-moz-range-thumb {
 .repeater--list .repeater-foot { justify-content: space-between; flex-wrap: wrap; margin-top: 12px; }
 @media (max-width: 640px) {
   .repeater--list .repeater-row-fields { grid-template-columns: minmax(0, 1fr); }
+  /* Room for the title: a closed row shows its moves only once opened. */
+  .repeater--list .repeater-row:not(.is-open) .repeater-row-moves { display: none; }
   .repeater--list .repeater-list-head,
   .repeater-row-head,
   .repeater-row-body { padding-inline: 8px; }
