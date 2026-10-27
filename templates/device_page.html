@@ -173,18 +173,18 @@
           {% endif %}
           <div class="dx-visionect-actions">
             {% for action, icon, label, title in [
-                ('status', 'heartbeat', 'Report in', 'Ask the sign for its battery, signal and state now'),
-                ('refresh', 'arrows-clockwise', 'Full refresh', 'Repaint the frame it shows from scratch, to clear ghosting'),
-                ('reboot', 'power', 'Reboot', 'Restart the sign; it reconnects in a minute or two')] %}
+                ('status', 'heartbeat', 'Report in', 'Ask the frame for its battery, signal and state now'),
+                ('refresh', 'arrows-clockwise', 'Full refresh', 'Repaint the picture it shows from scratch, to clear ghosting'),
+                ('reboot', 'power', 'Reboot', 'Restart the frame; it reconnects in a minute or two')] %}
             <form method="post" action="{{ url_for('auth.devices_visionect_action', instance_id=section.device_id, action=action) }}"
-                  {% if action == 'reboot' %}onsubmit="return confirm('Reboot the sign? It goes blank-to-reconnected in a minute or two and then gets the latest frame.');"{% endif %}>
+                  {% if action == 'reboot' %}onsubmit="return confirm('Reboot the frame? It reconnects in a minute or two and then gets the latest picture.');"{% endif %}>
               <button type="submit" class="dx-btn-ghost-sm" title="{{ title }}"{% if not vs.sign.connected %} disabled{% endif %}>
                 <i class="ph ph-{{ icon }}" aria-hidden="true"></i><span>{{ label }}</span>
               </button>
             </form>
             {% endfor %}
             {% if vs.sign.note %}<span class="field-help">{{ vs.sign.note }}</span>
-            {% elif not vs.sign.connected %}<span class="field-help">The sign takes these while it's connected.</span>{% endif %}
+            {% elif not vs.sign.connected %}<span class="field-help">The frame takes these while it's connected.</span>{% endif %}
           </div>
         </div>
         {% endif %}

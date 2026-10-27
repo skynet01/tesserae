@@ -1976,7 +1976,7 @@ def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
         rows.append(("Up for", (f"{days} d " if days else "") + f"{rest // 60} h {rest % 60} min"))
     heartbeat = view.get("heartbeat_min")
     if isinstance(heartbeat, int):
-        rows.append(("Check-in interval", f"{heartbeat} min (set on the sign)"))
+        rows.append(("Check-in interval", f"Every {heartbeat} min"))
     elif "next_status_min" in st:
         rows.append(("Next check-in", f"in {st['next_status_min']} min"))
     sleep_off = view.get("sleep_disabled")
@@ -2018,7 +2018,7 @@ def _visionect_band(device: Device) -> dict[str, Any] | None:
             "ok": False,
             "title": f"Not listening on port {port}",
             "body": (
-                f"Tesserae couldn't open TCP {port} for Visionect signs{reason}. If the old "
+                f"Tesserae couldn't open TCP {port} for Visionect frames{reason}. If the old "
                 "Visionect server still runs on this host, stop it; Tesserae retries every "
                 "half minute."
             ),
@@ -2028,16 +2028,16 @@ def _visionect_band(device: Device) -> dict[str, Any] | None:
     if not uuid:
         if svc.auto_bind_open(device):
             body = (
-                f"Listening on TCP {port}. Point the sign at this server; the first unknown "
-                "sign that connects within an hour of adding this device is bound to it."
+                f"Listening on TCP {port}. Point the frame at this server; the first unknown "
+                "frame that connects within an hour of adding this device is bound to it."
             )
         else:
             body = (
-                f"Listening on TCP {port}. Unknown signs are only bound automatically within "
+                f"Listening on TCP {port}. Unknown frames are only bound automatically within "
                 "an hour of adding a device or clearing its UUID, so one that connects now is "
                 "listed under discovered devices. Paste its UUID here to bind it."
             )
-        return {"ok": True, "title": "Waiting for a sign", "body": body, "link": _VISIONECT_DOCS}
+        return {"ok": True, "title": "Waiting for a frame", "body": body, "link": _VISIONECT_DOCS}
     view = svc.sign_view(uuid) or {}
     refused = view.get("refused") or {}
     refused_note = ""
@@ -2050,24 +2050,24 @@ def _visionect_band(device: Device) -> dict[str, Any] | None:
         when = datetime.fromtimestamp(refused_at, tz=app_timezone()).strftime("%H:%M")
         refused_note = (
             f" At {when} a connection from {refused.get('remote') or 'another address'} "
-            "claimed this sign's UUID and was refused."
+            "claimed this frame's UUID and was refused."
         )
     if view.get("connected"):
         where = f" from {view['remote']}" if view.get("remote") else ""
         if view.get("sending"):
-            state = "Sending the latest frame."
+            state = "Sending the latest picture."
         elif view.get("in_sync"):
-            state = "It shows the latest frame."
+            state = "It shows the latest picture."
         else:
-            state = "Waiting for a frame to send."
+            state = "Waiting for a picture to send."
         problem = view.get("last_error") or ""
-        body = f"Sign {uuid} is connected{where}. {state}"
+        body = f"Frame {uuid} is connected{where}. {state}"
         if problem:
             body += f" Last problem: {problem}"
         body += refused_note
         return {
             "ok": not problem and not refused_note,
-            "title": "Sign connected",
+            "title": "Frame connected",
             "body": body,
             "link": _VISIONECT_DOCS,
         }
@@ -2080,18 +2080,18 @@ def _visionect_band(device: Device) -> dict[str, Any] | None:
         until = datetime.fromtimestamp(asleep, tz=app_timezone()).strftime("%H:%M")
         return {
             "ok": True,
-            "title": "Sign asleep",
+            "title": "Frame asleep",
             "body": (
-                f"Quiet hours: sign {uuid} sleeps until about {until} and gets the latest "
+                f"Quiet hours: frame {uuid} sleeps until about {until} and gets the latest "
                 "frame when it wakes."
             ),
             "link": _VISIONECT_DOCS,
         }
     return {
         "ok": True,
-        "title": "Sign not connected",
+        "title": "Frame not connected",
         "body": (
-            f"Listening on TCP {port} for sign {uuid}. New frames wait until it next checks in."
+            f"Listening on TCP {port} for frame {uuid}. New pictures wait until it next checks in."
         ),
         "link": _VISIONECT_DOCS,
     }
