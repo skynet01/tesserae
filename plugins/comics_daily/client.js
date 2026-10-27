@@ -207,7 +207,10 @@ function fit(shadow, opts, wantedPanels) {
 export default async function render(shadow, ctx) {
   const t = ctx?.t || ((key, fallback) => fallback ?? key);
   const data = ctx?.data ?? {};
-  const opts = ctx?.cell?.options || {};
+  // The layout comes from the widget's settings (the Comics admin page),
+  // sent with the data; a cell's own old options only fill in for a server
+  // that doesn't send it.
+  const opts = { ...(ctx?.cell?.options || {}), ...(data.layout || {}) };
   const css = `<link rel="stylesheet" href="/static/style/spectra-widgets.css">`;
 
   if (data.error) {

@@ -3,8 +3,13 @@
 Layout inside the widget's ``data_dir``::
 
     state.json          per source: pictures, edition, last success / attempt, error
+    log.json            the newest LOG_LINES fetches, uploads and imports, for the admin page
     images/<name>       the pictures, named by content hash
     gocomics-cookies.txt  the Bunny Shield session (written by server.py)
+
+A strip's manual picture (uploaded, or imported from an address on the admin
+page) is a source of its own, ``manual:<strip>``, stored like a download and
+never forgotten for age: it stays until the strip goes back to Automatic.
 
 A refresh writes a new picture under a new name, then points ``state.json``
 at it, then prunes, so a render reading the old state mid-refresh still
@@ -33,7 +38,16 @@ from typing import Any
 from PIL import Image, ImageOps
 
 STATE_FILE = "state.json"
+LOG_FILE = "log.json"
 IMAGE_DIR = "images"
+# The admin page's log keeps this many lines.
+LOG_LINES = 150
+# A picture uploaded or imported by hand: at most this many bytes, and this
+# many pixels once decoded (checked before decoding, so a small file that
+# expands into a huge bitmap is refused rather than decoded).
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+MAX_PIXELS = 50_000_000
+MANUAL_PREFIX = "manual:"
 # The widest source today is a 1200 px Dilbert; panels are 1440 px across.
 # Anything larger is only bytes for the renderer to wait on.
 MAX_EDGE_PX = 2400
@@ -108,6 +122,8 @@ def normalise(raw: bytes, max_edge: int = MAX_EDGE_PX) -> Picture:
     """
     try:
         with Image.open(io.BytesIO(raw)) as img:
+            if img.width * img.height > MAX_PIXELS:
+                raise ValueError("too many pixels")
             img.load()
             source_format = img.format
             out = _flatten(ImageOps.exif_transpose(img) or img)
@@ -126,6 +142,21 @@ def normalise(raw: bytes, max_edge: int = MAX_EDGE_PX) -> Picture:
     if width < 1 or height < 1:
         raise ValueError("empty picture")
     return Picture(buf.getvalue(), ext, width, height)
+
+
+def validate_upload(raw: bytes) -> Picture:
+    """A picture uploaded or imported by hand, checked and converted the way
+    a downloaded strip is (:func:`normalise`). Raises ValueError with a
+    message for the page: too big, or not a picture."""
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"That picture is over {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.")
+    try:
+        return normalise(raw)
+    except ValueError as err:
+        raise ValueError(
+            "That isn't a picture this widget can use (PNG, JPEG, GIF or WebP, "
+            f"at most {MAX_PIXELS // 1_000_000} megapixels)."
+        ) from err
 
 
 def _write_atomic(path: Path, data: bytes, mode: int = 0o644) -> None:
@@ -178,6 +209,38 @@ class Store:
         body = json.dumps({"version": 1, "sources": sources}, indent=1, sort_keys=True)
         _write_atomic(self.state_path, body.encode("utf-8"))
 
+    def forget(self, key: str) -> None:
+        """Drop one source's record (its pictures go at the next prune)."""
+        with _LOCK:
+            sources = self.sources()
+            if sources.pop(key, None) is not None:
+                self._save(sources)
+
+    # -- the log --------------------------------------------------------------
+
+    def log(self) -> list[dict[str, Any]]:
+        """The log's entries, oldest first; a missing or corrupt file is empty."""
+        try:
+            data = json.loads((self.root / LOG_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        entries = data.get("log") if isinstance(data, dict) else None
+        return [
+            e
+            for e in entries or []
+            if isinstance(e, dict)
+            and isinstance(e.get("at"), (int, float))
+            and isinstance(e.get("text"), str)
+        ]
+
+    def append_log(self, entry: dict[str, Any]) -> None:
+        """Add one entry, keeping the newest LOG_LINES."""
+        with _LOCK:
+            entries = [*self.log(), entry][-LOG_LINES:]
+            self.root.mkdir(parents=True, exist_ok=True)
+            body = json.dumps({"log": entries}, indent=1)
+            _write_atomic(self.root / LOG_FILE, body.encode("utf-8"))
+
     # -- pictures -----------------------------------------------------------
 
     def add(self, key: str, picture: Picture) -> str:
@@ -208,7 +271,8 @@ class Store:
             stale = [
                 key
                 for key, entry in sources.items()
-                if now - float(entry.get("last_attempt") or 0) > FORGET_AFTER_S
+                if not key.startswith(MANUAL_PREFIX)
+                and now - float(entry.get("last_attempt") or 0) > FORGET_AFTER_S
             ]
             for key in stale:
                 del sources[key]

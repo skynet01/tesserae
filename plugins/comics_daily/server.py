@@ -57,7 +57,17 @@ from types import ModuleType
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import Blueprint, abort, current_app, send_file
+from flask import (
+    Blueprint,
+    abort,
+    current_app,
+    flash,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    url_for,
+)
 from werkzeug.wrappers import Response
 
 try:
@@ -173,6 +183,15 @@ _GOCOMICS_PAGE_RE = re.compile(r"^https?://(?:www\.)?gocomics\.com/([a-z0-9-]+)"
 
 class SourceError(Exception):
     """A source could not be fetched. The message is shown to the user."""
+
+
+class NotFound(SourceError):
+    """GoComics has no strip by that name."""
+
+
+class NoRecentStrip(SourceError):
+    """GoComics has the strip but nothing from the last few days (a weekly
+    strip, say), or no strip by that name: its pages all answer 404."""
 
 
 def _allowed_hosts() -> frozenset[str] | None:
@@ -331,17 +350,28 @@ def _download(web: Web, url: str, what: str) -> bytes:
 
 @dataclass(frozen=True)
 class Source:
-    """One thing to fetch. ``key`` names its record in state.json and is
-    shared by every cell that shows the same strip."""
+    """One thing to show. ``key`` names its record in state.json and is
+    shared by every cell that shows the same strip. A ``manual`` source is
+    the picture uploaded or imported for a strip on the admin page: it is
+    never fetched."""
 
     key: str
-    kind: str  # "farside" | "gocomics" | "dilbert" | "url"
-    name: str  # the strip's name as written in the cell ("garfield")
+    kind: str  # "farside" | "gocomics" | "dilbert" | "url" | "manual"
+    name: str  # the strip's name ("garfield")
     url: str = ""
+    title: str = ""  # the label set for the strip, if any
 
     @property
     def label(self) -> str:
-        return DEFAULT_LABELS.get(self.name) or self.name.replace("-", " ").title()
+        return self.title or default_label(self.name)
+
+    @property
+    def fetched(self) -> bool:
+        return self.kind != "manual"
+
+
+def default_label(name: str) -> str:
+    return DEFAULT_LABELS.get(name) or name.replace("-", " ").title()
 
 
 FARSIDE = Source(key="farside", kind="farside", name="farside")
@@ -419,6 +449,273 @@ def parse_strips(text: str) -> tuple[list[Source], list[Problem]]:
     return sources, problems
 
 
+# -- the settings ------------------------------------------------------------------
+#
+# The comics are chosen once, under Widgets > Admin pages > Comics (the
+# widget's plugin settings), and every cell shows them. Cells used to carry
+# their own options (far_side, far_side_count, captions, a ``strips`` text
+# box, status_note, gap, gap_min, gap_max). Those are no longer offered and
+# are ignored once the settings exist. The settings exist from the first
+# time the widget needs them (a render, the admin page or Fetch now): they
+# are seeded then from the first comics cell whose options were changed from
+# the old defaults, else from DEFAULT_STRIPS below, so a dashboard looks the
+# same after the upgrade. A render with no host to ask (a direct call, the
+# tests) still reads the cell's options.
+
+MODES = ("auto", "upload", "url")
+# What a cell's options defaulted to before the settings existed.
+LEGACY_DEFAULTS: dict[str, Any] = {
+    "far_side": True,
+    "far_side_count": 4,
+    "captions": True,
+    "strips": "garfield\ncalvinandhobbes\npearlsbeforeswine\ndilbert",
+    "status_note": True,
+    "gap": 32,
+    "gap_min": 6,
+    "gap_max": 48,
+}
+
+
+@dataclass(frozen=True)
+class StripRow:
+    """One row of the ``strips`` setting."""
+
+    slug: str
+    enabled: bool = True
+    label: str = ""
+    mode: str = "auto"
+    image_url: str = ""
+
+
+@dataclass(frozen=True)
+class Config:
+    """What every comics cell shows, from the settings (or a cell's own
+    options where there are no settings to read)."""
+
+    strips: tuple[StripRow, ...]
+    far_side: bool = True
+    far_side_count: int = FARSIDE_MAX_PANELS
+    captions: bool = True
+    status_note: bool = True
+    gap: int = 32
+    gap_min: int = 6
+    gap_max: int = 48
+
+    def layout(self) -> dict[str, Any]:
+        """The cell options client.js reads, as the settings say."""
+        return {
+            "far_side": self.far_side,
+            "far_side_count": self.far_side_count,
+            "captions": self.captions,
+            "status_note": self.status_note,
+            "gap": self.gap,
+            "gap_min": self.gap_min,
+            "gap_max": self.gap_max,
+        }
+
+
+def _common(values: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "far_side": _bool(values.get("far_side"), True),
+        "far_side_count": _count(values.get("far_side_count"), 4, 1, FARSIDE_MAX_PANELS),
+        "captions": _bool(values.get("captions"), True),
+        "status_note": _bool(values.get("status_note"), True),
+        "gap": _count(values.get("gap"), 32, 0, 200),
+        "gap_min": _count(values.get("gap_min"), 6, 0, 200),
+        "gap_max": _count(values.get("gap_max"), 48, 0, 400),
+    }
+
+
+def strip_rows(value: Any) -> list[StripRow]:
+    """The ``strips`` setting's rows, leniently: a row without a usable
+    strip name is skipped, an unknown source falls back to Automatic."""
+    rows: list[StripRow] = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        slug = str(raw.get("slug") or "").strip().lower()
+        if not _NAME_RE.match(slug):
+            continue
+        mode = raw.get("mode") if raw.get("mode") in MODES else "auto"
+        rows.append(
+            StripRow(
+                slug=slug,
+                enabled=_bool(raw.get("enabled"), True),
+                label=str(raw.get("label") or "").strip(),
+                mode=str(mode),
+                image_url=str(raw.get("image_url") or "").strip(),
+            )
+        )
+    return rows
+
+
+def config_from_settings(settings: dict[str, Any]) -> Config:
+    return Config(strips=tuple(strip_rows(settings.get("strips"))), **_common(settings))
+
+
+def legacy_strip_rows(text: str) -> list[dict[str, Any]]:
+    """A cell's old Strips text as rows of the setting: one row per strip
+    name in order, a ``#`` line as a row switched off, an image address
+    after a name as that row's Direct image URL."""
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        enabled = not line.startswith("#")
+        sources, _ = parse_strips(line.lstrip("#"))
+        for source in sources:
+            if source.name in seen:
+                continue
+            seen.add(source.name)
+            rows.append(
+                {
+                    "enabled": enabled,
+                    "label": default_label(source.name),
+                    "slug": source.name,
+                    "mode": "url" if source.url else "auto",
+                    "image_url": source.url,
+                }
+            )
+    return rows[:MAX_STRIPS]
+
+
+def config_from_options(options: dict[str, Any]) -> Config:
+    """A cell's own options, as the widget read them before it had settings."""
+    rows = strip_rows(legacy_strip_rows(str(options.get("strips") or "")))
+    return Config(strips=tuple(rows), **_common(options))
+
+
+def customised(options: dict[str, Any]) -> bool:
+    """Whether a cell's options were changed from the old defaults: only then
+    are they worth seeding the settings from."""
+    for key, default in LEGACY_DEFAULTS.items():
+        if key not in options:
+            continue
+        value = options[key]
+        if key == "strips":
+            if str(value or "").split() != str(default).split():
+                return True
+        elif isinstance(default, bool):
+            if _bool(value, default) != default:
+                return True
+        elif _count(value, default, -1000, 1000) != default:
+            return True
+    return False
+
+
+def seed_values(options: dict[str, Any] | None, defaults: dict[str, Any]) -> dict[str, Any]:
+    """The settings to start from: a customised cell's options turned into
+    settings, else the manifest's defaults (``defaults``)."""
+    if not options or not customised(options):
+        return dict(defaults)
+    seeded = dict(defaults)
+    seeded.update(_common(options))
+    if "strips" in options:
+        seeded["strips"] = legacy_strip_rows(str(options.get("strips") or ""))
+    return seeded
+
+
+def sources_for(config: Config) -> tuple[list[Source], list[Problem]]:
+    """What the settings show, top to bottom: the Far Side, then each strip
+    switched on, from where its Source says. A row that can't be shown is a
+    Problem the page notes."""
+    wanted: list[Source] = [FARSIDE] if config.far_side else []
+    problems: list[Problem] = []
+    for row in config.strips:
+        if not row.enabled:
+            continue
+        if len(wanted) - (1 if config.far_side else 0) >= MAX_STRIPS:
+            break
+        found = row_source(row)
+        if isinstance(found, Problem):
+            problems.append(found)
+        else:
+            wanted.append(found)
+    return wanted, problems
+
+
+def row_source(row: StripRow) -> Source | Problem:
+    """Where one strip row's picture comes from, as its Source says."""
+    if row.mode == "upload":
+        return Source(key=f"manual:{row.slug}", kind="manual", name=row.slug, title=row.label)
+    if row.mode == "url" and not row.image_url:
+        return Problem(row.label or row.slug, "Give it an image URL first.")
+    found = _source_for(row.slug, row.image_url if row.mode == "url" else "")
+    if isinstance(found, Problem):
+        return Problem(row.label or found.name, found.message)
+    return Source(key=found.key, kind=found.kind, name=found.name, url=found.url, title=row.label)
+
+
+def _host_settings() -> tuple[Any, Any] | None:
+    """The settings store and this widget's plugin, when there is an app to
+    ask (a render or an admin request); None for a direct call."""
+    try:
+        store = current_app.config.get("SETTINGS_STORE")
+        plugin = current_app.config["PLUGIN_REGISTRY"].get(PLUGIN_ID)
+    except (RuntimeError, KeyError):
+        return None
+    if store is None or plugin is None:
+        return None
+    return store, plugin
+
+
+def _first_cell_options() -> dict[str, Any] | None:
+    """The options of the first comics cell (grid or canvas) whose options
+    were changed from the old defaults, in the page store's order."""
+    try:
+        page_store = current_app.config.get("PAGE_STORE")
+        pages_list = page_store.list() if page_store is not None else []
+    except Exception:
+        return None
+    for page in pages_list:
+        placements = [c.options for c in getattr(page, "cells", []) if c.plugin == PLUGIN_ID]
+        canvas = getattr(page, "canvas", None)
+        for element in getattr(canvas, "els", None) or []:
+            if element.kind == "widget" and element.widget == PLUGIN_ID:
+                placements.append(element.options)
+        for options in placements:
+            if isinstance(options, dict) and customised(options):
+                return dict(options)
+    return None
+
+
+def ensure_settings(hint: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """The widget's settings for runtime, seeding them first if they were
+    never saved (see the notes above): from the first customised comics
+    cell, else ``hint`` (the cell being rendered) when it is customised,
+    else the defaults. None when there is no host to ask."""
+    host = _host_settings()
+    if host is None:
+        return None
+    store, plugin = host
+    fields = plugin.manifest.get("settings", [])
+    saved = (store.get_section("plugins") or {}).get(PLUGIN_ID)
+    if not isinstance(saved, dict) or "strips" not in saved:
+        defaults = {f["name"]: f.get("default") for f in fields if "name" in f}
+        source = _first_cell_options() or (hint if hint and customised(hint) else None)
+        values = seed_values(source, defaults)
+        if isinstance(saved, dict):
+            values.update({k: v for k, v in saved.items() if k in defaults})
+        store.update_for_namespace("plugins", PLUGIN_ID, values, fields)
+        logger.info(
+            "comics_daily: settings seeded from %s", "a cell's options" if source else "defaults"
+        )
+    result: dict[str, Any] = store.get_for_runtime("plugins", PLUGIN_ID, fields)
+    return result
+
+
+def resolve_config(options: dict[str, Any], settings: dict[str, Any]) -> Config:
+    """What a render shows: the settings (seeded on first use), or with no
+    host to ask, ``settings`` when they carry strips, else the cell's own
+    options."""
+    seeded = ensure_settings(options)
+    if seeded is not None:
+        return config_from_settings(seeded)
+    if isinstance(settings.get("strips"), list):
+        return config_from_settings(settings)
+    return config_from_options(options)
+
+
 # -- fetching each source --------------------------------------------------------
 
 
@@ -445,14 +742,17 @@ class GoComics:
     per refresh: if the site still challenges after that, it is blocking us.
     """
 
-    def __init__(self, cookie_file: Path, today: date) -> None:
+    def __init__(self, cookie_file: Path, today: date, warm_name: str = "") -> None:
         self._cookie_file = cookie_file
         self._jar = MozillaCookieJar()
         self._today = today
         # A session was set up in this refresh / setting one up was tried.
         self._ready = False
         self._warmed = False
-        self._warm_name = ""
+        # The strip whose week-old page sets a session up: the first strip
+        # asked for, unless the caller names a known one (checking a name
+        # that may not exist must not warm up on it).
+        self._warm_name = warm_name
         with contextlib.suppress(OSError, LoadError):
             if cookie_file.is_file():
                 self._jar.load(str(cookie_file), ignore_discard=True)
@@ -473,11 +773,24 @@ class GoComics:
                 raise SourceError(f"GoComics answered HTTP {reply.status} for {label}.")
             page = pages.parse_gocomics(reply.text(), name)
             if page is None:
-                raise SourceError(f"GoComics has no strip called “{name}”.")
+                raise NotFound(f"GoComics has no strip called “{name}”.")
             raw = _download(self._web, page.image_url, label)
             self._save()
             return Fetched([(raw, "")], edition=page.date or day.isoformat(), label=page.label)
-        raise SourceError(f"GoComics has no recent {label} strip.")
+        raise NoRecentStrip(f"GoComics has no recent {label} strip.")
+
+    def exists(self, name: str) -> bool:
+        """Whether gocomics.com has a strip called ``name`` at all: its page
+        answers. For telling a weekly strip from a name that isn't one."""
+        self._warm_name = self._warm_name or name
+        if not self._ready and not bunny_shield.has_session(self._jar):
+            self._warm()
+        reply = self._page(f"{GOCOMICS}/{name}")
+        if reply.status == 404:
+            return False
+        if reply.status >= 400:
+            raise SourceError(f"GoComics answered HTTP {reply.status}.")
+        return True
 
     def _page(self, url: str) -> Reply:
         reply = self._web.get(url)
@@ -816,14 +1129,33 @@ def refresh_source(
         logger.exception("comics_daily: could not record an attempt at %s", source.key)
         return False
     try:
-        fetched = _fetch_source(source, today, web, gocomics)
-        stored = _store_pictures(store, source, fetched)
+        fetched: Fetched | SourceError = _fetch_source(source, today, web, gocomics)
     except SourceError as err:
-        outcome: Callable[[dict[str, Any]], None] = _failed(str(err))
-        complete = False
+        fetched = err
     except Exception:
         logger.exception("comics_daily: fetching %s failed", source.key)
-        outcome = _failed(f"Couldn't update {source.label}.")
+        fetched = SourceError(f"Couldn't update {source.label}.")
+    return record_fetch(store, source, fetched, today, started)
+
+
+def record_fetch(
+    store: Any, source: Source, fetched: Fetched | SourceError, today: date, started: float
+) -> bool:
+    """Keep what a fetch of ``source`` brought (or the error it ended in),
+    note it in the log, and say whether the source fully updated."""
+    today_iso = today.isoformat()
+    stored: list[dict[str, Any]] = []
+    expected = 0
+    if isinstance(fetched, Fetched):
+        try:
+            stored = _store_pictures(store, source, fetched)
+        except SourceError as err:
+            fetched = err
+        except Exception:
+            logger.exception("comics_daily: storing %s failed", source.key)
+            fetched = SourceError(f"Couldn't keep the pictures for {source.label}.")
+    if isinstance(fetched, SourceError):
+        outcome: Callable[[dict[str, Any]], None] = _failed(str(fetched))
         complete = False
     else:
         expected = max(fetched.expected or 0, len(fetched.pictures))
@@ -834,11 +1166,58 @@ def refresh_source(
     except Exception:
         logger.exception("comics_daily: could not record the outcome for %s", source.key)
         return False
-    if complete:
+    _log_fetch(store, source, entry, fetched, stored, expected, today_iso, time.time() - started)
+    if complete and isinstance(fetched, Fetched):
         logger.info("comics_daily: updated %s (%s)", source.key, fetched.edition or today_iso)
     else:
         logger.warning("comics_daily: %s not updated: %s", source.key, entry.get("error"))
     return complete
+
+
+def _size(stored: list[dict[str, Any]]) -> str:
+    total = sum(int(p.get("bytes") or 0) for p in stored)
+    return f"{total / 1048576:.1f} MB" if total >= 1048576 else f"{max(1, round(total / 1024))} KB"
+
+
+def log_entry(store: Any, label: str, outcome: str, text: str) -> None:
+    """One line of the admin page's log. Never raises: the log is a courtesy."""
+    with contextlib.suppress(Exception):
+        store.append_log({"at": time.time(), "source": label, "outcome": outcome, "text": text})
+
+
+def _log_fetch(
+    store: Any,
+    source: Source,
+    entry: dict[str, Any],
+    fetched: Fetched | SourceError,
+    stored: list[dict[str, Any]],
+    expected: int,
+    today: str,
+    took: float,
+) -> None:
+    """Log one fetch: OK, stale (GoComics still on an older edition),
+    partial, blocked (a site refusing automatic downloads) or error, with
+    the edition, size and time taken."""
+    label = str(entry.get("label") or source.label)
+    if source.title:
+        label = source.title
+    seconds = f"{took:.1f} s"
+    if isinstance(fetched, SourceError):
+        message = str(fetched)
+        outcome = "blocked" if "blocking" in message else "error"
+        log_entry(store, label, outcome, f"{message} ({seconds})")
+        return
+    edition = fetched.edition or today
+    count = len(stored)
+    what = f"{count} picture{'' if count == 1 else 's'}, {_size(stored)} in {seconds}"
+    if count < expected:
+        log_entry(store, label, "partial", f"{count} of {expected} pictures, {_size(stored)}")
+        return
+    published = published_edition(datetime.now(UTC), today)
+    if source.kind == "gocomics" and edition < published:
+        log_entry(store, label, "stale", f"still the {edition} strip, {what}")
+        return
+    log_entry(store, label, "ok", f"{edition}, {what}")
 
 
 def _failed(message: str) -> Callable[[dict[str, Any]], None]:
@@ -882,7 +1261,15 @@ def _store_pictures(store: Any, source: Source, fetched: Fetched) -> list[dict[s
         except ValueError:
             continue
         name = store.add(source.key, picture)
-        stored.append({"file": name, "w": picture.width, "h": picture.height, "caption": caption})
+        stored.append(
+            {
+                "file": name,
+                "w": picture.width,
+                "h": picture.height,
+                "caption": caption,
+                "bytes": len(picture.data),
+            }
+        )
     if not stored:
         raise SourceError(f"The download for {source.label} wasn't a picture.")
     return stored
@@ -926,22 +1313,22 @@ def _pictures(record: dict[str, Any], store: Any) -> list[dict[str, Any]]:
 def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
-    del settings
     store = images.Store(Path(ctx["data_dir"]))
-    strips, problems = parse_strips(str(options.get("strips") or ""))
-    show_farside = _bool(options.get("far_side"), True)
-    wanted = ([FARSIDE] if show_farside else []) + strips
+    config = resolve_config(options, settings)
+    wanted, problems = sources_for(config)
     if not wanted:
         if problems:
             return {"error": f"{problems[0].name}: {problems[0].message}"}
-        return {"error": "Add some strips, or turn on the Far Side, in the cell editor."}
+        return {"error": "Turn on a strip or the Far Side under Widgets → Admin pages → Comics."}
 
     today = _today()
     today_iso = today.isoformat()
     now = time.time()
     records = store.sources()
     force = bool(ctx.get("fresh"))
-    due = [s for s in wanted if force or is_due(s, records.get(s.key), today_iso, now)]
+    due = [
+        s for s in wanted if s.fetched and (force or is_due(s, records.get(s.key), today_iso, now))
+    ]
     run = _enqueue(store.root, due, today, force=force) if due else None
     if run is not None and not any(_pictures(records.get(s.key) or {}, store) for s in wanted):
         # Nothing to show yet: give a quick source the chance to land in this
@@ -951,7 +1338,9 @@ def fetch(
         records = store.sources()
     busy = _running_keys(store.root)
     published = published_edition(datetime.now(UTC), today_iso)
-    return _payload(wanted, problems, records, busy, options, store, today_iso, published)
+    payload = _payload(wanted, problems, records, busy, config, store, today_iso, published)
+    payload["layout"] = config.layout()
+    return payload
 
 
 def published_edition(now: datetime, today: str) -> str:
@@ -1004,7 +1393,7 @@ def _payload(
     problems: list[Problem],
     records: dict[str, dict[str, Any]],
     busy: set[str],
-    options: dict[str, Any],
+    config: Config,
     store: Any,
     today: str,
     published: str | None = None,
@@ -1016,10 +1405,12 @@ def _payload(
     for source in wanted:
         record = records.get(source.key) or {}
         pictures = _pictures(record, store)
-        label = str(record.get("label") or source.label)
+        label = source.title or str(record.get("label") or source.label)
         error = record.get("error")
         busy_now = source.key in busy
         state, since = freshness(source, record, bool(pictures), busy_now, today, published)
+        if source.kind == "manual" and not pictures:
+            state, error = "missing", "No picture uploaded yet."
         sources.append(
             {
                 "id": source.name,
@@ -1041,8 +1432,7 @@ def _payload(
                 }
             )
         if source.kind == "farside":
-            count = _count(options.get("far_side_count"), FARSIDE_MAX_PANELS, 1, FARSIDE_MAX_PANELS)
-            farside = pictures[:count]
+            farside = pictures[: config.far_side_count]
         elif pictures:
             first = pictures[0]
             strips.append(
@@ -1091,8 +1481,468 @@ def _store() -> Any:
     return images.Store(Path(plugin.data_dir))
 
 
+# -- the admin page ---------------------------------------------------------------
+#
+# /plugins/comics_daily/: today's comics with a Fetch now button, the
+# settings (the strips in order, each with its status, source mode, upload
+# and import; adding a GoComics strip by address; the Far Side; the layout)
+# folded above the log of every fetch, upload and import.
+
+ADMIN_SETTINGS = True
+# The strip a session is set up on while checking a new name: one that
+# surely exists, so a name that doesn't can be told apart.
+WARM_STRIP = "garfield"
+_ADD_RE = re.compile(r"^(?:https?://)?(?:www\.)?gocomics\.com/([A-Za-z0-9-]+)", re.IGNORECASE)
+
+
+def parse_strip_input(text: str) -> str | None:
+    """A GoComics strip name from what was typed: its address
+    (``https://www.gocomics.com/garfield``, with or without a date after it)
+    or its bare name. None when it is neither."""
+    value = (text or "").strip()
+    page = _ADD_RE.match(value)
+    name = (page.group(1) if page else value).lower()
+    return name if _NAME_RE.match(name) else None
+
+
+def _admin_plugin() -> Any:
+    plugin = current_app.config["PLUGIN_REGISTRY"].get(PLUGIN_ID)
+    if plugin is None:
+        abort(404)
+    return plugin
+
+
+def _scope(plugin: Any) -> Any:
+    """The widget's own network scope (its ``requires:`` hosts), for work an
+    admin request starts, as a render's would run in."""
+    try:
+        from app.capabilities import capability_scope
+    except ImportError:  # pragma: no cover - every supported host has it
+        return contextlib.nullcontext()
+    return capability_scope(plugin.capabilities)
+
+
+def _admin_tz() -> Any:
+    try:
+        from app.tz_resolve import app_timezone
+
+        return app_timezone()
+    except Exception:
+        return None
+
+
+def _when(ts: Any, tz: Any, today: str) -> str:
+    try:
+        moment = datetime.fromtimestamp(float(ts), tz)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "at an unknown time"
+    if moment.date().isoformat() == today:
+        return f"today at {moment:%H:%M}"
+    return f"{moment:%b} {moment.day} at {moment:%H:%M}"
+
+
+def _day(iso: Any) -> str:
+    try:
+        day = date.fromisoformat(str(iso))
+    except ValueError:
+        return str(iso)
+    return f"{day:%b} {day.day}"
+
+
+def source_status(
+    source: Source,
+    record: dict[str, Any],
+    store: Any,
+    busy: set[str],
+    today: str,
+    published: str,
+    tz: Any,
+) -> dict[str, Any]:
+    """How one source stands, for the admin page: a short chip (and its
+    tone), a status line, a warning when it couldn't refresh automatically,
+    and its pictures."""
+    pictures = _pictures(record, store)
+    error = str(record.get("error") or "")
+    edition = record.get("edition")
+    state, since = freshness(source, record, bool(pictures), source.key in busy, today, published)
+    fetched = record.get("last_success")
+    warning = ""
+    if source.key in busy:
+        chip, tone, line = "Fetching", "slate", "Fetching now…"
+    elif source.kind == "manual":
+        if not pictures:
+            chip, tone = "No picture", "bad"
+            line = "No picture yet: upload one, or import one from the Image URL."
+        else:
+            chip, tone = "Manual", "slate"
+            origin = str(record.get("origin") or "uploaded")
+            line = f"Manual picture, {origin} {_when(fetched, tz, today)}."
+            if record.get("fetched_on") != today:
+                warning = (
+                    f"This picture is from {_day(record.get('fetched_on'))}. Switch the source "
+                    "back to Automatic when the site works again."
+                )
+    elif state == "ok":
+        chip, tone = "OK", "ok"
+        if source.kind == "farside":
+            what = "Today's panels"
+        elif edition:
+            what = f"The {_day(edition)} strip"
+        else:
+            what = "Today's picture"
+        line = f"{what}, fetched {_when(fetched, tz, today)}."
+    elif state == "pending":
+        chip, tone, line = "Not fetched", "", "Not fetched yet: Fetch now gets it."
+    else:
+        blocked = "blocking" in error
+        if blocked:
+            chip, tone = "Blocked", "bad"
+        elif state == "stale":
+            chip, tone = "Stale", "warn"
+        else:
+            chip, tone = "Missing", "bad"
+        if state == "stale":
+            last = f"the {_day(edition)} strip" if edition else "the last good picture"
+            line = f"Stale since {_day(since) if since else 'earlier'}: showing {last}"
+            line += f", fetched {_when(fetched, tz, today)}." if fetched else "."
+        else:
+            line = "Nothing to show yet."
+        if error:
+            warning = f"Couldn't refresh automatically: {error}"
+        elif edition:
+            warning = f"The site still has the {_day(edition)} strip; it's asked again later today."
+    return {
+        "state": state,
+        "chip": chip,
+        "tone": tone,
+        "line": line,
+        "warning": warning,
+        "pictures": pictures,
+    }
+
+
+def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
+    """Everything the admin page shows besides the settings form."""
+    today = _today().isoformat()
+    published = published_edition(datetime.now(UTC), today)
+    records = store.sources()
+    busy = _running_keys(store.root)
+
+    def status(source: Source) -> dict[str, Any]:
+        return source_status(
+            source, records.get(source.key) or {}, store, busy, today, published, tz
+        )
+
+    strips: dict[str, dict[str, Any]] = {}
+    for row in config.strips:
+        found = row_source(row)
+        if isinstance(found, Problem):
+            entry = {"chip": "Can't show", "tone": "bad", "line": found.message}
+            entry.update(warning=found.message, pictures=[], state="invalid")
+        else:
+            entry = status(found)
+            entry["label"] = found.label
+        if not row.enabled:
+            entry.update(chip="Off", tone="", warning="")
+        manual = records.get(f"manual:{row.slug}") or {}
+        entry["manual"] = bool(_pictures(manual, store))
+        entry["label"] = row.label or default_label(row.slug)
+        entry["kind"] = "Dilbert archive" if row.slug == "dilbert" else "GoComics"
+        strips[row.slug] = entry
+
+    wanted, problems = sources_for(config)
+    farside = status(FARSIDE) if config.far_side else None
+    if farside is not None:
+        farside["pictures"] = farside["pictures"][: config.far_side_count]
+    shown = [s for s in wanted if s.kind != "farside"]
+    preview = [{"label": s.label, **strips.get(s.name, status(s))} for s in shown]
+    every = ([{"label": FARSIDE.label, **farside}] if farside else []) + preview
+    attention = [
+        f"{item['label']} ({item['chip'].lower()})"
+        for item in every
+        if item["chip"] in ("Blocked", "Stale", "Missing", "No picture", "Can't show")
+    ]
+    attention += [f"{p.name} ({p.message.rstrip('.').lower()})" for p in problems]
+    lede: list[str] = []
+    fetching = [item["label"] for item in every if item["chip"] == "Fetching"]
+    if fetching:
+        lede.append(f"Fetching now: {', '.join(fetching)}.")
+    elif not every:
+        lede.append("Nothing to show: switch on a strip or the Far Side in the settings below.")
+    elif attention:
+        verb = "needs" if len(attention) == 1 else "need"
+        lede.append(f"{len(attention)} of {len(every)} {verb} a look: {', '.join(attention)}.")
+    else:
+        lede.append(f"All {len(every)} are up to date.")
+    attempts = [float(r.get("last_attempt") or 0) for r in records.values()]
+    if attempts and max(attempts) > 0:
+        lede.append(f"Last fetch {_when(max(attempts), tz, today)}.")
+
+    entries = store.log()
+    width = min(22, max((len(str(e.get("source") or "")) for e in entries), default=0))
+    log = []
+    for entry in entries:
+        when = "?"
+        with contextlib.suppress(TypeError, ValueError, OverflowError, OSError):
+            when = datetime.fromtimestamp(float(entry["at"]), tz).strftime("%b %d %H:%M:%S")
+        source_name = str(entry.get("source") or "-")[:width]
+        outcome = str(entry.get("outcome") or "").upper()
+        log.append(f"{when}  {source_name:<{width}}  {outcome:<8} {entry['text']}")
+    return {
+        "lede": " ".join(lede),
+        "running": bool(busy),
+        "farside": farside,
+        "preview": preview,
+        "strips": strips,
+        "problems": problems,
+        "log": log,
+    }
+
+
+def _stored_rows(settings: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(row) for row in settings.get("strips") or [] if isinstance(row, dict)]
+
+
+def _save_rows(plugin: Any, rows: list[dict[str, Any]]) -> None:
+    """Store the strips setting, checked the way the settings form's save is."""
+    from app import repeater
+
+    store = current_app.config["SETTINGS_STORE"]
+    fields = plugin.manifest.get("settings", [])
+    field = next(f for f in fields if f.get("name") == "strips")
+    values = store.get_for_runtime("plugins", PLUGIN_ID, fields)
+    values["strips"] = repeater.parse_rows(field, rows)
+    store.update_for_namespace("plugins", PLUGIN_ID, values, fields)
+
+
+def _back() -> Response:
+    return redirect(url_for(f"{PLUGIN_ID}_media.index", _anchor=f"plugin-{PLUGIN_ID}"))
+
+
+def _keep_manual(
+    plugin: Any,
+    rows: list[dict[str, Any]],
+    row: dict[str, Any],
+    picture: Any,
+    origin: str,
+    url: str = "",
+) -> None:
+    """Keep ``picture`` as the strip's manual picture and switch the strip
+    to it (Manual upload) until it is switched back to Automatic."""
+    store = images.Store(Path(plugin.data_dir))
+    slug = str(row["slug"])
+    key = f"manual:{slug}"
+    name = store.add(key, picture)
+    now = time.time()
+    today = _today().isoformat()
+    stored = {"file": name, "w": picture.width, "h": picture.height, "caption": ""}
+    stored["bytes"] = len(picture.data)
+
+    def record(entry: dict[str, Any]) -> None:
+        entry.update(
+            pictures=[stored],
+            fetched_on=today,
+            last_success=now,
+            last_attempt=now,
+            error=None,
+            partial=False,
+            origin=origin,
+            origin_url=url,
+        )
+
+    store.update(key, record)
+    row["mode"] = "upload"
+    if url:
+        row["image_url"] = url
+    _save_rows(plugin, rows)
+    label = str(row.get("label") or default_label(slug))
+    detail = f"{picture.width}×{picture.height} px, {_size([stored])}"
+    log_entry(store, label, origin.split()[0], f"{origin}: {detail}")
+
+
 def blueprint() -> Blueprint:
-    bp = Blueprint(f"{PLUGIN_ID}_media", __name__)
+    bp = Blueprint(f"{PLUGIN_ID}_media", __name__, template_folder="templates")
+
+    @bp.get("/")
+    def index() -> str:
+        from app.plugin_admin import settings_section
+
+        plugin = _admin_plugin()
+        settings = ensure_settings() or {}
+        section = settings_section(
+            plugin,
+            title="Settings",
+            blurb="The strips in your order, the Far Side and the layout, for every comics cell.",
+            icon="sliders-horizontal",
+            fold="closed",
+            repeater_layout="list",
+        )
+        store = images.Store(Path(plugin.data_dir))
+        return render_template(
+            "comics_daily/index.html",
+            section=section,
+            view=admin_view(store, config_from_settings(settings), _admin_tz()),
+            max_strips=MAX_STRIPS,
+            upload_mb=images.MAX_UPLOAD_BYTES // (1024 * 1024),
+        )
+
+    @bp.post("/fetch")
+    def fetch_now() -> Response:
+        plugin = _admin_plugin()
+        config = config_from_settings(ensure_settings() or {})
+        wanted, _ = sources_for(config)
+        sources = [s for s in wanted if s.fetched]
+        store = images.Store(Path(plugin.data_dir))
+        if not sources:
+            flash("Nothing to fetch: every strip shown is a manual picture, or none is on.", "warn")
+        else:
+            with _scope(plugin):
+                _enqueue(store.root, sources, _today(), force=True)
+            names = ", ".join(s.label for s in sources)
+            log_entry(store, "Fetch now", "started", f"asked for {names}")
+            flash("Fetching today's comics now; the job tray shows how far it got.", "ok")
+        return redirect(url_for(f"{PLUGIN_ID}_media.index", _anchor="today"))
+
+    @bp.post("/strips/add")
+    def add_strip() -> Response:
+        plugin = _admin_plugin()
+        rows = _stored_rows(ensure_settings() or {})
+        slug = parse_strip_input(request.form.get("strip", ""))
+        if slug is None:
+            flash(
+                "That isn't a GoComics address or strip name: paste the strip's address "
+                "(https://www.gocomics.com/garfield) or type its name (garfield).",
+                "error",
+            )
+            return _back()
+        existing = next((row for row in rows if row.get("slug") == slug), None)
+        if existing is not None:
+            if not existing.get("enabled"):
+                existing["enabled"] = True
+                _save_rows(plugin, rows)
+                flash(f"{existing.get('label') or default_label(slug)} is switched back on.", "ok")
+            else:
+                flash(
+                    f"{existing.get('label') or default_label(slug)} is already in the list.",
+                    "warn",
+                )
+            return _back()
+        if len(rows) >= MAX_STRIPS:
+            flash(f"The list holds at most {MAX_STRIPS} strips; remove one first.", "error")
+            return _back()
+        store = images.Store(Path(plugin.data_dir))
+        label, warning = default_label(slug), ""
+        if slug != "dilbert":
+            source = Source(key=f"gocomics:{slug}", kind="gocomics", name=slug)
+            started = time.time()
+            today = _today()
+            outcome: Fetched | SourceError
+            with _scope(plugin):
+                warm = WARM_STRIP if slug != WARM_STRIP else ""
+                gocomics = GoComics(store.root / COOKIE_FILE, today, warm_name=warm)
+                try:
+                    outcome = gocomics.strip(slug, label)
+                except NotFound as err:
+                    flash(str(err), "error")
+                    return _back()
+                except NoRecentStrip as err:
+                    try:
+                        found = gocomics.exists(slug)
+                    except SourceError:
+                        found = True  # can't tell: let it in, its status will say
+                    if not found:
+                        flash(f"GoComics has no strip called “{slug}”.", "error")
+                        return _back()
+                    outcome = err
+                except SourceError as err:
+                    outcome = err
+            record_fetch(store, source, outcome, today, started)
+            if isinstance(outcome, Fetched):
+                label = outcome.label or label
+            else:
+                warning = str(outcome)
+        rows.append(
+            {"enabled": True, "label": label, "slug": slug, "mode": "auto", "image_url": ""}
+        )
+        _save_rows(plugin, rows)
+        log_entry(store, label, "added", f"added to the list as {slug}")
+        if warning:
+            flash(f"Added {label}, but it couldn't be fetched yet: {warning}", "warn")
+        else:
+            flash(f"Added {label}.", "ok")
+        return _back()
+
+    def _row_for(slug: str) -> tuple[Any, list[dict[str, Any]], dict[str, Any]]:
+        plugin = _admin_plugin()
+        rows = _stored_rows(ensure_settings() or {})
+        row = next((r for r in rows if r.get("slug") == slug), None)
+        if row is None:
+            abort(404)
+        return plugin, rows, row
+
+    @bp.post("/strips/<slug>/upload")
+    def upload_strip(slug: str) -> Response:
+        plugin, rows, row = _row_for(slug)
+        upload = request.files.get("file")
+        if upload is None or not upload.filename:
+            flash("Choose a picture to upload first.", "error")
+            return _back()
+        try:
+            raw = upload.stream.read(images.MAX_UPLOAD_BYTES + 1)
+        finally:
+            upload.close()  # a large upload is spooled to a temp file
+        try:
+            picture = images.validate_upload(raw)
+        except ValueError as err:
+            flash(str(err), "error")
+            return _back()
+        _keep_manual(plugin, rows, row, picture, "uploaded")
+        label = row.get("label") or default_label(slug)
+        flash(
+            f"{label} shows the picture you uploaded until you switch it back to Automatic.", "ok"
+        )
+        return _back()
+
+    @bp.post("/strips/<slug>/import")
+    def import_strip(slug: str) -> Response:
+        from app import net_guard
+
+        plugin, rows, row = _row_for(slug)
+        url = (request.form.get("url") or str(row.get("image_url") or "")).strip()
+        if not url:
+            flash("Put the picture's address in Image URL first.", "error")
+            return _back()
+        if not _URL_RE.match(url):
+            flash("The Image URL has to start with https:// or http://.", "error")
+            return _back()
+        try:
+            raw, _ = net_guard.fetch_bytes(
+                url,
+                headers={k: v for k, v in BROWSER_HEADERS.items() if k != "Accept"},
+                timeout=IMAGE_TIMEOUT_S,
+                max_bytes=images.MAX_UPLOAD_BYTES,
+                allow_local=False,
+            )
+        except net_guard.BlockedURLError:
+            flash("That address isn't on the public web, so it can't be imported.", "error")
+            return _back()
+        except ValueError:
+            flash(f"That picture is over {images.MAX_UPLOAD_BYTES // 1048576} MB.", "error")
+            return _back()
+        except Exception as err:  # URLError, HTTPError, a timeout, a cut-off body
+            reason = getattr(err, "reason", None) or getattr(err, "code", None) or err
+            flash(f"Couldn't download that picture ({str(reason)[:120]}).", "error")
+            return _back()
+        try:
+            picture = images.validate_upload(raw)
+        except ValueError as err:
+            flash(str(err), "error")
+            return _back()
+        host = _host(url) or "the web"
+        _keep_manual(plugin, rows, row, picture, f"imported from {host}", url=url)
+        label = row.get("label") or default_label(slug)
+        flash(f"{label} shows the imported picture until you switch it back to Automatic.", "ok")
+        return _back()
 
     @bp.get("/img/<name>")
     def image(name: str) -> Response:

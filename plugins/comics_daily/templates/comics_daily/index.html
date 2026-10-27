@@ -1,0 +1,187 @@
+{% extends "_base.html" %}
+{% from "_components.html" import button, section_card %}
+{% block title %}Comics, Tesserae{% endblock %}
+{% block head_extra %}<script src="{{ url_for('static', filename='pages/settings.js') }}" defer></script>{% endblock %}
+
+{#- A source's state as the app's small chip. -#}
+{% macro chip(item) -%}
+  {%- if item.chip %}<span class="tg tg--sm{% if item.tone %} tg--{{ item.tone }}{% endif %} cx-chip">{{ item.chip }}</span>{% endif -%}
+{%- endmacro %}
+
+{#- Each strip row's extras in the settings list (repeater_field's
+    row_extra): its state chip in the head; under its fields, its status,
+    the warning when it couldn't refresh, and Upload strip / Import URL.
+    Those post forms of their own at the foot of the page (form=...), so
+    they never nest in the settings form. -#}
+{% macro strip_extra(row, part) -%}
+  {%- set st = view.strips.get(row.slug) -%}
+  {%- if st and part == 'head' %}{{ chip(st) }}
+  {%- elif st %}
+  <div class="cx-row-status">
+    <p class="cx-status-line"><span class="cx-kind">{{ st.kind }}</span>{{ st.line }}</p>
+    {%- if st.warning %}
+    <div class="dx-warn-band cx-warn"><i class="ph ph-warning" aria-hidden="true"></i><p>{{ st.warning }}</p></div>
+    {%- endif %}
+    <div class="cx-tools">
+      <input type="file" name="file" form="cx-upload-{{ row.slug }}" class="cx-file"
+             accept="image/png,image/jpeg,image/gif,image/webp" aria-label="Picture to upload for {{ st.label }}">
+      <button type="submit" form="cx-upload-{{ row.slug }}" class="dx-btn-ghost-sm" data-comics-action>
+        <i class="ph ph-upload-simple" aria-hidden="true"></i><span>Upload strip</span>
+      </button>
+      <button type="submit" form="cx-import-{{ row.slug }}" class="dx-btn-ghost-sm" data-comics-action>
+        <i class="ph ph-download-simple" aria-hidden="true"></i><span>Import URL</span>
+      </button>
+    </div>
+    <p class="field-help cx-tools-help">Upload or import a picture to show it as this strip (Manual upload) until you switch back to Automatic. PNG, JPEG, GIF or WebP, up to {{ upload_mb }} MB.</p>
+  </div>
+  {%- endif %}
+{%- endmacro %}
+
+{#- The list's foot (repeater_field's foot_extra): add a GoComics strip by
+    its address or name. The server checks the name with GoComics. -#}
+{% macro add_strip() -%}
+  <div class="cx-add">
+    <label class="sr-only" for="cx-add-input">GoComics address or strip name</label>
+    <input type="text" id="cx-add-input" name="strip" form="cx-add" required
+           placeholder="https://www.gocomics.com/peanuts, or peanuts"
+           autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button type="submit" form="cx-add" class="dx-btn-ghost-sm" data-comics-action>
+      <i class="ph ph-plus" aria-hidden="true"></i><span>Add strip</span>
+    </button>
+  </div>
+{%- endmacro %}
+
+{% block main %}
+<div class="page-head">
+  <h1><i class="ph ph-smiley" aria-hidden="true"></i> Comics</h1>
+  <p class="page-blurb">The Far Side's daily panels and your strips, fetched once a day for every comics cell. When a site blocks a download, the last good strip stays up and you can upload or import the day's picture.</p>
+</div>
+
+<div class="settings-section-list">
+{% call section_card(icon='smiley', title="Today's comics", id='today') %}
+  <div class="cx-today-head">
+    <p class="lede">{{ view.lede }}</p>
+    <form method="post" action="{{ url_for('comics_daily_media.fetch_now') }}" class="cx-fetch">
+      {% if view.running %}
+        <button type="button" class="ghost" disabled><i class="ph ph-arrows-clockwise" aria-hidden="true"></i><span>Fetching…</span></button>
+      {% else %}
+        {{ button('Fetch now', icon='arrows-clockwise') }}
+      {% endif %}
+    </form>
+  </div>
+  <div class="cx-preview">
+    {% if view.farside %}
+    <section class="cx-source" aria-label="The Far Side">
+      <p class="cx-source-head"><strong>The Far Side</strong>{{ chip(view.farside) }}<span class="cx-source-line">{{ view.farside.line }}</span></p>
+      {% if view.farside.pictures %}
+      <div class="cx-panels">
+        {% for p in view.farside.pictures %}
+        <figure>
+          <img src="{{ p.src }}" alt="The Far Side, panel {{ loop.index }}" width="{{ p.w }}" height="{{ p.h }}" loading="lazy">
+          {% if p.caption %}<figcaption>{{ p.caption }}</figcaption>{% endif %}
+        </figure>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if view.farside.warning %}<div class="dx-warn-band cx-warn"><i class="ph ph-warning" aria-hidden="true"></i><p>{{ view.farside.warning }}</p></div>{% endif %}
+    </section>
+    {% endif %}
+    {% for item in view.preview %}
+    <section class="cx-source" aria-label="{{ item.label }}">
+      <p class="cx-source-head"><strong>{{ item.label }}</strong>{{ chip(item) }}<span class="cx-source-line">{{ item.line }}</span></p>
+      {% if item.pictures %}
+      <img class="cx-strip" src="{{ item.pictures[0].src }}" alt="{{ item.label }}" width="{{ item.pictures[0].w }}" height="{{ item.pictures[0].h }}" loading="lazy">
+      {% endif %}
+      {% if item.warning %}<div class="dx-warn-band cx-warn"><i class="ph ph-warning" aria-hidden="true"></i><p>{{ item.warning }}</p></div>{% endif %}
+    </section>
+    {% endfor %}
+    {% for p in view.problems %}
+    <section class="cx-source" aria-label="{{ p.name }}">
+      <p class="cx-source-head"><strong>{{ p.name }}</strong><span class="tg tg--sm tg--bad cx-chip">Can't show</span><span class="cx-source-line">{{ p.message }}</span></p>
+    </section>
+    {% endfor %}
+  </div>
+{% endcall %}
+
+{% set repeater_row_extra = strip_extra %}
+{% set repeater_foot_extra = add_strip %}
+{% include "_plugin_admin_settings.html" %}
+
+{% call section_card(icon='list-checks', title='Fetches', id='log') %}
+  <p class="lede">Each fetch per source (OK, stale, blocked or error) with its date, size and time taken, and every upload, import and added strip.</p>
+  {% if view.log %}
+  <details class="dx-disclosure">
+    <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Log</span></summary>
+    <div class="dx-disclosure-body">
+      <pre class="dx-code dx-log-view dx-log-view--wrap" data-log-tail>{{ view.log | join('\n') }}</pre>
+    </div>
+  </details>
+  {% else %}
+  <p class="field-help">Nothing fetched yet.</p>
+  {% endif %}
+{% endcall %}
+</div>
+
+{#- The forms the strip tools and Add strip post (outside the settings form,
+    which can't hold another form). -#}
+<form id="cx-add" method="post" action="{{ url_for('comics_daily_media.add_strip') }}" data-comics-form hidden></form>
+{% for slug in view.strips %}
+<form id="cx-upload-{{ slug }}" method="post" enctype="multipart/form-data" data-comics-form hidden
+      action="{{ url_for('comics_daily_media.upload_strip', slug=slug) }}"></form>
+<form id="cx-import-{{ slug }}" method="post" data-comics-form data-import-for="{{ slug }}" hidden
+      action="{{ url_for('comics_daily_media.import_strip', slug=slug) }}"><input type="hidden" name="url" value=""></form>
+{% endfor %}
+
+<script>
+  // The strip tools post forms of their own and reload the page: send the
+  // Image URL as typed (it may not be saved yet), and ask before dropping
+  // other unsaved changes to the settings.
+  (function () {
+    var settings = document.querySelector('#plugin-comics_daily form');
+    document.querySelectorAll('form[data-comics-form]').forEach(function (form) {
+      form.addEventListener('submit', function (ev) {
+        var slug = form.getAttribute('data-import-for');
+        if (slug && settings) {
+          settings.querySelectorAll('[data-repeater-row]').forEach(function (row) {
+            var key = row.querySelector('[data-repeater-key="slug"]');
+            var url = row.querySelector('[data-repeater-key="image_url"]');
+            if (key && url && key.value === slug) form.querySelector('[name="url"]').value = url.value;
+          });
+        }
+        if (settings && settings.hasAttribute('data-dirty') &&
+            !window.confirm('This reloads the page, so your other unsaved changes to the settings are dropped. Go ahead?')) {
+          ev.preventDefault();
+        }
+      });
+    });
+  })();
+</script>
+
+<style>
+  .cx-today-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .cx-today-head .lede { margin: 0; flex: 1 1 320px; }
+  .cx-fetch { margin: 0; flex: none; }
+  .cx-preview { margin-top: 16px; border-top: 1px solid var(--t-border); }
+  .cx-source { padding: 14px 0; border-bottom: 1px solid var(--t-border); }
+  .cx-source:last-child { border-bottom: 0; padding-bottom: 0; }
+  .cx-source-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 10px; font-size: 14px; }
+  .cx-source-line { font-size: 12.5px; color: var(--t-muted); }
+  .cx-chip { flex: none; }
+  .cx-panels { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 140px)); gap: 12px; }
+  .cx-panels figure { margin: 0; }
+  .cx-panels img, .cx-strip { display: block; width: 100%; height: auto; background: #fff; border: 1px solid var(--t-border); }
+  .cx-strip { max-width: 460px; }
+  .cx-panels figcaption { margin-top: 6px; font-size: 12px; color: var(--t-fg-soft); }
+  .cx-warn { margin: 10px 0 0; }
+  .cx-row-status { margin-top: 12px; }
+  .cx-status-line { margin: 0; font-size: 12.5px; color: var(--t-fg-soft); }
+  .cx-kind { font-family: var(--t-font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--t-muted); margin-right: 8px; }
+  .cx-tools { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  /* Not a text box: outranks the settings body's input style. */
+  .dx-section-body .field--repeater .cx-tools input.cx-file { width: auto; max-width: 100%; height: auto; min-height: 0; padding: 0; border: 0; background: none; font-size: 12.5px; }
+  .cx-tools-help { margin: 6px 0 0; }
+  .cx-add { display: flex; align-items: center; gap: 8px; flex: 1 1 340px; min-width: 0; }
+  .cx-add input { flex: 1 1 auto; min-width: 0; }
+  form[data-dirty] [data-comics-action] { opacity: 0.6; }
+</style>
+{% endblock %}

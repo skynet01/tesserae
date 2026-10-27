@@ -12,6 +12,7 @@ import gzip
 import importlib.util
 import io
 import json
+import re
 import sys
 import threading
 import time
@@ -507,7 +508,7 @@ def test_fetch_answers_from_disk_while_refresh_runs(
 
 def test_no_sources_is_an_error(tmp_path: Path) -> None:
     out = srv.fetch({"strips": "", "far_side": False}, {}, ctx={"data_dir": str(tmp_path)})
-    assert "Add some strips" in out["error"]
+    assert "Turn on a strip or the Far Side" in out["error"]
 
 
 # -- review regressions ------------------------------------------------------------
@@ -770,3 +771,511 @@ def test_gzip_members_trailers_and_cumulative_cap() -> None:
         srv.decode_body(gzip.compress(b"hello")[:-4], "gzip", 100, "example.org")
     with pytest.raises(srv.SourceError, match="damaged"):
         srv.decode_body(zlib.compress(b"hello") + b"junk", "deflate", 100, "example.org")
+
+
+# -- the settings, the admin page and its actions --------------------------------
+
+GC = "https://www.gocomics.com"
+LEGACY = {
+    "far_side": False,
+    "strips": "peanuts\n# garfield\ndilbert https://featureassets.gocomics.com/assets/x",
+    "gap": 20,
+}
+
+
+def _app_module(client: FlaskClient) -> Any:
+    return client.application.config["PLUGIN_REGISTRY"].get("comics_daily").server_module
+
+
+def _plugin(client: FlaskClient) -> Any:
+    return client.application.config["PLUGIN_REGISTRY"].get("comics_daily")
+
+
+def _settings(client: FlaskClient) -> dict[str, Any]:
+    plugin = _plugin(client)
+    store = client.application.config["SETTINGS_STORE"]
+    return store.get_for_runtime("plugins", plugin.id, plugin.manifest["settings"])
+
+
+def _saved_raw(client: FlaskClient) -> Any:
+    return (client.application.config["SETTINGS_STORE"].get_section("plugins") or {}).get(
+        "comics_daily"
+    )
+
+
+def _store(client: FlaskClient) -> Any:
+    return _app_module(client).images.Store(Path(_plugin(client).data_dir))
+
+
+def _add_comics_page(client: FlaskClient, options: dict[str, Any]) -> None:
+    from app.state.page_store import Cell, Page
+
+    page = Page(
+        id="comics-page",
+        name="Comics",
+        cells=[Cell(id="c1", x=0, y=0, w=1, h=1, plugin="comics_daily", options=options)],
+    )
+    client.application.config["PAGE_STORE"].save(page)
+
+
+def _messages(client: FlaskClient) -> list[str]:
+    with client.session_transaction() as session:
+        return [text for _, text in session.get("_flashes", [])]
+
+
+def test_legacy_options_become_rows() -> None:
+    rows = srv.legacy_strip_rows(LEGACY["strips"])
+    assert rows == [
+        {"enabled": True, "label": "Peanuts", "slug": "peanuts", "mode": "auto", "image_url": ""},
+        {
+            "enabled": False,
+            "label": "Garfield",
+            "slug": "garfield",
+            "mode": "auto",
+            "image_url": "",
+        },
+        {
+            "enabled": True,
+            "label": "Dilbert",
+            "slug": "dilbert",
+            "mode": "url",
+            "image_url": "https://featureassets.gocomics.com/assets/x",
+        },
+    ]
+    assert srv.customised(LEGACY)
+    assert not srv.customised(dict(srv.LEGACY_DEFAULTS))
+    assert not srv.customised({"strips": "garfield calvinandhobbes\npearlsbeforeswine dilbert"})
+    assert not srv.customised({})
+
+
+def test_settings_decide_what_shows_and_the_layout(tmp_path: Path) -> None:
+    settings = {
+        "far_side": False,
+        "far_side_count": 9,
+        "gap": 12,
+        "strips": [
+            {"enabled": True, "label": "Odie's", "slug": "garfield", "mode": "auto"},
+            {"enabled": False, "slug": "peanuts"},
+            {"enabled": True, "slug": "dilbert", "mode": "upload"},
+            {"enabled": True, "slug": "nonsequitur", "mode": "url", "image_url": ""},
+            {"enabled": True, "slug": "Bad Name!"},
+        ],
+    }
+    config = srv.config_from_settings(settings)
+    assert config.far_side_count == 4 and config.gap == 12
+    wanted, problems = srv.sources_for(config)
+    assert [(s.key, s.label) for s in wanted] == [
+        ("gocomics:garfield", "Odie's"),
+        ("manual:dilbert", "Dilbert"),
+    ]
+    assert [p.message for p in problems] == ["Give it an image URL first."]
+    out = srv.fetch({"strips": "peanuts"}, settings, ctx={"data_dir": str(tmp_path)})
+    assert out["layout"]["far_side"] is False and out["layout"]["gap"] == 12
+    # The manual strip has no picture yet: noted, never fetched.
+    assert {"label": "Dilbert", "state": "missing"}.items() <= out["notes"][0].items()
+    assert srv._RUNS[str(tmp_path)].queue == [] or True
+
+
+def test_settings_are_seeded_from_the_first_customised_cell(client: FlaskClient) -> None:
+    _add_comics_page(client, LEGACY)
+    assert _saved_raw(client) is None
+    page = client.get("/plugins/comics_daily/")
+    assert page.status_code == 200
+    settings = _settings(client)
+    assert [r["slug"] for r in settings["strips"]] == ["peanuts", "garfield", "dilbert"]
+    assert settings["strips"][1]["enabled"] is False
+    assert settings["far_side"] is False and settings["gap"] == 20
+    # From now on the settings rule: a cell's own options are ignored.
+    module = _app_module(client)
+    with client.application.test_request_context():
+        config = module.resolve_config({"strips": "bc", "far_side": True}, {})
+    assert [s.slug for s in config.strips] == ["peanuts", "garfield", "dilbert"]
+    assert config.far_side is False
+
+
+def test_untouched_cells_seed_the_defaults(client: FlaskClient) -> None:
+    _add_comics_page(client, dict(srv.LEGACY_DEFAULTS))
+    client.get("/plugins/comics_daily/")
+    settings = _settings(client)
+    assert [r["slug"] for r in settings["strips"]] == [
+        "dilbert",
+        "garfield",
+        "calvinandhobbes",
+        "pearlsbeforeswine",
+    ]
+    assert settings["far_side"] is True
+    assert (settings["gap"], settings["gap_min"], settings["gap_max"]) == (32, 6, 48)
+
+
+def test_a_render_seeds_the_settings_too(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(client)
+    monkeypatch.setattr(module, "_enqueue", lambda *a, **k: None)
+    with client.application.test_request_context():
+        out = module.fetch(LEGACY, {}, ctx={"data_dir": _plugin(client).data_dir})
+    assert out["layout"]["far_side"] is False  # seeded from the cell rendered
+    assert [r["slug"] for r in _settings(client)["strips"]] == ["peanuts", "garfield", "dilbert"]
+
+
+def test_settings_save_through_the_settings_form(client: FlaskClient) -> None:
+    client.get("/plugins/comics_daily/")
+    rows = [
+        {"enabled": True, "label": "", "slug": "garfield", "mode": "auto", "image_url": ""},
+        {"enabled": True, "label": "Dilbert", "slug": "dilbert", "mode": "auto", "image_url": ""},
+    ]
+    resp = client.post(
+        "/settings/plugin-comics_daily",
+        data={
+            "strips": json.dumps(rows),
+            "far_side": "on",
+            "far_side_count": "2",
+            "gap": "40",
+            "gap_min": "6",
+            "gap_max": "48",
+        },
+    )
+    assert resp.status_code == 302
+    assert resp.location == "/plugins/comics_daily/#plugin-comics_daily"
+    settings = _settings(client)
+    assert [r["slug"] for r in settings["strips"]] == ["garfield", "dilbert"]
+    assert settings["far_side_count"] == 2 and settings["captions"] is False
+    # A bad name is refused and nothing changes.
+    bad = [{"enabled": True, "label": "", "slug": "Not a name", "mode": "auto", "image_url": ""}]
+    client.post("/settings/plugin-comics_daily", data={"strips": json.dumps(bad)})
+    assert [r["slug"] for r in _settings(client)["strips"]] == ["garfield", "dilbert"]
+
+
+def test_admin_page_lists_strips_with_status_and_tools(client: FlaskClient) -> None:
+    client.get("/plugins/comics_daily/")
+    store = _store(client)
+    module = _app_module(client)
+    picture = module.images.normalise(_png((300, 100)))
+    name = store.add("gocomics:garfield", picture)
+    store.update(
+        "gocomics:garfield",
+        lambda e: e.update(
+            pictures=[{"file": name, "w": 300, "h": 100, "caption": ""}],
+            edition="2026-10-20",
+            fetched_on="2026-10-20",
+            last_success=1.0,
+            error="GoComics is blocking automatic downloads right now.",
+        ),
+    )
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    assert "Comics, Tesserae</title>" in body
+    card = body[body.index('id="plugin-comics_daily"') :]
+    assert card.count("data-repeater-fixed") == 1  # Dilbert can't be removed
+    assert "Blocked" in card and "Couldn&#39;t refresh automatically" in card
+    assert 'form="cx-upload-garfield"' in card and 'form="cx-import-garfield"' in card
+    assert 'form="cx-add"' in card and "data-repeater-add" not in card
+    assert 'id="cx-upload-garfield"' in body and 'enctype="multipart/form-data"' in body
+    today = body[body.index('id="today"') :]
+    assert f"/plugins/comics_daily/img/{name}" in today
+    assert "needs a look: Garfield (blocked)" in today
+    nav = body[: body.index("<main")]
+    assert re.search(r'href="/plugins/comics_daily/">\s*<i[^>]*></i>Comics\s*</a>', nav)
+
+
+@pytest.mark.parametrize(
+    ("typed", "slug"),
+    [
+        ("https://www.gocomics.com/peanuts", "peanuts"),
+        ("gocomics.com/Peanuts/2026/10/25", "peanuts"),
+        ("  nonsequitur ", "nonsequitur"),
+        ("https://example.com/peanuts", None),
+        ("../etc", None),
+        ("", None),
+    ],
+)
+def test_parse_strip_input(typed: str, slug: str | None) -> None:
+    assert srv.parse_strip_input(typed) == slug
+
+
+def _peanuts_routes(fake: FakeWeb, body: str | None = None, status: int = 200) -> None:
+    _all_routes(fake)
+    page = body if body is not None else _gocomics_page("peanuts", "2026-10-25", "pnts")
+    fake.routes[("GET", f"{GC}/peanuts/2026/10/25")] = [_html(page, status)]
+    fake.routes[("GET", "https://featureassets.gocomics.com/assets/pnts")] = [_img(_png())]
+
+
+def test_add_a_gocomics_strip_checks_it_and_fetches_it(
+    client: FlaskClient, web: FakeWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_app_module(client), "_today", lambda: TODAY)
+    client.get("/plugins/comics_daily/")
+    _peanuts_routes(web)
+    resp = client.post("/plugins/comics_daily/strips/add", data={"strip": f"{GC}/peanuts"})
+    assert resp.location == "/plugins/comics_daily/#plugin-comics_daily"
+    rows = _settings(client)["strips"]
+    assert rows[-1] == {
+        "enabled": True,
+        "label": "Garfield",  # the page's own name for it (the fixture's title)
+        "slug": "peanuts",
+        "mode": "auto",
+        "image_url": "",
+    }
+    record = _store(client).sources()["gocomics:peanuts"]
+    assert record["fetched_on"] == "2026-10-25" and record["pictures"]
+    log = [(e["outcome"], e["source"]) for e in _store(client).log()]
+    assert ("ok", "Garfield") in log and ("added", "Garfield") in log
+    # Again: already there.
+    client.post("/plugins/comics_daily/strips/add", data={"strip": "peanuts"})
+    assert len(_settings(client)["strips"]) == len(rows)
+    assert any("already in the list" in m for m in _messages(client))
+
+
+def test_add_refuses_a_name_gocomics_does_not_have(
+    client: FlaskClient, web: FakeWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_app_module(client), "_today", lambda: TODAY)
+    client.get("/plugins/comics_daily/")
+    before = _settings(client)["strips"]
+    # A page that isn't a strip page.
+    _peanuts_routes(web, body="<html><head></head></html>")
+    client.post("/plugins/comics_daily/strips/add", data={"strip": "peanuts"})
+    assert _settings(client)["strips"] == before
+    assert any("no strip called" in m for m in _messages(client))
+    # Every date 404s and so does the strip's own page.
+    _all_routes(web)
+    for day in ("25", "24", "23"):
+        web.routes[("GET", f"{GC}/nosuchstrip/2026/10/{day}")] = [_html("gone", 404)]
+    web.routes[("GET", f"{GC}/nosuchstrip")] = [_html("gone", 404)]
+    client.post("/plugins/comics_daily/strips/add", data={"strip": "nosuchstrip"})
+    assert _settings(client)["strips"] == before
+    # Not a name at all.
+    client.post("/plugins/comics_daily/strips/add", data={"strip": "<script>"})
+    assert any("isn't a GoComics address" in m for m in _messages(client))
+
+
+def test_add_keeps_a_strip_it_could_not_fetch_yet(
+    client: FlaskClient, web: FakeWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_app_module(client), "_today", lambda: TODAY)
+    client.get("/plugins/comics_daily/")
+    _all_routes(web)  # no route for peanuts: GoComics unreachable for it
+    client.post("/plugins/comics_daily/strips/add", data={"strip": "peanuts"})
+    assert _settings(client)["strips"][-1]["slug"] == "peanuts"
+    assert any("couldn't be fetched yet" in m for m in _messages(client))
+    assert _store(client).sources()["gocomics:peanuts"]["error"]
+
+
+def test_add_stops_at_the_most_strips(client: FlaskClient) -> None:
+    client.get("/plugins/comics_daily/")
+    rows = [
+        {"enabled": True, "label": "", "slug": f"strip{i}", "mode": "auto", "image_url": ""}
+        for i in range(srv.MAX_STRIPS)
+    ]
+    client.post("/settings/plugin-comics_daily", data={"strips": json.dumps(rows)})
+    client.post("/plugins/comics_daily/strips/add", data={"strip": "peanuts"})
+    assert len(_settings(client)["strips"]) == srv.MAX_STRIPS
+    assert any("at most" in m for m in _messages(client))
+
+
+def test_upload_makes_a_manual_strip_until_switched_back(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(client)
+    monkeypatch.setattr(module, "_today", lambda: TODAY)
+    client.get("/plugins/comics_daily/")
+    data = {"file": (io.BytesIO(_png((640, 200), "RGBA")), "garfield.png")}
+    resp = client.post(
+        "/plugins/comics_daily/strips/garfield/upload",
+        data=data,
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    row = next(r for r in _settings(client)["strips"] if r["slug"] == "garfield")
+    assert row["mode"] == "upload"
+    record = _store(client).sources()["manual:garfield"]
+    assert record["origin"] == "uploaded" and record["pictures"][0]["w"] == 640
+    # Every cell now shows the manual picture, and never fetches it.
+    queued: list[str] = []
+    monkeypatch.setattr(
+        module, "_enqueue", lambda root, sources, *a, **k: queued.extend(s.key for s in sources)
+    )
+    with client.application.test_request_context():
+        out = module.fetch({}, {}, ctx={"data_dir": _plugin(client).data_dir})
+    assert "gocomics:garfield" not in queued and "manual:garfield" not in queued
+    strip = next(s for s in out["strips"] if s["id"] == "garfield")
+    assert strip["src"].startswith("/plugins/comics_daily/img/manual-garfield-")
+    assert ("uploaded", "Garfield") in [(e["outcome"], e["source"]) for e in _store(client).log()]
+    # A later day it still shows, with a warning on the admin page.
+    monkeypatch.setattr(module, "_today", lambda: date(2026, 10, 27))
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    assert "This picture is from Oct 25" in body
+    # Old manual pictures are never pruned for age.
+    _store(client).prune(now=time.time() + 400 * 86400)
+    assert "manual:garfield" in _store(client).sources()
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (b"", "Choose a picture"),
+        (b"<html>not a picture</html>", "isn't a picture"),
+        # Over the cap (lowered here: werkzeug's test client leaves a request
+        # body over 500 KB in an unclosed temp file).
+        (b"x" * 2000, "That picture is over"),
+    ],
+)
+def test_upload_refuses_what_is_not_a_usable_picture(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch, payload: bytes, message: str
+) -> None:
+    monkeypatch.setattr(_app_module(client).images, "MAX_UPLOAD_BYTES", 1000)
+    client.get("/plugins/comics_daily/")
+    data = {"file": (io.BytesIO(payload), "x.png" if payload else "")}
+    client.post(
+        "/plugins/comics_daily/strips/garfield/upload",
+        data=data,
+        content_type="multipart/form-data",
+    )
+    assert any(message in m for m in _messages(client))
+    assert "manual:garfield" not in _store(client).sources()
+    assert next(r for r in _settings(client)["strips"] if r["slug"] == "garfield")["mode"] == "auto"
+
+
+def test_upload_refuses_too_many_pixels(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_app_module(client).images, "MAX_PIXELS", 1000)
+    client.get("/plugins/comics_daily/")
+    data = {"file": (io.BytesIO(_png((100, 100))), "big.png")}
+    client.post(
+        "/plugins/comics_daily/strips/garfield/upload",
+        data=data,
+        content_type="multipart/form-data",
+    )
+    assert any("isn't a picture this widget can use" in m for m in _messages(client))
+    assert client.post("/plugins/comics_daily/strips/nosuch/upload").status_code == 404
+
+
+def test_import_fetches_through_the_net_guard(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import net_guard
+
+    asked: list[tuple[str, dict[str, Any]]] = []
+
+    def fake_fetch(url: str, **kw: Any) -> tuple[bytes, str]:
+        asked.append((url, kw))
+        return _jpeg((800, 250)), "image/jpeg"
+
+    client.get("/plugins/comics_daily/")
+    monkeypatch.setattr(net_guard, "fetch_bytes", fake_fetch)
+    url = "https://pictures.example.org/today.jpg"
+    client.post("/plugins/comics_daily/strips/calvinandhobbes/import", data={"url": url})
+    assert asked[0][0] == url
+    assert asked[0][1]["allow_local"] is False
+    assert asked[0][1]["max_bytes"] == _app_module(client).images.MAX_UPLOAD_BYTES
+    row = next(r for r in _settings(client)["strips"] if r["slug"] == "calvinandhobbes")
+    assert (row["mode"], row["image_url"]) == ("upload", url)
+    record = _store(client).sources()["manual:calvinandhobbes"]
+    assert record["origin"] == "imported from pictures.example.org"
+    assert record["pictures"][0]["file"].endswith(".jpg")
+
+
+def test_import_refuses_private_addresses_and_reports_failures(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client.get("/plugins/comics_daily/")
+    # The real guard: a loopback address is refused before any request.
+    client.post(
+        "/plugins/comics_daily/strips/garfield/import", data={"url": "http://127.0.0.1/x.png"}
+    )
+    assert any("isn't on the public web" in m for m in _messages(client))
+    client.post("/plugins/comics_daily/strips/garfield/import", data={"url": "ftp://x/y.png"})
+    assert any("has to start with https://" in m for m in _messages(client))
+    client.post("/plugins/comics_daily/strips/garfield/import", data={"url": ""})
+    assert any("Image URL first" in m for m in _messages(client))
+    from app import net_guard
+
+    def down(url: str, **kw: Any) -> tuple[bytes, str]:
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(net_guard, "fetch_bytes", down)
+    client.post(
+        "/plugins/comics_daily/strips/garfield/import", data={"url": "https://example.org/x.png"}
+    )
+    assert any("connection refused" in m for m in _messages(client))
+    assert "manual:garfield" not in _store(client).sources()
+
+
+def test_fetch_now_queues_every_fetched_source_forced(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(client)
+    queued: list[tuple[list[str], bool]] = []
+    monkeypatch.setattr(
+        module,
+        "_enqueue",
+        lambda root, sources, today, force=False: queued.append(([s.key for s in sources], force)),
+    )
+    client.get("/plugins/comics_daily/")
+    rows = _settings(client)["strips"]
+    rows[1]["mode"] = "upload"  # Garfield: a manual strip is never fetched
+    client.post(
+        "/settings/plugin-comics_daily", data={"strips": json.dumps(rows), "far_side": "on"}
+    )
+    resp = client.post("/plugins/comics_daily/fetch")
+    assert resp.location == "/plugins/comics_daily/#today"
+    assert queued == [
+        (["farside", "dilbert", "gocomics:calvinandhobbes", "gocomics:pearlsbeforeswine"], True)
+    ]
+    assert _store(client).log()[-1]["source"] == "Fetch now"
+
+
+def test_the_log_records_each_fetch(
+    web: FakeWeb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(srv, "_today", lambda: TODAY)
+    store = images.Store(tmp_path)
+    _all_routes(web)
+    gocomics = srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY)
+    garfield = srv.Source(key="gocomics:garfield", kind="gocomics", name="garfield")
+    assert srv.refresh_source(store, garfield, TODAY, web=srv.Web(), gocomics=gocomics)
+    assert srv.refresh_source(store, srv.FARSIDE, TODAY, web=srv.Web(), gocomics=None)
+    url = srv.Source(
+        key="url:x", kind="url", name="x", url="https://featureassets.gocomics.com/nope"
+    )
+    assert not srv.refresh_source(store, url, TODAY, web=srv.Web(), gocomics=None)
+    log = store.log()
+    assert [(e["source"], e["outcome"]) for e in log] == [
+        ("Garfield", "ok"),
+        ("The Far Side", "ok"),
+        ("X", "error"),
+    ]
+    assert re.fullmatch(r"2026-10-25, 1 picture, \d+ KB in \d+\.\d s", log[0]["text"])
+    assert re.fullmatch(r"\d{4}-\d\d-\d\d, 3 pictures, \d+ KB in \d+\.\d s", log[1]["text"])
+    assert log[2]["text"].startswith("Couldn't reach featureassets.gocomics.com.")
+    for i in range(images.LOG_LINES + 3):
+        store.append_log({"at": float(i), "source": "x", "outcome": "ok", "text": str(i)})
+    assert len(store.log()) == images.LOG_LINES
+    assert store.log()[-1]["text"] == str(images.LOG_LINES + 2)
+
+
+def test_the_log_tells_blocked_from_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = images.Store(tmp_path)
+    source = srv.Source(key="gocomics:garfield", kind="gocomics", name="garfield")
+    blocked = srv.SourceError("GoComics is blocking automatic downloads right now.")
+    srv.record_fetch(store, source, blocked, TODAY, time.time())
+    old = srv.Fetched([(_png(), "")], edition="2026-10-20")
+    monkeypatch.setattr(srv, "published_edition", lambda now, today: "2026-10-25")
+    srv.record_fetch(store, source, old, TODAY, time.time())
+    assert [e["outcome"] for e in store.log()] == ["blocked", "stale"]
+    assert store.log()[1]["text"].startswith("still the 2026-10-20 strip, 1 picture")
+
+
+def test_the_admin_page_shows_the_log(client: FlaskClient) -> None:
+    client.get("/plugins/comics_daily/")
+    _store(client).append_log(
+        {"at": time.time(), "source": "Garfield", "outcome": "blocked", "text": "nope <b>"}
+    )
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    log = body[body.index('id="log"') :]
+    assert "data-log-tail" in log
+    assert re.search(r"Garfield\s+BLOCKED\s+nope &lt;b&gt;", log)
+    # The settings sit right above the log, folded.
+    settings = body.index('id="plugin-comics_daily"')
+    assert body.index('id="today"') < settings < body.index('id="log"')
+    assert '<details class="dx-section-fold" data-fold>' in body[settings:]

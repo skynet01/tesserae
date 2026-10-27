@@ -1,64 +1,163 @@
 {
   "tesserae_compat": "1.x",
   "name": "Comics, Daily",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "kind": "widget",
-  "locales": ["en"],
-  "description": "Today's comics on one page: The Far Side's daily panels in a row with their captions, then GoComics strips (Garfield, Calvin and Hobbes, Pearls Before Swine, or any other) and an archived Dilbert, full width and in your order. As many rows as fit without cutting one off. Fetched in the background once a day; when a site blocks a download the last good strip stays up and a small note says so.",
+  "locales": [
+    "en"
+  ],
+  "description": "Today's comics on one page: The Far Side's daily panels in a row with their captions, then GoComics strips (Garfield, Calvin and Hobbes, Pearls Before Swine, or any other) and an archived Dilbert, full width and in your order. As many rows as fit without cutting one off. Pick the comics under Widgets → Admin pages → Comics, which every cell shows. Fetched in the background once a day (or with Fetch now); when a site blocks a download the last good strip stays up, a small note says so, and you can upload or import that day's strip.",
   "icon": "ph-smiley",
   "category": "reading",
   "supports": {
-    "sizes": ["sm", "md", "lg"]
+    "sizes": [
+      "sm",
+      "md",
+      "lg"
+    ]
   },
-  "cell_options": [
+  "settings": [
+    {
+      "name": "strips",
+      "type": "repeater",
+      "label": "Strips",
+      "group": "Strips",
+      "help": "In your order, top to bottom, under the Far Side. Switch a strip off to keep it in the list without showing it.",
+      "row_label": "Strip",
+      "add_label": "Add strip",
+      "max_rows": 8,
+      "list": {
+        "title": [
+          "label",
+          "slug"
+        ],
+        "summary": "slug",
+        "fixed": {
+          "slug": [
+            "dilbert"
+          ]
+        },
+        "add": false
+      },
+      "fields": [
+        {
+          "name": "enabled",
+          "type": "boolean",
+          "label": "Enabled",
+          "default": true
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "label": "Label",
+          "max_length": 60,
+          "placeholder": "The strip's own name",
+          "help": "The name the page's notes use. Leave it blank for the strip's own name."
+        },
+        {
+          "name": "slug",
+          "type": "string",
+          "label": "Strip",
+          "required": true,
+          "unique": true,
+          "max_length": 64,
+          "pattern": "[a-z0-9][a-z0-9\\-]*",
+          "pattern_hint": "a GoComics name like garfield (lower-case letters, digits and -), or dilbert",
+          "help": "The GoComics name, as in gocomics.com/<name>, or dilbert for the Dilbert archive."
+        },
+        {
+          "name": "mode",
+          "type": "select",
+          "label": "Source",
+          "default": "auto",
+          "choices": [
+            {
+              "value": "auto",
+              "label": "Automatic"
+            },
+            {
+              "value": "upload",
+              "label": "Manual upload"
+            },
+            {
+              "value": "url",
+              "label": "Direct image URL"
+            }
+          ],
+          "help": "Automatic downloads the strip each day. Manual upload shows the picture you uploaded or imported until you switch back to Automatic. Direct image URL downloads the Image URL each day instead (comic sites only: GoComics, amuniversal.com, The Far Side)."
+        },
+        {
+          "name": "image_url",
+          "type": "string",
+          "label": "Image URL",
+          "max_length": 2000,
+          "placeholder": "https://…",
+          "help": "For Direct image URL, or for Import URL: any picture address on the web, downloaded once now and kept as a manual upload."
+        }
+      ],
+      "default": [
+        {
+          "enabled": true,
+          "label": "Dilbert",
+          "slug": "dilbert",
+          "mode": "auto",
+          "image_url": ""
+        },
+        {
+          "enabled": true,
+          "label": "Garfield",
+          "slug": "garfield",
+          "mode": "auto",
+          "image_url": ""
+        },
+        {
+          "enabled": true,
+          "label": "Calvin and Hobbes",
+          "slug": "calvinandhobbes",
+          "mode": "auto",
+          "image_url": ""
+        },
+        {
+          "enabled": true,
+          "label": "Pearls Before Swine",
+          "slug": "pearlsbeforeswine",
+          "mode": "auto",
+          "image_url": ""
+        }
+      ]
+    },
     {
       "name": "far_side",
-      "type": "boolean",
-      "label": "Far Side",
+      "type": "switch",
+      "label": "The Far Side",
+      "group": "The Far Side",
       "default": true,
       "help": "Today's Far Side panels in a row above the strips."
     },
     {
       "name": "far_side_count",
       "type": "number",
-      "label": "How many",
+      "label": "Panels",
       "default": 4,
-      "show_if": { "far_side": true },
-      "help": "Far Side panels in the row, 1 to 4. A narrow cell shows fewer."
+      "min": 1,
+      "max": 4,
+      "help": "How many Far Side panels in the row, 1 to 4. A narrow cell shows fewer."
     },
     {
       "name": "captions",
-      "type": "boolean",
+      "type": "switch",
       "label": "Captions",
       "default": true,
-      "show_if": { "far_side": true },
       "help": "The caption under each Far Side panel."
-    },
-    {
-      "name": "strips",
-      "type": "textarea",
-      "label": "Strips",
-      "default": "garfield\ncalvinandhobbes\npearlsbeforeswine\ndilbert",
-      "help": "One per line, top to bottom: a GoComics name as in gocomics.com/<name>, or dilbert for an archived Dilbert. Start a line with # to leave a strip out. To use a picture of your own instead of the download (when a site is blocking it), put its image address after the name on the same line.",
-      "presets": [
-        { "label": "Garfield, Calvin and Hobbes, Pearls Before Swine, Dilbert", "value": "garfield\ncalvinandhobbes\npearlsbeforeswine\ndilbert" },
-        { "label": "GoComics classics", "value": "peanuts\ncalvinandhobbes\nbc\nnonsequitur" }
-      ]
-    },
-    {
-      "name": "status_note",
-      "type": "boolean",
-      "label": "Status note",
-      "default": true,
-      "advanced": true,
-      "help": "A small line at the foot of the page naming any comic that could not be updated today."
     },
     {
       "name": "gap",
       "type": "number",
-      "label": "Gap",
+      "label": "Gap between rows",
+      "group": "Layout",
       "default": 32,
-      "advanced": true,
+      "min": 0,
+      "max": 200,
       "help": "Space between rows in pixels on a 1440 px wide panel; narrower cells scale it down. Spare height widens it up to the largest gap."
     },
     {
@@ -66,7 +165,8 @@
       "type": "number",
       "label": "Smallest gap",
       "default": 6,
-      "advanced": true,
+      "min": 0,
+      "max": 200,
       "help": "How far the gap may shrink to fit one more strip before the last strip is left out."
     },
     {
@@ -74,7 +174,15 @@
       "type": "number",
       "label": "Largest gap",
       "default": 48,
-      "advanced": true
+      "min": 0,
+      "max": 400
+    },
+    {
+      "name": "status_note",
+      "type": "switch",
+      "label": "Status note",
+      "default": true,
+      "help": "A small line at the foot of the page naming any comic that couldn't be updated today."
     }
   ],
   "render": {
@@ -84,7 +192,12 @@
     "warm_ahead_s": 120
   },
   "updates": {
-    "on_schedule": [{ "kind": "daily", "suggested_at": "06:15" }]
+    "on_schedule": [
+      {
+        "kind": "daily",
+        "suggested_at": "06:15"
+      }
+    ]
   },
   "requires": [
     "network:www.gocomics.com",
@@ -94,5 +207,6 @@
     "network:www.thefarside.com",
     "network:dilbert-viewer.herokuapp.com",
     "network:web.archive.org"
-  ]
+  ],
+  "admin_title": "Comics"
 }
