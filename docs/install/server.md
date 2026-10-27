@@ -59,6 +59,9 @@ request origin, resolved through proxy middleware, and the configured Public
 URL origin are both accepted, so direct LAN forms keep working with a Public
 URL configured. Proxies must preserve the browser's provenance headers and
 supply the correct forwarded scheme, host and port.
+Forwarded client, host, scheme, port and prefix headers, including HA's ingress
+header, are accepted only from loopback or LAN peers, using the existing proxy
+peer policy. `TESSERAE_FORWARDED_HOPS` still controls how many proxy hops are read.
 
 For compatibility, requests with all three provenance headers missing are
 allowed. Their provenance cannot be checked; when a session cookie is present,

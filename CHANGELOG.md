@@ -18,6 +18,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   that check without a session cookie.
 - Configuring a Public URL preserves same-origin admin form posts through the
   direct LAN address as well as the public address.
+- Untrusted public peers cannot spoof forwarded origins, prefixes or Home
+  Assistant ingress metadata; the existing loopback/LAN proxy policy applies
+  before origin validation and external link generation.
 
 ## [0.480.1], 2026-10-26
 

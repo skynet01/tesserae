@@ -22,7 +22,8 @@ from app.main import REPO_ROOT, create_app
 
 
 @pytest.fixture
-def app(tmp_path: Path) -> Flask:
+def app(tmp_path: Path, monkeypatch) -> Flask:
+    monkeypatch.setenv("TESSERAE_SECRET_KEY", "00" * 32)
     a = create_app(
         testing=False,
         data_root=tmp_path,
@@ -85,6 +86,42 @@ def test_no_forwarded_headers_falls_back_to_request_host(app: Flask) -> None:
     )
     url = resp.get_json()["url"]
     assert url.startswith("http://tesserae.local:8765"), url
+
+
+@pytest.mark.parametrize("peer", ["203.0.113.9", "2001:db8::9"])
+def test_untrusted_peer_cannot_rewrite_external_urls(app: Flask, peer: str) -> None:
+    response = app.test_client().get(
+        "/healthz/external_url",
+        environ_overrides={"REMOTE_ADDR": peer},
+        headers={
+            "X-Forwarded-Host": "attacker.test",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Port": "8443",
+            "X-Forwarded-Prefix": "/forged",
+            "X-Ingress-Path": "/forged-ingress",
+        },
+    )
+    assert response.get_json()["url"] == "http://localhost/healthz"
+
+
+def test_trusted_proxy_preserves_the_configured_hop_count(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TESSERAE_FORWARDED_HOPS", "2")
+    app = create_app(testing=True, data_root=tmp_path)
+
+    @app.get("/external")
+    def external():
+        return jsonify(url=url_for("healthz", _external=True))
+
+    response = app.test_client().get(
+        "/external",
+        environ_overrides={"REMOTE_ADDR": "192.168.1.2"},
+        headers={
+            "X-Forwarded-Host": "paper.test, inner-proxy",
+            "X-Forwarded-Proto": "https, http",
+            "X-Forwarded-Port": "8443, 8765",
+        },
+    )
+    assert response.get_json()["url"] == "https://paper.test:8443/healthz"
 
 
 # -- v0.49.4: operator-supplied Public URL override --------------------

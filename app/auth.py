@@ -421,10 +421,9 @@ def _is_loopback() -> bool:
 
 
 def peer_may_forward(addr: str | None) -> bool:
-    """Whether a direct peer at ``addr`` is allowed to tell us who the real
-    client is via ``X-Forwarded-For``: only a proxy on this machine or the
-    local network. A peer on a public address could otherwise claim to be a
-    LAN client and walk past the network checks below."""
+    """Whether a direct peer may supply proxy metadata: only a proxy on
+    this machine or the local network. Public peers must not forge either
+    the client address or the request origin and ingress identity."""
     ip = _canonical_ip(addr)
     return ip is not None and any(ip in net for net in _PRIVATE_NETWORKS)
 

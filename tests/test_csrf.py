@@ -190,8 +190,9 @@ def test_logged_in_cross_port_form_cannot_disable_password(app, headers) -> None
 
 @pytest.mark.parametrize("source_header", ["Origin", "Referer"])
 def test_ingress_forwarded_origin_is_accepted_but_another_port_is_rejected(
-    app, source_header
+    gated_app, source_header
 ) -> None:
+    app = gated_app
     app.config["HA_INGRESS_MODE"] = True
     client = app.test_client()
     client.set_cookie("session", "test")
@@ -260,6 +261,36 @@ def test_public_url_does_not_allow_another_lan_port(gated_app) -> None:
     )
     assert response.status_code == 403
     assert not auth.password_required(store)
+
+
+@pytest.mark.parametrize("peer", ["203.0.113.9", "2001:db8::9"])
+@pytest.mark.parametrize("source_header", ["Origin", "Referer"])
+def test_untrusted_peer_cannot_spoof_the_setup_origin(gated_app, peer, source_header) -> None:
+    response = gated_app.test_client().post(
+        "/setup",
+        environ_overrides={"REMOTE_ADDR": peer},
+        headers={
+            "X-Forwarded-Host": "attacker.test",
+            "X-Forwarded-Proto": "https",
+            "X-Forwarded-Port": "8443",
+            source_header: "https://attacker.test:8443",
+        },
+        data={"password": "test-password", "password_confirm": "test-password"},
+    )
+    assert response.status_code == 403
+    assert not auth.password_is_set(gated_app.config["SETTINGS_STORE"])
+
+
+def test_untrusted_ingress_header_does_not_bypass_auth(gated_app) -> None:
+    gated_app.config["HA_INGRESS_MODE"] = True
+    auth.set_password(gated_app.config["SETTINGS_STORE"], "test-password")
+    response = gated_app.test_client().get(
+        "/settings/system",
+        environ_overrides={"REMOTE_ADDR": "203.0.113.9"},
+        headers={"X-Ingress-Path": "/api/hassio_ingress/forged"},
+    )
+    assert response.status_code == 302
+    assert "/login" in response.location
 
 
 def test_rejections_are_logged_once_per_route_without_request_secrets(app, caplog) -> None:

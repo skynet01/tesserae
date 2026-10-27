@@ -408,25 +408,33 @@ def create_app(
             x_prefix=_forwarded_hops,
         )
 
-        class _UntrustedForwardedForMiddleware:
-            """Drop ``X-Forwarded-For`` unless the connection comes from a
-            proxy on this machine or the local network, before ProxyFix
-            reads it. Otherwise any client could set the header and be
-            taken for a LAN or loopback address by the auth gate. Scheme,
-            host and prefix headers are left alone: they shape links, not
-            who the caller is."""
+    class _TrustedProxyMiddleware:
+        """Accept proxy metadata only from the existing loopback/LAN peers.
 
-            def __init__(self, inner: Any) -> None:
-                self._inner = inner
+        Run before ProxyFix, the Public URL origin capture and HA ingress.
+        Host/proto now participate in provenance checks, so they need the
+        same peer trust boundary as the forwarded client address.
+        """
 
-            def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
-                from app.auth import peer_may_forward
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
 
-                if not peer_may_forward(environ.get("REMOTE_ADDR")):
-                    environ.pop("HTTP_X_FORWARDED_FOR", None)
-                return self._inner(environ, start_response)
+        def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
+            from app.auth import peer_may_forward
 
-        app.wsgi_app = _UntrustedForwardedForMiddleware(app.wsgi_app)  # type: ignore[method-assign]
+            if not peer_may_forward(environ.get("REMOTE_ADDR")):
+                for header in (
+                    "HTTP_X_FORWARDED_FOR",
+                    "HTTP_X_FORWARDED_HOST",
+                    "HTTP_X_FORWARDED_PROTO",
+                    "HTTP_X_FORWARDED_PORT",
+                    "HTTP_X_FORWARDED_PREFIX",
+                    "HTTP_X_INGRESS_PATH",
+                ):
+                    environ.pop(header, None)
+            return self._inner(environ, start_response)
+
+    app.wsgi_app = _TrustedProxyMiddleware(app.wsgi_app)  # type: ignore[method-assign]
 
     # Resolve the running package version. Prefer pyproject.toml on disk
     # (so a source checkout reflects post-pip-install bumps) and fall
