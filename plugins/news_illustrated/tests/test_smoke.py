@@ -7,6 +7,7 @@ touches the network."""
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from types import ModuleType
@@ -116,8 +117,10 @@ def test_a_preview_never_starts_a_run(
     assert out == {
         "run_at": "06:05",
         "running": False,
+        "look": mod.LOOK_DEFAULTS | {p: True for p in mod.LOOK_PARTS},
         "notice": "No image provider has a key yet, so stories are text only.",
     }
+    assert not (data_dir / "frames.json").exists(), "a preview is not a frame"
 
 
 def test_pushes_rotate_through_the_stories(
@@ -192,7 +195,121 @@ def test_widget_page_and_generate_now(
     assert page.status_code == 200
     html = page.get_data(as_text=True)
     assert "Meta ignores court order" in html and "Generate now" in html
-    assert "no provider has a key" in html
+    assert "no provider is on with a key" in html
     resp = client.post(f"/plugins/{PLUGIN}/run")
     assert resp.status_code == 302
     assert len(starts) == 1 and starts[0]["reason"] == "manual" and starts[0]["force"] is True
+
+
+def test_a_frame_render_notes_its_size_and_gets_the_look(
+    app: Flask, mod: ModuleType, data_dir: Path, starts: list[Any]
+) -> None:
+    stories = _seed(mod, data_dir)
+    stories[0]["size"] = [768, 1376]
+    mod.store.save_stories(data_dir, stories)
+    settings = {
+        "kie_api_key": "k",
+        "caption_bg": "#1A2B3C",
+        "caption_fg": "nonsense",
+        "show_date": False,
+        "show_headline": False,
+    }
+    ctx = {**_ctx(data_dir, preview=False, settled=True), "cell_w": 1440, "cell_h": 2560}
+    with app.app_context():
+        out = mod.fetch({}, settings, ctx={**ctx, "placement_id": "page1:cell2"})
+    assert mod.store.frame_sizes(data_dir, time.time()) == [(1440, 2560)]
+    assert json.loads((data_dir / "frames.json").read_text())["page1:cell2"]["w"] == 1440
+    assert out["look"] == {
+        "bg": "#1a2b3c",
+        "fg": "#ffffff",
+        "tag": True,
+        "date": False,
+        "count": True,
+        "title": False,
+        "summary": True,
+    }
+    assert (out["image_w"], out["image_h"]) == (768, 1376)
+
+
+def test_admin_page_draws_the_redesigned_settings(
+    app: Flask, client: FlaskClient, mod: ModuleType, data_dir: Path
+) -> None:
+    stories = _seed(mod, data_dir)
+    stories[0]["usage"] = {"summary": {"provider": "groq", "tokens": 1312}}
+    mod.store.save_stories(data_dir, stories)
+    mod.store.save_state(
+        data_dir,
+        {
+            "last_run": {
+                "reason": "schedule",
+                "started": 1,
+                "finished": 2,
+                "outcome": "2 new",
+                "usage": {"tokens": {"groq": 2624}, "pictures": {"kie": 1}},
+                "log": ["Run started"],
+            }
+        },
+    )
+    plugin = app.config["PLUGIN_REGISTRY"].get(PLUGIN)
+    app.config["SETTINGS_STORE"].update_for_namespace(
+        "plugins",
+        PLUGIN,
+        {"sources": "Tech | https://a.example/rss\nBroken | feed.example/rss", "kie_api_key": "k"},
+        plugin.manifest["settings"],
+    )
+    html = client.get(f"/plugins/{PLUGIN}/").get_data(as_text=True)
+    assert "<h1>" in html and "AI Illustrated News</h1>" in html
+    assert "Time to make today&#39;s stories" in html
+    for needle in (
+        'name="summary_service" value="groq"',
+        'name="provider_order"',
+        'data-ain-prov="kie"',
+        "data-ain-chips",
+        'data-ain-reset="plugin-news_illustrated-image_prompt"',
+        'data-ain-reset="plugin-news_illustrated-summary_prompt"',
+        'name="image_shape"',
+        'name="caption_bg"',
+        'name="show_headline"',
+        "https://console.groq.com/docs/models",
+        "https://kie.ai/market",
+        'id="ain-data"',
+        "Groq 1,312 tokens",
+        "Used: Groq 2,624 tokens; 1 picture from kie.ai.",
+        "Sources line 2 is skipped",
+    ):
+        assert needle in html, needle
+    assert "secret" not in html.split('id="ain-data"')[1].split("</script>")[0]
+    js = client.get(f"/plugins/{PLUGIN}/admin.js")
+    assert js.status_code == 200 and "openLightbox" in js.get_data(as_text=True)
+    js.close()
+
+
+def test_the_new_form_saves_back_compatibly(app: Flask, client: FlaskClient) -> None:
+    from app.state.settings_store import SECRET_MASK
+
+    plugin = app.config["PLUGIN_REGISTRY"].get(PLUGIN)
+    fields = plugin.manifest["settings"]
+    store = app.config["SETTINGS_STORE"]
+    store.update_for_namespace("plugins", PLUGIN, {"kie_api_key": "kie-secret"}, fields)
+    form = {
+        "sources": "Tech | https://a.example/rss",
+        "run_at": "07:15",
+        "summary_words": "60",
+        "summary_service": "off",
+        "provider_order": "none",
+        "kie_api_key": SECRET_MASK,
+        "image_shape": "4:3",
+        "caption_bg": "#ffffff",
+        "caption_fg": "#000000",
+        "show_tag": "on",
+        "show_summary": "on",
+    }
+    assert client.post(f"/settings/plugin-{PLUGIN}", data=form).status_code == 302
+    saved = store.get_for_runtime("plugins", PLUGIN, fields)
+    assert saved["kie_api_key"] == "kie-secret"
+    assert (saved["show_tag"], saved["show_date"], saved["show_headline"]) == (True, False, False)
+    from plugins.news_illustrated import pipeline
+
+    cfg = pipeline.Config.from_settings(saved)
+    assert cfg.paint.order == () and cfg.painters_ready == []
+    assert (cfg.summary_service, cfg.image_shape, cfg.run_at) == ("off", "4:3", "07:15")

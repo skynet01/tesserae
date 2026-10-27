@@ -643,3 +643,194 @@ def test_every_run_is_kept_as_a_line(tmp_path: Path) -> None:
     assert len(runs) == pipeline.RUN_HISTORY
     assert runs[-1] == {"reason": "schedule", "started": 34, "outcome": "", "failed": False}
     assert runs[-2]["failed"] is True and runs[-2]["outcome"] == "Feed failed"
+
+
+# ----------------------------------------------------------------------
+# The redesigned settings, read the old way and the new
+
+
+@pytest.mark.parametrize(
+    ("saved", "order"),
+    [
+        (None, painters.PROVIDERS),  # never saved: all four, the default order
+        ("", painters.PROVIDERS),
+        ("kie, gemini, pollinations, huggingface", painters.PROVIDERS),
+        ("huggingface kie", ("huggingface", "kie")),  # spaces, as typed before
+        ("gemini > kie", ("gemini", "kie")),
+        ("nonsense", painters.PROVIDERS),
+        ("none", ()),  # every box unticked on the page
+        (" NONE ", ()),
+    ],
+)
+def test_provider_order_old_and_new(saved: str | None, order: tuple[str, ...]) -> None:
+    settings = {} if saved is None else {"provider_order": saved}
+    cfg = pipeline.Config.from_settings({**settings, "kie_api_key": "k", "gemini_api_key": "g"})
+    assert cfg.paint.order == order
+    assert cfg.painters_ready == [p for p in order if p in ("kie", "gemini")]
+
+
+def test_new_settings_default_when_absent_or_broken() -> None:
+    old = pipeline.Config.from_settings({"groq_api_key": "gsk"})  # saved before this version
+    assert (old.summary_service, old.image_shape, old.summary_key) == ("groq", "auto", "gsk")
+    odd = pipeline.Config.from_settings(
+        {"groq_api_key": "gsk", "summary_service": "openai", "image_shape": "7:5"}
+    )
+    assert (odd.summary_service, odd.image_shape) == ("groq", "auto")
+    off = pipeline.Config.from_settings({"groq_api_key": "gsk", "summary_service": "off"})
+    assert off.summary_key == "" and off.groq_key == "gsk"
+    assert pipeline.Config.from_settings({"image_shape": "16:9"}).image_shape == "16:9"
+
+
+def test_unusable_source_lines_are_named() -> None:
+    raw = "Tech | https://a.example/rss\nBad | ftp://x\nwww.bbc.co.uk/news\n# note\n\nFine | http://b.example"
+    problems = pipeline.source_problems(raw)
+    assert problems == [
+        "Sources line 2 is skipped: 'ftp://x' is not an http(s) feed address",
+        "Sources line 3 is skipped: 'www.bbc.co.uk/news' is not an http(s) feed address",
+    ]
+    cfg = pipeline.Config.from_settings({"sources": raw})
+    assert [s.label for s in cfg.sources] == ["Tech", "Fine"]
+    assert set(problems) <= set(cfg.problems)
+
+
+def test_the_picture_shape_follows_the_biggest_frame() -> None:
+    assert pipeline.pick_aspect("auto", []) == "9:16"
+    assert pipeline.pick_aspect("auto", [(800, 480), (1440, 2560)]) == "9:16"
+    assert pipeline.pick_aspect("auto", [(800, 480), (1600, 1200)]) == "4:3"
+    assert pipeline.pick_aspect("auto", [(800, 480)]) == "16:9"
+    assert pipeline.pick_aspect("1:1", [(1440, 2560)]) == "1:1"
+
+
+def test_summaries_off_use_the_article_without_groq(fake_net: FakeNet, tmp_path: Path) -> None:
+    _news(fake_net)
+    log: list[str] = []
+    pipeline.run_edition(_cfg(summary_service="off"), tmp_path, log=log.append)
+    assert fake_net.to(summarise.GROQ_URL) == []
+    assert store.load_stories(tmp_path)[0]["summary"].startswith("The minister said")
+    assert any("Summaries are off" in line for line in log)
+
+
+def _groq_with_usage(fake: FakeNet) -> None:
+    fake.routes = [r for r in fake.routes if r[0] != summarise.GROQ_URL]
+    fake.on(
+        summarise.GROQ_URL,
+        ok_json(
+            {
+                "choices": [{"message": {"content": "Summary here."}}],
+                "usage": {"prompt_tokens": 900, "completion_tokens": 100, "total_tokens": 1000},
+            }
+        ),
+    )
+
+
+def test_a_run_counts_what_it_used(fake_net: FakeNet, tmp_path: Path) -> None:
+    _news(fake_net)
+    _groq_with_usage(fake_net)
+    usage = pipeline.Usage()
+    pipeline.run_edition(_cfg(), tmp_path, log=lambda line: None, usage=usage)
+    assert usage.record() == {"tokens": {"groq": 3000}, "pictures": {"huggingface": 3}}
+    assert usage.sentence() == "Groq 3,000 tokens; 3 pictures from HuggingFace"
+    story = store.load_stories(tmp_path)[0]
+    assert story["usage"] == {
+        "summary": {"provider": "groq", "tokens": 1000, "in": 900, "out": 100},
+        "picture": {"provider": "huggingface"},
+    }
+    assert story["size"] == [768, 1376]
+
+
+def test_the_runner_records_usage_and_kie_credits(
+    monkeypatch: pytest.MonkeyPatch, fake_net: FakeNet, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(painters, "KIE_POLL_EVERY_S", 0.001)
+    _news(fake_net)
+    _groq_with_usage(fake_net)
+    fake_net.on(
+        painters.KIE_CREDIT_URL,
+        ok_json({"code": 200, "data": 100.0}),
+        ok_json({"code": 200, "data": 96.0}),
+    )
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    _kie_finishes(fake_net)
+    cfg = _cfg(huggingface_api_key="", kie_api_key="kie", sources=f"Tech | {FEEDS['Tech']}")
+    runner = pipeline.Runner()
+    assert runner.start(cfg, tmp_path, tz=None, reason="manual", force=True)
+    _wait(runner, tmp_path)
+    last = store.load_state(tmp_path)["last_run"]
+    assert last["usage"] == {
+        "tokens": {"groq": 1000},
+        "pictures": {"kie": 1},
+        "kie_balance": 96.0,
+        "kie_used": 4.0,
+    }
+    assert last["log"][-1].endswith(
+        "Used: Groq 1,000 tokens; 1 picture from kie.ai (4 credits, 96 left)"
+    )
+    assert store.load_state(tmp_path)["runs"][-1]["usage"] == last["usage"]
+    assert last["log"][1].endswith("Pictures are drawn 9:16")
+
+
+def test_the_runner_draws_the_frames_shape(
+    monkeypatch: pytest.MonkeyPatch, fake_net: FakeNet, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(painters, "KIE_POLL_EVERY_S", 0.001)
+    _news(fake_net)
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    _kie_finishes(fake_net)
+    store.note_frame(tmp_path, "living-room", 1600, 1200, now=time.time())
+    cfg = _cfg(huggingface_api_key="", kie_api_key="kie", sources=f"Tech | {FEEDS['Tech']}")
+    runner = pipeline.Runner()
+    assert runner.start(cfg, tmp_path, tz=None, reason="manual", force=True)
+    _wait(runner, tmp_path)
+    (create,) = fake_net.to(painters.KIE_CREATE_URL)
+    assert create.json()["input"]["image_size"] == "4:3"
+    assert "Landscape (4:3) picture" in create.json()["input"]["prompt"]
+
+
+def test_a_provider_that_reports_nothing_still_counts_its_pictures(
+    fake_net: FakeNet, tmp_path: Path
+) -> None:
+    _news(fake_net)
+    runner = pipeline.Runner()
+    assert runner.start(_cfg(groq_api_key=""), tmp_path, tz=None, reason="manual")
+    _wait(runner, tmp_path)
+    last = store.load_state(tmp_path)["last_run"]
+    assert last["usage"] == {"pictures": {"huggingface": 3}}  # Groq unused, HF says nothing
+
+
+def test_a_run_with_nothing_to_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pipeline, "run_edition", lambda *a, **k: pipeline.Outcome(kept=1))
+    runner = pipeline.Runner()
+    assert runner.start(_cfg(), tmp_path, tz=None, reason="manual")
+    _wait(runner, tmp_path)
+    state = store.load_state(tmp_path)
+    assert state["last_run"]["usage"] == {}
+    assert state["last_run"]["log"][-1].endswith("Used: nothing the services reported")
+    assert "usage" not in state["runs"][-1]
+
+
+def test_usage_sentence_ignores_junk() -> None:
+    assert pipeline.usage_sentence({}) == ""
+    assert pipeline.usage_sentence("x") == ""  # type: ignore[arg-type]
+    assert pipeline.usage_sentence({"tokens": {"groq": "lots"}, "pictures": {"kie": 2}}) == (
+        "2 pictures from kie.ai"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<html><body>Not a feed</body></html>",
+        b"<?xml version='1.0'?><rss><channel><item><title>cut",
+        b'<!DOCTYPE x [<!ENTITY a "aaaa">]><rss><channel><item><title>&a;</title></item></channel></rss>',
+    ],
+)
+def test_a_broken_feed_costs_only_its_own_story(
+    fake_net: FakeNet, tmp_path: Path, body: bytes
+) -> None:
+    _news(fake_net)
+    fake_net.routes.insert(0, (FEEDS["Business"], [ok(body, "application/xml")]))
+    log: list[str] = []
+    outcome = pipeline.run_edition(_cfg(), tmp_path, log=log.append)
+    assert outcome == pipeline.Outcome(made=2, missing=1)
+    assert [s["source"] for s in store.load_stories(tmp_path)] == ["Tech", "Global"]
+    assert any(line.startswith("Feed attempt 2:") for line in log)

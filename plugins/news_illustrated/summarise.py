@@ -84,8 +84,11 @@ def summarise(
     words: int,
     template: str,
     log: Callable[[str], None],
+    usage: Callable[[dict[str, int]], None] = lambda used: None,
+    off: bool = False,
 ) -> str:
-    """The summary, normalised for the panel. Never empty."""
+    """The summary, normalised for the panel. Never empty. ``usage`` hears
+    the tokens Groq says the call used ({"tokens", "in", "out"})."""
     prompt = build_prompt(title, body, words, template)
     if prompt.kind == "headline":
         log("No article text, summarising from the headline only")
@@ -100,15 +103,40 @@ def summarise(
         )
         answer = reply.json()
         content = _content(answer)
+        used = tokens_used(answer)
+        if used:
+            usage(used)
         if reply.ok and content:
-            log(f"Summary: about {len(content.split())} words")
+            spent = f", Groq {used['tokens']:,} tokens" if used else ""
+            log(f"Summary: about {len(content.split())} words{spent}")
             return text.normalise(content)
         log(f"Groq failed: {_error(answer) or reply.reason()}")
     else:
-        log("No Groq key, using the start of the source text")
+        log(
+            "Summaries are off, using the start of the source text"
+            if off
+            else "No Groq key, using the start of the source text"
+        )
     if prompt.kind == "headline":
         return title
     return text.normalise(text.first_words(body, words))
+
+
+def tokens_used(answer: object) -> dict[str, int]:
+    """Groq's (OpenAI-style) ``usage``: {"tokens", "in", "out"}; {} without one."""
+    got = answer.get("usage") if isinstance(answer, dict) else None
+    if not isinstance(got, dict):
+        return {}
+    out: dict[str, int] = {}
+    for mine, theirs in (
+        ("tokens", "total_tokens"),
+        ("in", "prompt_tokens"),
+        ("out", "completion_tokens"),
+    ):
+        value = got.get(theirs)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            out[mine] = value
+    return out if "tokens" in out else {}
 
 
 def _content(answer: object) -> str:
