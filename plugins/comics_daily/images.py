@@ -44,6 +44,8 @@ STATE_FILE = "state.json"
 LOG_FILE = "log.json"
 COOKIE_STATUS_FILE = "gocomics-cookie-status.json"
 ROTATION_FILE = "turns.json"
+# When each unused picture was first seen unused (app.media_lifecycle).
+RETIRED_FILE = "retired.json"
 IMAGE_DIR = "images"
 # The admin page's log keeps this many lines.
 LOG_LINES = 150
@@ -368,13 +370,19 @@ class Store:
     def add(self, key: str, picture: Picture) -> str:
         """Write ``picture`` and return its file name. Same bytes, same name,
         so an unchanged strip refetched tomorrow costs no new file."""
-        self.image_dir.mkdir(parents=True, exist_ok=True)
         prefix = _KEY_SAFE_RE.sub("-", key.lower()).strip("-")[:60] or "comic"
         digest = hashlib.sha256(picture.data).hexdigest()[:12]
         name = f"{prefix}-{digest}.{picture.ext}"
         path = self.image_dir / name
-        if not path.exists():
-            _write_atomic(path, picture.data)
+        # Under the cleanup's lock: a picture that comes back (same bytes,
+        # same name) after it was left unused starts its grace over, so the
+        # cleanup can't delete it between this write and the record that
+        # points at it.
+        with _LOCK:
+            self.image_dir.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                _write_atomic(path, picture.data)
+            lifecycle.retire_reset(self.root / RETIRED_FILE, name)
         return name
 
     def image_path(self, name: str) -> Path | None:
@@ -421,14 +429,25 @@ class Store:
                 del sources[key]
             if stale:
                 self._save(sources)
-            keep = {
-                str(pic.get("file"))
-                for entry in sources.values()
-                for pic in entry.get("pictures") or []
-                if isinstance(pic, dict)
-            }
-        if not self.image_dir.is_dir():
-            return []
-        return lifecycle.sweep(
-            self.image_dir, keep=keep, max_bytes=max_bytes, grace_s=PRUNE_GRACE_S, now=now
-        )
+            if not self.image_dir.is_dir():
+                return []
+            # Still under the lock: no record can point at a picture between
+            # the keep set and the deletes, and each delete checks again.
+            return lifecycle.sweep(
+                self.image_dir,
+                keep=self._referenced(sources),
+                max_bytes=max_bytes,
+                grace_s=PRUNE_GRACE_S,
+                now=now,
+                ledger=self.root / RETIRED_FILE,
+                still_unused=lambda name: name not in self._referenced(self.sources()),
+            )
+
+    @staticmethod
+    def _referenced(sources: dict[str, dict[str, Any]]) -> set[str]:
+        return {
+            str(pic.get("file"))
+            for entry in sources.values()
+            for pic in entry.get("pictures") or []
+            if isinstance(pic, dict)
+        }

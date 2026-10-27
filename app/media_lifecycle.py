@@ -25,8 +25,10 @@ mypy --strict applies to this module, see pyproject.toml.
 from __future__ import annotations
 
 import contextlib
+import json
+import os
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +102,37 @@ def describe(
     return f"next try in {span} (try {tries + 1} of {tries_per_day})"
 
 
+def _read_ledger(path: Path) -> dict[str, float]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(k): float(v)
+        for k, v in data.items()
+        if isinstance(v, (int, float)) and not isinstance(v, bool)
+    }
+
+
+def retire_reset(ledger: Path, name: str) -> None:
+    """Forget that ``name`` was unused: a writer about to point at it again
+    (a content-addressed picture that came back) calls this, under the
+    same lock as its cleanup, so the grace starts over."""
+    entries = _read_ledger(ledger)
+    if entries.pop(name, None) is not None:
+        _write_ledger(ledger, entries)
+
+
+def _write_ledger(path: Path, entries: dict[str, float]) -> None:
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(json.dumps(entries), encoding="utf-8")
+        os.replace(tmp, path)
+
+
 def sweep(
     directory: Path,
     *,
@@ -108,32 +141,54 @@ def sweep(
     grace_s: float = GRACE_S,
     now: float | None = None,
     pattern: str = "*",
+    ledger: Path | None = None,
+    still_unused: Callable[[str], bool] | None = None,
 ) -> list[str]:
     """Delete the files in ``directory`` matching ``pattern`` that aren't in
-    ``keep`` (names) once unused for ``grace_s`` (by mtime); then, while the
-    folder is over ``max_bytes``, the oldest such files at least
-    ``MIN_AGE_S`` old. Files in ``keep`` are never deleted. Returns the
-    names deleted."""
+    ``keep`` (names) once unused for ``grace_s``; then, while the folder is
+    over ``max_bytes``, the oldest such files unused for at least
+    ``MIN_AGE_S``. Files in ``keep`` are never deleted. Returns the names
+    deleted.
+
+    "Unused since" is when a file was first seen out of ``keep``, kept in
+    ``ledger`` (a JSON file) when one is given: the grace starts when a
+    picture is replaced, not when it was written, so a render that read the
+    old state can still load it. Without a ledger it is the file's mtime
+    (for a widget that touches a file each time it is used).
+    ``still_unused(name)``, when given, is asked right before each delete,
+    so a caller can check its references once more. Callers that change
+    references concurrently hold one lock around both."""
     now = time.time() if now is None else now
     kept = set(keep)
+    entries = _read_ledger(ledger) if ledger is not None else {}
     files: list[tuple[float, int, Path]] = []
     total = 0
+    seen: set[str] = set()
     with contextlib.suppress(OSError):
         for path in directory.glob(pattern):
             with contextlib.suppress(OSError):
-                if not path.is_file():
+                if not path.is_file() or (ledger is not None and path == ledger):
                     continue
                 stat = path.stat()
                 total += stat.st_size
-                if path.name not in kept:
-                    files.append((stat.st_mtime, stat.st_size, path))
+                if path.name in kept:
+                    continue
+                seen.add(path.name)
+                since = entries.setdefault(path.name, now) if ledger is not None else stat.st_mtime
+                files.append((since, stat.st_size, path))
     files.sort(key=lambda item: item[0])
     gone: list[str] = []
-    for mtime, size, path in files:
-        old = now - mtime
-        if old > grace_s or (total > max_bytes and old > MIN_AGE_S):
-            with contextlib.suppress(OSError):
-                path.unlink()
-                total -= size
-                gone.append(path.name)
+    for since, size, path in files:
+        unused = now - since
+        if not (unused > grace_s or (total > max_bytes and unused > MIN_AGE_S)):
+            continue
+        if still_unused is not None and not still_unused(path.name):
+            entries.pop(path.name, None)
+            continue
+        with contextlib.suppress(OSError):
+            path.unlink()
+            total -= size
+            gone.append(path.name)
+    if ledger is not None:
+        _write_ledger(ledger, {k: v for k, v in entries.items() if k in seen and k not in gone})
     return gone

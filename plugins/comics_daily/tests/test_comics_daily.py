@@ -1693,11 +1693,14 @@ def test_cleanup_forgets_what_the_settings_no_longer_name(tmp_path: Path) -> Non
     orphan_manual = _keep_picture(store, "manual:peanuts", (63, 20), age=hour)
     kept_manual = _keep_picture(store, "manual:garfield", (64, 20), age=40 * 86400)
     wanted = {"farside", "gocomics:garfield", "manual:garfield"}
-    gone = store.prune(wanted=wanted)
+    now = time.time()
+    # The records the settings no longer name go (bc's only once untouched
+    # for the grace period); their pictures are now unused, and the grace
+    # counts from now, not from when they were written an hour ago.
+    assert store.prune(wanted=wanted, now=now) == []
     records = store.sources()
     assert set(records) == {"gocomics:garfield", "manual:garfield", "gocomics:bc"}
-    # Their pictures go once unused for the grace period: these were
-    # written an hour ago; bc's is still in its grace.
+    gone = store.prune(wanted=wanted, now=now + images.PRUNE_GRACE_S + 60)
     assert sorted(gone) == sorted([removed, orphan_manual])
     for name in (shown, kept_manual, fresh):
         assert (store.image_dir / name).exists()
@@ -1707,19 +1710,44 @@ def test_cleanup_keeps_the_folder_under_budget_but_never_what_is_shown(tmp_path:
     store = images.Store(tmp_path)
     shown = _keep_picture(store, "gocomics:garfield", (400, 300), age=10 * 60)
     store.image_dir.mkdir(exist_ok=True)
-    spare = []
+    now = time.time()
+    spare, ledger = [], {}
     for n in range(3):
         path = store.image_dir / f"gocomics-old-{n:012x}.png"
         path.write_bytes(b"x" * 1000)
-        when = time.time() - (30 - n) * 60  # in the grace period, oldest first
-        os.utime(path, (when, when))
         spare.append(path.name)
+        ledger[path.name] = now - (30 - n) * 60  # unused 30, 29, 28 min: in the grace
+    (tmp_path / images.RETIRED_FILE).write_text(json.dumps(ledger))
     on_screen = (store.image_dir / shown).stat().st_size
-    gone = store.prune(wanted={"gocomics:garfield"}, max_bytes=on_screen + 1500)
-    assert gone == spare[:2]  # the oldest unreferenced first, until under budget
-    gone = store.prune(wanted={"gocomics:garfield"}, max_bytes=0)
+    gone = store.prune(wanted={"gocomics:garfield"}, max_bytes=on_screen + 1500, now=now)
+    assert gone == spare[:2]  # the longest unused first, until under budget
+    gone = store.prune(wanted={"gocomics:garfield"}, max_bytes=0, now=now)
     assert gone == spare[2:]
     assert (store.image_dir / shown).exists()  # over budget, still never deleted
+
+
+def test_a_picture_that_comes_back_is_never_deleted_under_its_new_record(tmp_path: Path) -> None:
+    """Sol's race: a content-addressed picture left unused, then written
+    again (same bytes, same name) by an upload just as the cleanup runs."""
+    store = images.Store(tmp_path)
+    name = _keep_picture(store, "manual:garfield", age=2 * 3600)
+    store.update("manual:garfield", lambda e: e.update(pictures=[]))  # replaced
+    now = time.time()
+    store.prune(now=now - 2 * 3600)  # seen unused two hours ago
+    # The upload writes the same bytes again (the record will point at it).
+    assert store.add("manual:garfield", images.normalise(_png((60, 20)))) == name
+    assert store.prune(now=now) == []  # its grace started over at the write
+    assert (store.image_dir / name).exists()
+    # And a delete checks the records once more, right before it happens.
+    gone = images.lifecycle.sweep(
+        store.image_dir,
+        keep=set(),
+        max_bytes=0,
+        grace_s=0,
+        now=now + 3600,
+        still_unused=lambda n: n != name,
+    )
+    assert name not in gone and (store.image_dir / name).exists()
 
 
 # -- the screen: what fits, and taking turns (screen.py) ---------------------------

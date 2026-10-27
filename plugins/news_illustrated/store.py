@@ -108,8 +108,9 @@ MAX_IMAGE_BYTES = 200 * 1024 * 1024
 
 
 def prune_images(data_dir: Path, keep: set[str], *, now: float | None = None) -> int:
-    """Delete pictures no story uses any more, once unused for an hour (a
-    render may still be loading the one a story just replaced), and while the
+    """Delete pictures no story uses any more, once unused for an hour since
+    they stopped being used (a render may still be loading the one a story
+    just replaced), and while the
     folder is over MAX_IMAGE_BYTES the oldest unused first
     (app.media_lifecycle). A picture a story uses is never deleted. How
     many went."""
@@ -121,6 +122,8 @@ def prune_images(data_dir: Path, keep: set[str], *, now: float | None = None) ->
         max_bytes=MAX_IMAGE_BYTES,
         now=now,
         pattern="*.jpg",
+        # The grace counts from when a picture stopped being used.
+        ledger=Path(data_dir) / "retired-images.json",
     )
     return len(gone)
 
