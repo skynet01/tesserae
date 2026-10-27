@@ -1008,7 +1008,8 @@
       const list = box.querySelector("[data-repeater-list]");
       const tpl = box.querySelector("template[data-repeater-template]");
       const addBtn = box.querySelector("[data-repeater-add]");
-      if (!storage || !list || !tpl || !addBtn) return;
+      // No Add button is fine: a list-layout page may add rows its own way.
+      if (!storage || !list || !tpl) return;
       box.dataset.repeaterBound = "1";
       const empty = box.querySelector("[data-repeater-empty]");
       const count = box.querySelector("[data-repeater-count]");
@@ -1018,6 +1019,9 @@
       const rowLabel = box.dataset.repeaterRowLabel || "Row";
       const fieldId = box.dataset.repeaterId || "repeater";
       const served = storage.value;
+      const servedRows = Array.from(list.children)
+        .filter((el) => el.matches("[data-repeater-row]"))
+        .map((row) => row.cloneNode(true));
       let serial = 0;
 
       const rows = () =>
@@ -1053,22 +1057,51 @@
         else btn.removeAttribute("aria-disabled");
       }
 
+      // A list-layout row's head says what its fields hold: the title (the
+      // first filled of its title fields), the summary (on one line) and the
+      // switch's name for a screen reader; a row switched off is dimmed.
+      function describe(row) {
+        const title = row.querySelector("[data-repeater-title]");
+        if (!title) return;
+        const valueOf = (key) => {
+          const el = Array.from(controls(row)).find((c) => c.dataset.repeaterKey === key);
+          return el ? String(el.value).replace(/\s+/g, " ").trim() : "";
+        };
+        const keys = (title.dataset.titleKeys || "").split(" ").filter(Boolean);
+        const text = keys.map(valueOf).find(Boolean);
+        title.textContent = text || `New ${rowLabel.toLowerCase()}`;
+        const meta = row.querySelector("[data-repeater-meta]");
+        if (meta && meta.dataset.summaryKey) meta.textContent = valueOf(meta.dataset.summaryKey);
+        const toggle = row.querySelector(".repeater-row-toggle input");
+        if (toggle) {
+          const label = toggle.closest("[data-repeater-toggle-label]");
+          const name = label ? label.dataset.repeaterToggleLabel : "";
+          toggle.setAttribute("aria-label", name ? `${title.textContent}: ${name}` : title.textContent);
+          row.classList.toggle("is-off", !toggle.checked);
+        }
+      }
+
+      // CSS shows a list-layout row's body while it is ``is-open`` (and
+      // every body when scripts don't run).
+      function setOpen(row, open) {
+        const btn = row.querySelector("[data-repeater-open]");
+        if (!btn) return;
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        row.classList.toggle("is-open", open);
+      }
+
       function refresh() {
         const all = rows();
         all.forEach((row, i) => {
           row.setAttribute("aria-label", `${rowLabel} ${i + 1} of ${all.length}`);
-          const title = row.querySelector("[data-repeater-title]");
-          const code = row.querySelector('[data-repeater-type="string"]');
-          if (title) title.textContent = (code && code.value.trim()) || `New ${rowLabel.toLowerCase()}`;
-          const toggle = row.querySelector(".repeater-row-toggle input");
-          const toggleLabel = row.querySelector("[data-repeater-toggle-label]");
-          if (toggle && toggleLabel) {
-            toggleLabel.textContent = toggle.checked ? "In rotation" : "Paused";
-            toggle.setAttribute("aria-label", `Include ${title ? title.textContent : rowLabel} in rotation`);
-          }
+          setOpen(row, row.classList.contains("is-open"));
+          describe(row);
           setOff(row.querySelector("[data-repeater-up]"), i === 0);
           setOff(row.querySelector("[data-repeater-down]"), i === all.length - 1);
-          setOff(row.querySelector("[data-repeater-remove]"), all.length <= min);
+          setOff(
+            row.querySelector("[data-repeater-remove]"),
+            all.length <= min || row.hasAttribute("data-repeater-fixed"),
+          );
         });
         setOff(addBtn, all.length >= max);
         if (empty) empty.hidden = all.length > 0;
@@ -1094,41 +1127,41 @@
         serial += 1;
         const stem = `${fieldId}-__i__-`;
         const fresh = `${fieldId}-n${serial}-`;
-        row.querySelectorAll("[id], label[for]").forEach((el) => {
+        row.querySelectorAll("[id], label[for], [aria-controls]").forEach((el) => {
           if (el.id) el.id = el.id.replace(stem, fresh);
-          const target = el.getAttribute("for");
-          if (target) el.setAttribute("for", target.replace(stem, fresh));
+          ["for", "aria-controls"].forEach((attr) => {
+            const target = el.getAttribute(attr);
+            if (target) el.setAttribute(attr, target.replace(stem, fresh));
+          });
         });
         fillRow(row, data);
         return row;
       }
 
-      function rebuild(json) {
-        let data = [];
-        try {
-          const parsed = JSON.parse(json || "[]");
-          if (Array.isArray(parsed)) data = parsed;
-        } catch {
-          data = [];
-        }
-        list.replaceChildren();
-        data.forEach((item) => {
-          const row = newRow(item && typeof item === "object" ? item : null);
-          if (row) list.appendChild(row);
-        });
-        storage.value = json || "[]";
+      // Discard puts back the rows the page was served with: copies of their
+      // own markup, taken before any edit, so what the server drew into a
+      // row (a status, an upload button, a row that can't be removed) comes
+      // back with it. Rows rebuilt from the empty template would lose it.
+      function restoreServed() {
+        list.replaceChildren(...servedRows.map((row) => row.cloneNode(true)));
+        storage.value = served;
         refresh();
       }
 
-      // Browser validation must reveal a required field before focusing it.
-      list.addEventListener("invalid", (ev) => {
-        const details = ev.target.closest("[data-repeater-details]");
-        if (details) details.open = true;
-      }, true);
+      // ``invalid`` does not bubble; capture it so a field in a closed
+      // list-layout row is shown before the browser focuses and flags it.
+      list.addEventListener(
+        "invalid",
+        (ev) => {
+          const row = ev.target.closest("[data-repeater-row]");
+          if (row) setOpen(row, true);
+        },
+        true,
+      );
       list.addEventListener("input", () => serialise(false));
       list.addEventListener("change", () => serialise(false));
 
-      addBtn.addEventListener("click", () => {
+      if (addBtn) addBtn.addEventListener("click", () => {
         if (rows().length >= max) {
           announce(`At most ${max}.`);
           return;
@@ -1136,8 +1169,7 @@
         const row = newRow(null);
         if (!row) return;
         list.appendChild(row);
-        const details = row.querySelector("[data-repeater-details]");
-        if (details) details.open = true;
+        setOpen(row, true);
         serialise(true);
         const first =
           row.querySelector("input:not([type=checkbox]), textarea, select") ||
@@ -1147,6 +1179,14 @@
       });
 
       list.addEventListener("click", (ev) => {
+        // A list-layout row opens and closes from its caret button or from
+        // a click anywhere else on its head, bar the switch.
+        const head = ev.target.closest(".repeater-row-head");
+        if (head && list.contains(head) && !ev.target.closest(".repeater-row-toggle")) {
+          const row = head.closest("[data-repeater-row]");
+          setOpen(row, !row.classList.contains("is-open"));
+          return;
+        }
         const btn = ev.target.closest(
           "[data-repeater-up], [data-repeater-down], [data-repeater-remove]"
         );
@@ -1160,7 +1200,9 @@
           const next = all[at + 1] || all[at - 1] || null;
           row.remove();
           serialise(true);
-          const focusTo = next ? next.querySelector("summary, [data-repeater-remove]") : addBtn;
+          const focusTo = next
+            ? next.querySelector("[data-repeater-open], [data-repeater-remove]")
+            : addBtn;
           if (focusTo) focusTo.focus();
           announce(`${rowLabel} ${at + 1} removed.`);
           return;
@@ -1183,9 +1225,44 @@
       const form = storage.form;
       if (form) {
         form.addEventListener("submit", () => serialise(false));
-        form.addEventListener("reset", () => setTimeout(() => rebuild(served), 0));
+        form.addEventListener("reset", () => setTimeout(restoreServed, 0));
       }
       refresh();
+    });
+  }
+
+  // A folding settings card (``fold`` in _server_section.html): opened
+  // when a field inside fails validation, or when the URL's hash names the
+  // card or something in it (a save comes back to ``#<card id>``), so
+  // neither lands on fields folded away.
+  function attachFolds(root) {
+    root.querySelectorAll("details[data-fold]").forEach((fold) => {
+      if (fold.dataset.foldBound) return;
+      fold.dataset.foldBound = "1";
+      fold.addEventListener("invalid", () => { fold.open = true; }, true);
+    });
+    let id = "";
+    try {
+      id = decodeURIComponent((window.location.hash || "").slice(1));
+    } catch {
+      return;
+    }
+    const target = id && document.getElementById(id);
+    if (!target) return;
+    const fold = target.closest("details[data-fold]") || target.querySelector("details[data-fold]");
+    if (fold && root.contains(fold)) fold.open = true;
+  }
+
+  // A log in a disclosure (``pre[data-log-tail]``) opens on its newest
+  // lines, at the bottom.
+  function attachLogTails(root) {
+    root.querySelectorAll("pre[data-log-tail]").forEach((pre) => {
+      const details = pre.closest("details");
+      if (!details || details.dataset.logTailBound) return;
+      details.dataset.logTailBound = "1";
+      details.addEventListener("toggle", () => {
+        if (details.open) pre.scrollTop = pre.scrollHeight;
+      });
     });
   }
 
@@ -1201,6 +1278,8 @@
     attachMultiSelect(document);
     attachRepeaters(document);
     attachShowIf(document);
+    attachFolds(document);
+    attachLogTails(document);
     attachLightbox();
     publishTopbarHeight();
   }

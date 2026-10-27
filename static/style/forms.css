@@ -2652,9 +2652,11 @@ input[type="range"].slider:focus::-moz-range-thumb {
 .repeater-sub--textarea {
   grid-column: 1 / -1;
 }
-.repeater-sub textarea.is-mono {
+/* Outranks the section body's input type (settings.css). */
+.field--repeater .repeater-sub textarea.is-mono {
   font-family: var(--t-font-mono, ui-monospace, monospace);
-  font-size: var(--t-size-sm);
+  font-size: 13px;
+  line-height: 1.5;
 }
 .repeater-row-actions {
   display: flex;
@@ -2666,8 +2668,7 @@ input[type="range"].slider:focus::-moz-range-thumb {
   height: 32px;
   padding: 0;
 }
-.repeater-btn[aria-disabled="true"],
-.repeater-add[aria-disabled="true"] {
+.field--repeater [aria-disabled="true"] {
   opacity: 0.35;
   cursor: default;
   transform: none;
@@ -2711,79 +2712,123 @@ input[type="range"].slider:focus::-moz-range-thumb {
   }
 }
 
-/* Widget admin forms use the available page width, with one paper per row. */
-.widget-admin-settings .form { display: flex; flex-direction: column; gap: var(--t-space-4); }
-.widget-admin-settings .field { width: 100%; min-width: 0; }
-.widget-admin-settings .field--repeater { display: block; }
-/* Keep the group label available to assistive technology. */
-.repeater--collapsible > .field-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-.repeater--collapsible .repeater-list { gap: 0; border: 1px solid var(--t-border); border-radius: var(--t-radius-sm); }
-.repeater-row--collapsible {
-  position: relative;
+/* List layout (``repeater_field(..., layout="list")``): one row per item,
+   hairline-divided like the Devices and Dashboards lists, under a mono
+   column head. A row shows its title, a one-line summary, its switch and a
+   caret; opening it shows the rest of its fields a shade down, with the
+   move and remove buttons the Dashboards rows use. */
+.repeater--list .repeater-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px 8px;
+  font-family: var(--t-font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--t-muted);
+}
+/* Ends over the switches: past the caret column (16px) and its gap. */
+.repeater--list .repeater-list-head > span + span { margin-right: 28px; }
+/* minmax(0, ...): a long title or summary ellipsises rather than widening the page. */
+.repeater--list .repeater-list { grid-template-columns: minmax(0, 1fr); gap: 0; border-top: 1px solid var(--t-border); }
+.repeater--list .repeater-row {
   display: block;
   padding: 0;
-  background: var(--t-surface);
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--t-border);
+  border-radius: 0;
+  transition: background var(--t-trans-fast);
+}
+.repeater--list .repeater-row:not(.is-open):hover,
+.repeater--list .repeater-row.is-open { background: var(--t-surface-soft); }
+.repeater-row-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.repeater-row-open,
+.repeater-row-open:hover,
+.repeater-row-open:active {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 4px 0;
   border: 0;
   border-radius: 0;
+  background: none;
+  box-shadow: none;
+  transform: none;
+  color: var(--t-fg);
+  text-align: left;
+}
+.repeater-row-open:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; box-shadow: none; }
+.repeater-row-title {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.005em;
+}
+.repeater-row-meta {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--t-font-mono);
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--t-muted);
 }
-.repeater-row--collapsible + .repeater-row--collapsible { border-top: 1px solid var(--t-border); }
-.repeater-row--collapsible:first-child { border-radius: var(--t-radius-sm) var(--t-radius-sm) 0 0; }
-.repeater-row--collapsible:last-child { border-radius: 0 0 var(--t-radius-sm) var(--t-radius-sm); }
-.repeater-row--collapsible summary {
-  display: flex;
-  align-items: center;
-  gap: var(--t-space-2);
-  min-height: 68px;
-  padding: var(--t-space-3) 170px var(--t-space-3) var(--t-space-4);
-  cursor: pointer;
-  list-style: none;
+.repeater--list .repeater-row.is-off .repeater-row-title { color: var(--t-muted); }
+/* The section body styles every label in a field; the switch is not one. */
+.field--repeater .repeater-row-head .repeater-row-toggle { display: inline-block; margin: 0; }
+.repeater-row-chev {
+  flex: none;
+  display: inline-flex;
+  font-size: 16px;
+  color: var(--t-muted);
+  transition: transform 180ms ease-out;
 }
-.repeater-row--collapsible summary::-webkit-details-marker { display: none; }
-.repeater-row--collapsible summary:hover { background: var(--t-surface-soft); }
-.repeater-row--collapsible summary:focus-visible { outline: 2px solid var(--t-accent); outline-offset: -3px; }
-.repeater-row-title { min-width: 0; overflow-wrap: anywhere; font-weight: 600; font-size: var(--t-size-sm); }
-.repeater-caret { color: var(--t-muted); transition: transform 160ms ease-out; }
-.repeater-row--collapsible details[open] > summary .repeater-caret { transform: rotate(90deg); }
-.repeater-row--collapsible .repeater-row-toggle {
-  display: flex;
-  align-items: center;
-  position: absolute;
-  top: 0;
-  right: var(--t-space-4);
-  min-height: 68px;
-  margin: 0;
-  gap: var(--t-space-2);
-}
-.repeater-row-toggle .switch-label { width: 76px; text-align: right; font-size: var(--t-size-sm); color: var(--t-muted); }
-.repeater-row--collapsible .repeater-row-fields {
-  padding: 0 var(--t-space-4) var(--t-space-3);
-  grid-template-columns: minmax(0, 1fr);
+.repeater-row-head:hover .repeater-row-chev { color: var(--t-fg); }
+/* Without scripts every row is open and the caret can't close it. */
+:root:not(.js) .repeater-row-chev { display: none; }
+.repeater--list .repeater-row.is-open .repeater-row-chev { transform: rotate(90deg); }
+.repeater-row-body { padding: 4px 12px 16px; }
+:root.js .repeater--list .repeater-row:not(.is-open) > .repeater-row-body { display: none; }
+.repeater--list .repeater-row-fields {
+  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
   align-items: start;
-  gap: var(--t-space-3);
+  gap: 12px 16px;
 }
-.repeater-row--collapsible .repeater-row-actions {
+.repeater--list .repeater-sub--textarea { grid-column: auto; }
+.repeater--list .repeater-row-actions {
   flex-direction: row;
-  justify-content: flex-end;
-  gap: var(--t-space-2);
-  padding: 0 var(--t-space-4) var(--t-space-3);
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
 }
-.repeater-row--collapsible .repeater-btn { width: 40px; height: 40px; }
-.repeater--collapsible .repeater-foot { justify-content: space-between; margin-top: var(--t-space-3); flex-wrap: wrap; }
-@media (max-width: 480px) {
-  .repeater-row--collapsible summary { padding-left: var(--t-space-3); padding-right: 145px; }
-  .repeater-row--collapsible .repeater-row-toggle { right: var(--t-space-3); }
-  .repeater-row-toggle .switch-label { width: 66px; font-size: var(--t-size-xs); }
-  .repeater-row--collapsible .repeater-row-fields { padding-inline: var(--t-space-3); }
+.repeater--list .repeater-remove { margin-left: auto; }
+.repeater--list .repeater-remove:not([aria-disabled="true"]):hover { color: var(--t-danger); }
+.repeater--list .repeater-empty { margin-top: 12px; }
+/* No rows: no column head over nothing. */
+.repeater--list:has(> .repeater-empty:not([hidden])) .repeater-list-head { display: none; }
+.repeater--list .repeater-foot { justify-content: space-between; flex-wrap: wrap; margin-top: 12px; }
+@media (max-width: 640px) {
+  .repeater--list .repeater-row-fields { grid-template-columns: minmax(0, 1fr); }
+  .repeater--list .repeater-list-head,
+  .repeater-row-head,
+  .repeater-row-body { padding-inline: 8px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .repeater-caret { transition: none; }
-}
-
-.repeater-row-toggle input[type="checkbox"] {
-  position: absolute;
-  width: 0;
-  height: 0;
-  opacity: 0;
-  pointer-events: none;
+  .repeater-row-chev { transition: none; }
 }

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
 
-from app.net_guard import BlockedURLError, assert_public_url
+from app.net_guard import BlockedURLError, assert_public_url, canonical_url, guarded_opener
 
 # A news site or an image CDN answering with something bigger than this is
 # not sending what we asked for.
@@ -137,6 +137,7 @@ def request(
     for hop in range(MAX_REDIRECTS + 1):
         try:
             assert_public_url(url)
+            url = canonical_url(url)
         except BlockedURLError:
             where = "redirected to a non-public address" if hop else "not a public address"
             return Reply(0, error=f"refused: {where}")
@@ -160,7 +161,10 @@ def _once(
     """One hop, with whatever time is left. Raises _Redirect for a 3xx."""
     try:
         req = urllib.request.Request(url, data=body, headers=headers, method=method)
-        opener = urllib.request.build_opener(_NoRedirects())
+        # Pinned: the connection goes to an address checked for this very
+        # request, never one a second DNS lookup returns (rebinding); this
+        # module follows redirects itself, checking each hop.
+        opener = guarded_opener(allow_local=False, redirects=_NoRedirects())
         with opener.open(req, timeout=max(0.05, deadline - time.monotonic())) as resp:
             raw = _read(resp, deadline, max_bytes)
             encoding = str(resp.headers.get("Content-Encoding", "") or "")
@@ -190,6 +194,8 @@ def _once(
             err.close()
         content_type = str(err_headers.get("Content-Type", "") or "") if err_headers else ""
         return Reply(int(err.code), raw, content_type)
+    except BlockedURLError:
+        return Reply(0, error="refused: not a public address")
     except _TooLarge:
         return Reply(0, error="response too large")
     except (_OutOfTime, TimeoutError):

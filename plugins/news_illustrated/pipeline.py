@@ -28,6 +28,8 @@ from datetime import date, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Any
 
+from app import media_lifecycle as lifecycle
+
 from . import feeds, painters, store, summarise, text
 
 try:
@@ -48,8 +50,12 @@ DEFAULT_RUN_AT = "06:05"
 DEFAULT_WORDS = 70
 # A day's edition is attempted at most this often, this far apart, when a
 # run makes no story at all (the network was down at run time, say).
-MAX_ATTEMPTS = 2
-RETRY_AFTER_S = 2 * 3600
+# A scheduled edition that made nothing is tried again on app.media_lifecycle's
+# backoff (30 minutes, then 1 and 2 hours), at most MAX_ATTEMPTS times a day:
+# fewer than the other widgets, since each try may pay for pictures.
+MAX_ATTEMPTS = 4
+RETRY_AFTER_S = lifecycle.RETRY_FIRST_S  # the first wait; it doubles after
+RUN_HISTORY = 30
 LOG_LINES = 200
 # While a paid picture waits to be collected, a run comes round this often.
 COLLECT_EVERY_S = 10 * 60
@@ -203,7 +209,7 @@ def _scheduled(state: dict[str, Any], data_dir: Path, current: str, now: datetim
     tries = [float(t) for t in (state.get("attempts") or {}).get(current, [])]
     if len(tries) >= MAX_ATTEMPTS:
         return False
-    return not tries or now.timestamp() - max(tries) >= RETRY_AFTER_S
+    return not tries or now.timestamp() - max(tries) >= lifecycle.retry_wait(len(tries))
 
 
 # ----------------------------------------------------------------------
@@ -696,6 +702,10 @@ def _record_run(
         "failed": bool(failure),
         "log": lines,
     }
+    # Every run (each try of an edition included) in a line, for the page.
+    earlier = state.get("runs") if isinstance(state.get("runs"), list) else []
+    summary = {k: state["last_run"][k] for k in ("reason", "started", "outcome", "failed")}
+    state["runs"] = [*[r for r in earlier if isinstance(r, dict)], summary][-RUN_HISTORY:]
     try:
         store.save_state(run.data_dir, state)
     except OSError:

@@ -103,16 +103,29 @@ def image_path(data_dir: Path, name: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def prune_images(data_dir: Path, keep: set[str]) -> int:
-    """Delete pictures no story uses any more. How many went."""
-    gone = 0
-    with contextlib.suppress(OSError):
-        for path in (Path(data_dir) / IMAGES).glob("*.jpg"):
-            if path.name not in keep:
-                with contextlib.suppress(OSError):
-                    path.unlink()
-                    gone += 1
-    return gone
+# The pictures folder stays under this; past it the oldest unused go first.
+MAX_IMAGE_BYTES = 200 * 1024 * 1024
+
+
+def prune_images(data_dir: Path, keep: set[str], *, now: float | None = None) -> int:
+    """Delete pictures no story uses any more, once unused for an hour since
+    they stopped being used (a render may still be loading the one a story
+    just replaced), and while the
+    folder is over MAX_IMAGE_BYTES the oldest unused first
+    (app.media_lifecycle). A picture a story uses is never deleted. How
+    many went."""
+    from app import media_lifecycle
+
+    gone = media_lifecycle.sweep(
+        Path(data_dir) / IMAGES,
+        keep=keep,
+        max_bytes=MAX_IMAGE_BYTES,
+        now=now,
+        pattern="*.jpg",
+        # The grace counts from when a picture stopped being used.
+        ledger=Path(data_dir) / "retired-images.json",
+    )
+    return len(gone)
 
 
 # ----------------------------------------------------------------------

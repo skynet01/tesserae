@@ -408,21 +408,8 @@ macro here instead.
    their own. Rows are drawn here so they show before any script runs; the
    <template> is one empty row for the Add button. ``__i__`` in its ids is
    replaced per new row. -#}
-{%- macro _repeater_row(field_id, view, row, idx, form=None, collapsible=false) -%}
-{% set toggle = (view.subs|selectattr('type', 'equalto', 'boolean')|first) if collapsible else none %}
-{% set title_field = view.subs|selectattr('type', 'equalto', 'string')|first %}
-<li class="repeater-row{% if collapsible %} repeater-row--collapsible{% endif %}" data-repeater-row>
-  {% if collapsible %}
-  <details data-repeater-details>
-    <summary>
-      <i class="ph ph-caret-right repeater-caret" aria-hidden="true"></i>
-      <span class="repeater-row-title" data-repeater-title>{{ row.get(title_field.name) or 'New ' ~ view.row_label|lower if title_field else view.row_label }}</span>
-    </summary>
-  {% endif %}
-  <div class="repeater-row-fields">
-  {%- for sub in view.subs if not (collapsible and toggle and sub.name == toggle.name) %}
+{%- macro _repeater_sub(field_id, sub, val, idx, form=None, readonly=false) -%}
     {%- set cid = field_id ~ '-' ~ idx ~ '-' ~ sub.name %}
-    {%- set val = row.get(sub.name) %}
     {%- if sub.type == 'boolean' %}
     <div class="field field--switch repeater-sub repeater-sub--boolean">
       <label class="switch" for="{{ cid }}">
@@ -465,57 +452,128 @@ macro here instead.
              maxlength="{{ sub.max_length }}"
              data-repeater-key="{{ sub.name }}" data-repeater-type="string"
              autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+             {% if sub.get('format') == 'url' %}inputmode="url"{% endif %}
              {% if sub.get('placeholder') %}placeholder="{{ sub.placeholder }}"{% endif %}
              {% if sub.get('pattern') %}pattern="{{ sub.pattern }}"{% endif %}
              {% if sub.get('pattern_hint') %}title="{{ sub.pattern_hint }}"{% endif %}
              {% if sub.get('required') %}required{% endif %}
+             {% if readonly %}readonly{% endif %}
              {% if form %}form="{{ form }}"{% endif %}>
       {%- endif %}
     </div>
     {%- endif %}
+{%- endmacro -%}
+
+{%- macro _repeater_moves(view, cls) -%}
+    <button type="button" class="{{ cls }}" data-repeater-up aria-label="Move {{ view.row_label }} up" title="Move up"><i class="ph ph-arrow-up" aria-hidden="true"></i></button>
+    <button type="button" class="{{ cls }}" data-repeater-down aria-label="Move {{ view.row_label }} down" title="Move down"><i class="ph ph-arrow-down" aria-hidden="true"></i></button>
+{%- endmacro -%}
+
+{%- macro _repeater_row(field_id, view, row, idx, form=None) -%}
+<li class="repeater-row" data-repeater-row>
+  <div class="repeater-row-fields">
+  {%- for sub in view.subs %}
+    {{ _repeater_sub(field_id, sub, row.get(sub.name), idx, form) }}
   {%- endfor %}
   </div>
   <div class="repeater-row-actions">
-    <button type="button" class="ghost repeater-btn" data-repeater-up aria-label="Move {{ view.row_label }} up" title="Move up"><i class="ph ph-arrow-up" aria-hidden="true"></i></button>
-    <button type="button" class="ghost repeater-btn" data-repeater-down aria-label="Move {{ view.row_label }} down" title="Move down"><i class="ph ph-arrow-down" aria-hidden="true"></i></button>
+    {{ _repeater_moves(view, 'ghost repeater-btn') }}
     <button type="button" class="ghost danger repeater-btn" data-repeater-remove aria-label="Remove {{ view.row_label }}" title="Remove"><i class="ph ph-trash" aria-hidden="true"></i></button>
   </div>
-  {% if collapsible %}
-  </details>
-  {% if toggle %}
-  {% set cid = field_id ~ '-' ~ idx ~ '-' ~ toggle.name %}
-  <label class="switch repeater-row-toggle" for="{{ cid }}">
-    <span class="switch-label" data-repeater-toggle-label>{{ 'In rotation' if row.get(toggle.name) else 'Paused' }}</span>
-    <input type="checkbox" id="{{ cid }}" data-repeater-key="{{ toggle.name }}" data-repeater-type="boolean"
-           {% if form %}form="{{ form }}"{% endif %}{% if row.get(toggle.name) %} checked{% endif %}>
-    <span class="switch-track"><span class="switch-thumb"></span></span>
-  </label>
-  {% endif %}
-  {% endif %}
 </li>
 {%- endmacro -%}
 
-{%- macro repeater_field(field_id, name, label, spec, value=None, help=None, form=None, collapsible=false) -%}
+{#- The list layout's row, like a row of the Devices or Dashboards list: the
+   row's title (its first string sub-field), a one-line summary of its first
+   textarea, its first boolean as a switch and a caret; the caret (or a
+   click on the row) opens the other sub-fields under it, with the move and
+   remove buttons. Rows are drawn open: CSS closes them only once scripts run
+   (``.js`` on <html>), so without scripts every field still shows. -#}
+{%- macro _repeater_list_row(field_id, view, row, idx, form=None, extra=None) -%}
+{%- set opts = view.list -%}
+{%- set toggle = view.subs|selectattr('type', 'equalto', 'boolean')|first -%}
+{%- set picked = namespace(title='', fixed=false) -%}
+{%- for key in opts.title %}{% if not picked.title and row.get(key) %}{% set picked.title = row.get(key)|string %}{% endif %}{% endfor -%}
+{%- for key, values in opts.fixed.items() %}{% if row.get(key) in values %}{% set picked.fixed = true %}{% endif %}{% endfor -%}
+{%- set title = picked.title or 'New ' ~ view.row_label|lower -%}
+{%- set body_id = field_id ~ '-' ~ idx ~ '-body' -%}
+<li class="repeater-row repeater-row--list{% if toggle and not row.get(toggle.name) %} is-off{% endif %}" data-repeater-row{% if picked.fixed %} data-repeater-fixed{% endif %}>
+  <div class="repeater-row-head">
+    <button type="button" class="repeater-row-open" data-repeater-open aria-controls="{{ body_id }}">
+      <span class="repeater-row-title" data-repeater-title data-title-keys="{{ opts.title|join(' ') }}">{{ title }}</span>
+      {%- if opts.summary %}
+      <span class="repeater-row-meta" data-repeater-meta data-summary-key="{{ opts.summary }}">{{ row.get(opts.summary) or '' }}</span>
+      {%- endif %}
+    </button>
+    {%- if extra %}{{ extra(row, 'head') }}{% endif %}
+    {%- if toggle %}
+    {%- set cid = field_id ~ '-' ~ idx ~ '-' ~ toggle.name %}
+    <label class="dx-toggle-switch repeater-row-toggle" for="{{ cid }}" title="{{ toggle.label }}" data-repeater-toggle-label="{{ toggle.label }}">
+      <input type="checkbox" id="{{ cid }}" data-repeater-key="{{ toggle.name }}" data-repeater-type="boolean"
+             aria-label="{{ title }}: {{ toggle.label }}"
+             {% if form %}form="{{ form }}"{% endif %}{% if row.get(toggle.name) %} checked{% endif %}>
+      <span class="dx-toggle-track" aria-hidden="true"><span class="dx-toggle-knob"></span></span>
+    </label>
+    {%- endif %}
+    <span class="repeater-row-chev" aria-hidden="true"><i class="ph ph-caret-right"></i></span>
+  </div>
+  <div class="repeater-row-body" id="{{ body_id }}" data-repeater-body>
+    <div class="repeater-row-fields">
+    {%- for sub in view.subs if not (toggle and sub.name == toggle.name) %}
+      {{ _repeater_sub(field_id, sub, row.get(sub.name), idx, form, readonly=picked.fixed and sub.name in opts.fixed) }}
+    {%- endfor %}
+    </div>
+    {%- if extra %}{{ extra(row, 'body') }}{% endif %}
+    <div class="repeater-row-actions">
+      {{ _repeater_moves(view, 'dx-btn-ghost-sm dx-btn-icon-only') }}
+      <button type="button" class="dx-btn-ghost-sm repeater-remove" data-repeater-remove aria-label="Remove {{ view.row_label }}"
+              {%- if picked.fixed %} aria-disabled="true" title="Built in: switch it off instead"{% endif %}><i class="ph ph-trash" aria-hidden="true"></i><span>Remove</span></button>
+    </div>
+  </div>
+</li>
+{%- endmacro -%}
+
+{#- ``layout="list"`` draws the rows as a list (``_repeater_list_row``)
+   rather than cards of fields. Its caller shows the field's label and help
+   (an admin page's card does, as its title and description), so the list
+   carries neither. Two optional macros let an admin page add to it:
+   ``row_extra(row, part)`` draws extra content in a row's head (``part`` is
+   "head", beside the switch) and body ("body", under the fields), and
+   ``foot_extra()`` draws in the foot, where the Add button is. -#}
+{%- macro repeater_field(field_id, name, label, spec, value=None, help=None, form=None, layout='cards', row_extra=None, foot_extra=None) -%}
 {%- set view = repeater_view(spec, value) -%}
-<div class="field field--repeater{% if collapsible %} repeater--collapsible{% endif %}" data-repeater role="group" aria-labelledby="{{ field_id }}-label"
+{%- set as_list = layout == 'list' -%}
+{%- set row = _repeater_list_row if as_list else _repeater_row -%}
+<div class="field field--repeater{% if as_list %} repeater--list{% endif %}" data-repeater role="group" aria-labelledby="{{ field_id }}-label"
      data-repeater-min="{{ view.min_rows }}" data-repeater-max="{{ view.max_rows }}"
      data-repeater-row-label="{{ view.row_label }}" data-repeater-id="{{ field_id }}">
-  <span class="field-label" id="{{ field_id }}-label">{{ label }}{% if not collapsible %}{{ info_pop(help) }}{% endif %}</span>
+  <span class="field-label{% if as_list %} sr-only{% endif %}" id="{{ field_id }}-label">{{ label }}{% if not as_list %}{{ info_pop(help) }}{% endif %}</span>
   <input type="hidden" name="{{ name }}" value="{{ view.rows|tojson|forceescape }}"
          data-repeater-storage {% if form %}form="{{ form }}"{% endif %}>
+  {%- if as_list %}
+  {%- set toggle = view.subs|selectattr('type', 'equalto', 'boolean')|first %}
+  <div class="repeater-list-head" aria-hidden="true">
+    <span>{{ view.row_label }}</span>{% if toggle %}<span>{{ toggle.label }}</span>{% endif %}
+  </div>
+  {%- endif %}
   <ol class="repeater-list" data-repeater-list>
-    {%- for row in view.rows %}
-    {{ _repeater_row(field_id, view, row, loop.index0, form, collapsible) }}
+    {%- for item in view.rows %}
+    {{ row(field_id, view, item, loop.index0, form, row_extra) if as_list else row(field_id, view, item, loop.index0, form) }}
     {%- endfor %}
   </ol>
   <p class="repeater-empty" data-repeater-empty{% if view.rows %} hidden{% endif %}>Nothing here yet.</p>
-  <template data-repeater-template>{{ _repeater_row(field_id, view, view.defaults, '__i__', form, collapsible) }}</template>
+  {%- if as_list %}
+  <noscript><p class="field-help">Changing, adding or moving {{ view.row_label|lower }}s here needs JavaScript; the other settings save without it.</p></noscript>
+  {%- endif %}
+  <template data-repeater-template>{{ row(field_id, view, view.defaults, '__i__', form) }}</template>
   <div class="repeater-foot">
-    <button type="button" class="repeater-add" data-repeater-add
+    {%- if view.list.add or not as_list %}
+    <button type="button" class="repeater-add{% if as_list %} dx-btn-ghost-sm{% endif %}" data-repeater-add
             {% if view.rows|length >= view.max_rows %}aria-disabled="true"{% endif %}>
       <i class="ph ph-plus" aria-hidden="true"></i><span>{{ view.add_label }}</span>
     </button>
-    {% if collapsible %}{{ info_pop(help) }}{% endif %}
+    {%- endif %}
+    {%- if foot_extra %}{{ foot_extra() }}{% endif %}
     <span class="repeater-count" data-repeater-count>{{ view.rows|length }} of at most {{ view.max_rows }}</span>
   </div>
   <span class="sr-only" data-repeater-status aria-live="polite"></span>

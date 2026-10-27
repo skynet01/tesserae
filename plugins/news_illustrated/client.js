@@ -24,9 +24,24 @@ function formatDate(iso, locale) {
 
 // Summary lines that fit the caption, worked out in the units the type is set
 // in (cqw when tall, cqh when wide) so the answer holds at any cell size or zoom.
-function summaryLines(w, h, wide, hasArt) {
+const clampPx = (low, value, high) => Math.max(low, Math.min(high, value));
+
+export function summaryLines(w, h, wide, hasArt, titleChars = 60) {
   if (!w || !h) return 6;
-  if (wide) return hasArt ? 12 : 14;
+  if (wide) {
+    // Beside the picture: what is left of the height once the headline
+    // (up to four lines) and the source line are set, in summary lines, so
+    // a short landscape screen gets a shorter summary rather than one cut
+    // off at the foot.
+    const artW = hasArt ? Math.min((h * 9) / 16, 0.55 * w) : 0;
+    const textW = Math.max(1, w - artW - 0.1 * h);
+    const titleFont = clampPx(13, 0.06 * h, 64);
+    const titleLines = Math.min(4, Math.ceil((titleChars * 0.62 * titleFont) / textW));
+    const metaH = clampPx(9, 0.026 * h, 22) * 1.6 + 0.022 * h;
+    const lineH = clampPx(11, 0.034 * h, 32) * 1.45;
+    const room = h * 0.88 - metaH - titleLines * titleFont * 1.12 - 0.044 * h;
+    return Math.max(0, Math.min(hasArt ? 12 : 14, Math.floor(room / lineH) - 1));
+  }
   const heightInCqw = (100 * h) / w;
   const room = (hasArt ? 0.3 : 0.85) * heightInCqw - 26;
   return Math.max(0, Math.min(14, Math.floor(room / 3.4)));
@@ -61,8 +76,12 @@ const STYLE = `
   }
 
   /* Wide cells: picture on the left at its own 9:16, text beside it. */
-  .is-wide { display: grid; grid-template-columns: auto minmax(0, 1fr); }
-  .is-wide .art { position: relative; inset: auto; height: 100%; aspect-ratio: 9 / 16; max-width: 55cqw; }
+  /* One row the cell's height: the picture's width follows from it (9:16),
+     never the other way round, which on a short landscape screen made the
+     row taller than the cell and cut the summary off at the foot. */
+  .is-wide { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: minmax(0, 100%); }
+  .is-wide .art { position: relative; inset: auto; height: 100%; width: auto; aspect-ratio: 9 / 16; max-width: 55cqw; min-height: 0; }
+  .is-wide .art img { object-position: center; }
   .is-wide .cap {
     position: static; justify-content: center; gap: 2.2cqh;
     padding: 6cqh 5cqh; background: #000;
@@ -131,7 +150,7 @@ export default function render(shadow, ctx) {
 
   const hasArt = Boolean(data.image);
   const wide = hasArt && w > h * 1.15;
-  const lines = summaryLines(w, h, wide, hasArt);
+  const lines = summaryLines(w, h, wide, hasArt, String(data.title || "").length);
   const showSummary = opts.show_summary !== false && data.summary && lines >= 2;
   const showMeta = opts.show_source !== false;
   const date = formatDate(data.date, ctx?.locale);

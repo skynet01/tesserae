@@ -48,6 +48,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,74 @@ def subfields(field: Mapping[str, Any]) -> list[dict[str, Any]]:
         and isinstance(sub.get("name"), str)
         and sub.get("type") in SUBFIELD_TYPES
     ]
+
+
+def list_options(field: Mapping[str, Any]) -> dict[str, Any]:
+    """How the list layout (an admin page's ``repeater_layout="list"``) draws
+    the rows, from the spec's optional ``"list"`` object:
+
+    * ``title``: sub-field names tried in turn for a row's title; by
+      default the first ``string`` sub-field.
+    * ``summary``: the sub-field shown on one line beside the title; by
+      default the first ``textarea``.
+    * ``fixed``: ``{sub-field: [values]}``. A row holding one of those
+      values can't be removed, and that sub-field is read-only in it.
+    * ``add``: false leaves out the Add button, for a page that adds rows
+      its own way.
+
+    Anything that doesn't fit falls back to the default; :func:`spec_errors`
+    reports it for a manifest author."""
+    subs = subfields(field)
+    names = {sub["name"]: sub["type"] for sub in subs}
+    raw = field.get("list")
+    spec = raw if isinstance(raw, Mapping) else {}
+    title = spec.get("title")
+    keys = [k for k in title if names.get(k) == "string"] if isinstance(title, list) else []
+    if not keys:
+        keys = [n for n, t in names.items() if t == "string"][:1]
+    summary = spec.get("summary")
+    if not (isinstance(summary, str) and summary in names):
+        summary = next((n for n, t in names.items() if t == "textarea"), None)
+    fixed: dict[str, list[str]] = {}
+    raw_fixed = spec.get("fixed")
+    if isinstance(raw_fixed, Mapping):
+        for key, values in raw_fixed.items():
+            if key in names and isinstance(values, list):
+                fixed[key] = [v for v in values if isinstance(v, str)]
+    return {"title": keys, "summary": summary, "fixed": fixed, "add": spec.get("add") is not False}
+
+
+def _list_errors(field: Mapping[str, Any]) -> list[str]:
+    raw = field.get("list")
+    if raw is None:
+        return []
+    if not isinstance(raw, Mapping):
+        return ["list must be an object"]
+    names = {sub["name"]: sub["type"] for sub in subfields(field)}
+    errors = []
+    unknown = sorted(set(raw) - {"title", "summary", "fixed", "add"})
+    if unknown:
+        errors.append(f"list has unknown keys: {', '.join(unknown)}")
+    title = raw.get("title")
+    if title is not None and (
+        not isinstance(title, list) or not all(names.get(k) == "string" for k in title)
+    ):
+        errors.append("list.title must be a list of string sub-field names")
+    summary = raw.get("summary")
+    if summary is not None and summary not in names:
+        errors.append("list.summary must name a sub-field")
+    fixed = raw.get("fixed")
+    if fixed is not None and (
+        not isinstance(fixed, Mapping)
+        or not all(
+            k in names and isinstance(v, list) and all(isinstance(x, str) for x in v)
+            for k, v in fixed.items()
+        )
+    ):
+        errors.append("list.fixed must map sub-field names to lists of strings")
+    if "add" in raw and not isinstance(raw["add"], bool):
+        errors.append("list.add must be true or false")
+    return errors
 
 
 def _int_or(value: Any, fallback: int) -> int:
@@ -420,6 +489,8 @@ def _subfield_errors(sub: Any, index: int, seen: set[str]) -> list[str]:
             errors.append(f"{where}.pattern only applies to string")
         elif problem is not None:
             errors.append(f"{where}.pattern {problem}")
+    if "format" in sub and (kind != "string" or sub.get("format") != "url"):
+        errors.append(f'{where}: format is only "url", on a string sub-field')
     if "unique" in sub and kind not in ("string", "select"):
         errors.append(f"{where}.unique only applies to string and select")
     if kind == "select":
@@ -486,6 +557,7 @@ def spec_errors(field: Mapping[str, Any]) -> list[str]:
         value = field.get(key)
         if value is not None and (not isinstance(value, str) or len(value) > MAX_LABEL_CHARS):
             errors.append(f"{key} must be a string of at most {MAX_LABEL_CHARS} characters")
+    errors.extend(_list_errors(field))
     if not errors and "default" in field:
         if not isinstance(field["default"], list):
             errors.append("default must be a list of rows")
@@ -545,6 +617,15 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str, *, is_default: b
             if isinstance(hint, str) and hint.strip():
                 raise RepeaterValueError(f"{where}: {label}: {hint.strip()}")
             raise RepeaterValueError(f"{where}: {label} is not in the expected format")
+        if (
+            kind == "string"
+            and sub.get("format") == "url"
+            and value.strip()
+            and not is_web_address(value.strip())
+        ):
+            raise RepeaterValueError(
+                f"{where}: {label} must be a web address starting with https:// or http://"
+            )
         return value
     if kind == "boolean":
         if isinstance(raw, bool):
@@ -587,6 +668,19 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str, *, is_default: b
                 return value
         raise RepeaterValueError(f"{where}: {raw!r} isn't one of the choices for {label}")
     raise RepeaterValueError(f"{where}: {label} has an unsupported type")
+
+
+def is_web_address(text: str) -> bool:
+    """Whether ``text`` is an http(s) address with a host that parses (a
+    ``format: "url"`` sub-field). Where it points isn't judged here."""
+    if any(c.isspace() for c in text):
+        return False
+    try:
+        parts = urlsplit(text)
+        _ = parts.port
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
 def _is_blank(value: Any) -> bool:
@@ -639,6 +733,17 @@ def parse_rows(field: Mapping[str, Any], raw: Any) -> list[dict[str, Any]]:
                 seen[name].add(key)
             row[name] = value
         rows.append(row)
+    # A fixed row (``list.fixed``) is part of the setting, whichever page or
+    # request saves it: it can't be left out, and its value there can't change.
+    for key, values in list_options(field)["fixed"].items():
+        have = {str(row.get(key) or "").strip() for row in rows}
+        for value in values:
+            if value not in have:
+                row_label = field.get("row_label") or "row"
+                raise RepeaterValueError(
+                    f"{label}: the {value} {str(row_label).lower()} is built in and can't be "
+                    "removed or renamed (switch it off instead)"
+                )
     return rows
 
 
@@ -765,4 +870,5 @@ def view(field: Mapping[str, Any], value: Any) -> dict[str, Any]:
         "max_rows": max_rows(field),
         "add_label": add_label if isinstance(add_label, str) and add_label.strip() else "Add row",
         "row_label": row_label if isinstance(row_label, str) and row_label.strip() else "Row",
+        "list": list_options(field),
     }

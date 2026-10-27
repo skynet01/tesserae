@@ -200,3 +200,30 @@ def test_redirect_hops_are_capped(monkeypatch: pytest.MonkeyPatch) -> None:
     _hops(monkeypatch, [_moved("/again", []) for _ in range(10)], seen)
     assert net.request("https://a.example.com/a", timeout=5).error == "too many redirects"
     assert len(seen) == net.MAX_REDIRECTS + 1
+
+
+def test_a_rebinding_host_never_reaches_a_private_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first lookup (the check) says public, every later one loopback:
+    the request is refused or goes to the public address, never loopback."""
+    import socket
+
+    from app import net_guard
+
+    answers = iter(["93.184.216.34"])
+
+    def rebinding(host: str, *a: Any, **k: Any) -> Any:
+        ip = next(answers, "127.0.0.1")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    connected: list[tuple[str, int]] = []
+
+    def connect(address: tuple[str, int], *a: Any, **k: Any) -> Any:
+        connected.append(address)
+        raise OSError("test: no sockets")
+
+    monkeypatch.setattr(net_guard.socket, "getaddrinfo", rebinding)
+    monkeypatch.setattr(net_guard.socket, "create_connection", connect)
+    reply = net.request("http://rebind.example/feed", timeout=2)
+    assert reply.status == 0 and reply.error
+    # Only ever the checked address, never the name resolved again.
+    assert connected in ([], [("93.184.216.34", 80)])

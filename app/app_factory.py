@@ -1443,7 +1443,7 @@ def create_app(
             "online_features_unanswered": online_unanswered,
             "nav_admin_plugins": sorted(
                 (p for p in registry.plugins.values() if p.has_admin),
-                key=lambda p: p.name.lower(),
+                key=lambda p: p.admin_title.lower(),
             ),
             "nav_batteries": _collect_battery_status(app),
             # Heard-but-unregistered devices; lights the topbar chip that

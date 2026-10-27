@@ -99,7 +99,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, tzinfo
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from types import ModuleType
@@ -110,6 +110,7 @@ from flask import Blueprint, abort, current_app, render_template, send_from_dire
 from PIL import Image
 from werkzeug.wrappers import Response
 
+from app import media_lifecycle as lifecycle
 from app.plugin_http import fetch_text
 
 try:
@@ -181,6 +182,13 @@ HOST_FOLLOW_UPS = 8
 
 LOOKBACK_DAYS = 3  # today, yesterday, the day before
 RECHECK_S = 30 * 60  # how often to look again for an edition not out yet
+# A paper no render has asked for in this long (taken off the list, its
+# pinned cell gone) loses its pages, its newest included.
+ORPHAN_AFTER_S = 2 * 86400
+WANTED_REFRESH_S = 3600
+# The pages folder stays under this; past it the oldest pages that aren't a
+# listed paper's newest go first.
+MAX_BYTES = 300 * 1024 * 1024
 KEEP_DAYS = 5
 LAST_GOOD_MAX_DAYS = 30
 # A Last-Modified this many days before the edition date is last month's file.
@@ -723,6 +731,21 @@ def _unlink_if_same(path: Path, identity: tuple[int, int, int] | None) -> bool:
 # ----- downloading (worker thread only) --------------------------------------
 
 
+def _short(err: object) -> str:
+    """An error as one short line for the log: what Freedom Forum or the
+    network said. Nothing here carries a secret (the widget has none)."""
+    text = " ".join(str(err).split()) or type(err).__name__
+    return text if len(text) <= 120 else text[:119] + "\u2026"
+
+
+def _kb(size: int) -> str:
+    return (
+        f"{size / 1024 / 1024:.1f} MB"
+        if size >= 1024 * 1024
+        else f"{max(1, round(size / 1024))} KB"
+    )
+
+
 def _edition_today() -> date:
     return datetime.now(_EDITION_TZ).date()
 
@@ -884,7 +907,21 @@ def rasterise_pdf(
     return done.stdout
 
 
-def _pdf_edition(code: str, day: date, deadline: float, *, quiet: bool) -> bytes | None:
+@dataclass
+class Trace:
+    """What one ``download_edition`` call did, for the worker's log: where
+    the page it returned came from, and why the PDF or the JPEG wasn't used
+    when it wasn't."""
+
+    source: str = ""  # "PDF" or "JPG"
+    pdf: str = ""
+    jpg: str = ""
+    no_rasteriser: bool = False  # pypdfium2 missing: the JPEG is all there is
+
+
+def _pdf_edition(
+    code: str, day: date, deadline: float, *, quiet: bool, trace: Trace
+) -> bytes | None:
     """The ``code`` front page for ``day`` drawn from its PDF, or None when
     there's no PDF or it can't be drawn. With ``quiet`` a CDN failure is a
     None too, and the JPEG fallback after it decides whether Freedom Forum
@@ -894,28 +931,43 @@ def _pdf_edition(code: str, day: date, deadline: float, *, quiet: bool) -> bytes
             PDF_URL.format(day=day.day, code=code), deadline, MAX_PDF_BYTES, "application/pdf"
         )
     except CdnUnreachable as err:
+        trace.pdf = f"unreachable ({_short(err)})"
         if not quiet:
             raise
         logger.info("%s: %s PDF for %s unavailable (%s)", PLUGIN_ID, code, day, err)
         return None
     if got is None:
+        trace.pdf = "not out yet"
         return None
     body, last_modified = got
     if len(body) > MAX_PDF_BYTES or _slot_is_stale(last_modified, day):
+        trace.pdf = "refused (too big, or last month's file)"
         logger.info("%s: %s PDF for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
         return None
     if not body.startswith(b"%PDF"):
+        trace.pdf = "not a PDF"
         logger.info("%s: %s PDF for %s is not a PDF", PLUGIN_ID, code, day)
         return None
     left = deadline - _clock()
     if left < RASTER_MIN_S:
+        trace.pdf = "no time left to draw it"
         logger.info("%s: no time left to draw the %s PDF for %s", PLUGIN_ID, code, day)
         return None
-    return rasterise_pdf(body, timeout=left)
+    page = rasterise_pdf(body, timeout=left)
+    if page is None:
+        trace.pdf = f"didn't draw ({_kb(len(body))})"
+    else:
+        trace.source = "PDF"
+    return page
 
 
 def download_edition(
-    code: str, day: date, deadline: float | None = None, *, pdf_only: bool = False
+    code: str,
+    day: date,
+    deadline: float | None = None,
+    *,
+    pdf_only: bool = False,
+    trace: Trace | None = None,
 ) -> bytes | None:
     """The ``code`` front page for ``day``, validated, or None when that
     edition isn't there. The PDF comes first, drawn at panel width; the
@@ -923,17 +975,24 @@ def download_edition(
     ``pdf_only``. The two share one ``DOWNLOAD_BUDGET_S`` window (and
     ``deadline``, on ``_clock``), of which the PDF, download and drawing
     together, leaves ``JPEG_RESERVE_S`` for the JPEG. Raises
-    :class:`CdnUnreachable` when the CDN fails or the time runs out."""
+    :class:`CdnUnreachable` when the CDN fails or the time runs out.
+    ``trace``, when given, is filled in for the worker's log."""
+    trace = trace if trace is not None else Trace()
     deadline = min(deadline if deadline is not None else math.inf, _clock() + DOWNLOAD_BUDGET_S)
     if deadline <= _clock():
         raise CdnUnreachable("out of time")
-    if pdf_only:
-        return _pdf_edition(code, day, deadline, quiet=False) if rasteriser_available() else None
-    pdf_deadline = deadline - JPEG_RESERVE_S
-    if rasteriser_available() and pdf_deadline > _clock():
-        sharp = _pdf_edition(code, day, pdf_deadline, quiet=True)
+    if not rasteriser_available():
+        trace.no_rasteriser = True
+        if pdf_only:
+            return None
+    elif pdf_only:
+        return _pdf_edition(code, day, deadline, quiet=False, trace=trace)
+    elif deadline - JPEG_RESERVE_S > _clock():
+        sharp = _pdf_edition(code, day, deadline - JPEG_RESERVE_S, quiet=True, trace=trace)
         if sharp is not None:
             return sharp
+    else:
+        trace.pdf = "skipped, no time left"
     got = _get(
         PAGE_URL.format(day=day.day, code=code),
         deadline,
@@ -941,14 +1000,18 @@ def download_edition(
         "image/jpeg,image/*;q=0.8",
     )
     if got is None:
+        trace.jpg = "not out yet"
         return None
     body, last_modified = got
     if len(body) > MAX_IMAGE_BYTES or _slot_is_stale(last_modified, day):
+        trace.jpg = "refused (too big, or last month's file)"
         logger.info("%s: %s for %s refused (oversized or stale slot)", PLUGIN_ID, code, day)
         return None
     if page_size(body) is None:
+        trace.jpg = "not an image"
         logger.info("%s: %s for %s is not an image", PLUGIN_ID, code, day)
         return None
+    trace.source = "JPG"
     return body
 
 
@@ -1003,12 +1066,23 @@ def _claim(page: Page) -> bool:
     return True
 
 
-def prune(pages: Path, today: date, now: float) -> None:
+def prune(
+    pages: Path,
+    today: date,
+    now: float,
+    wanted: set[str] | None = None,
+    max_bytes: int | None = None,
+) -> list[str]:
     """Drop editions past ``KEEP_DAYS`` unless they are a paper's newest (its
-    last good page), everything past ``LAST_GOOD_MAX_DAYS``, and temp files an
-    interrupted write left behind; each only once it has gone unused for
-    ``PRUNE_GRACE_S``, since a renderer may still be loading a page a render
-    handed out a moment ago."""
+    last good page), everything past ``LAST_GOOD_MAX_DAYS``, a paper's pages
+    once no render has asked for it in ``ORPHAN_AFTER_S`` (a paper taken off
+    the list; ``wanted`` is the codes still asked for, when known), and temp
+    files an interrupted write left behind; each only once it has gone unused
+    for ``PRUNE_GRACE_S``, since a renderer may still be loading a page a
+    render handed out a moment ago. Then, while the folder is over
+    ``max_bytes`` (default MAX_BYTES), the oldest pages that aren't a wanted
+    paper's newest go first (app.media_lifecycle); a wanted paper's newest
+    page, the one on screen, never does. Returns the files deleted."""
     found: list[tuple[Path, str, date]] = []
     newest: dict[str, date] = {}
     for path in pages.glob("*.jpg"):
@@ -1019,12 +1093,34 @@ def prune(pages: Path, today: date, now: float) -> None:
     doomed = list(pages.glob(".*.tmp"))
     for path, code, day in found:
         age = (today - day).days
-        if age > LAST_GOOD_MAX_DAYS or (age > KEEP_DAYS and day != newest[code]):
+        orphan = wanted is not None and code not in wanted
+        if age > LAST_GOOD_MAX_DAYS or ((age > KEEP_DAYS or orphan) and day != newest[code]):
             doomed.append(path)
+        elif orphan:
+            doomed.append(path)  # the newest of a paper nobody asks for any more
+    gone: list[str] = []
     for path in doomed:
         identity = _identity(path)
-        if identity is not None and now - identity[2] / 1e9 > PRUNE_GRACE_S:
-            _unlink_if_same(path, identity)
+        if (
+            identity is not None
+            and now - identity[2] / 1e9 > PRUNE_GRACE_S
+            and _unlink_if_same(path, identity)
+        ):
+            gone.append(path.name)
+    protected = {
+        edition_path(pages, code, day).name
+        for code, day in newest.items()
+        if wanted is None or code in wanted
+    }
+    gone += lifecycle.sweep(
+        pages,
+        keep=protected,
+        max_bytes=MAX_BYTES if max_bytes is None else max_bytes,
+        grace_s=float("inf"),
+        now=now,
+        pattern="*.jpg",
+    )
+    return gone
 
 
 def _saved_width(path: Path) -> int | None:
@@ -1113,9 +1209,19 @@ def _section(state: dict[str, Any], name: str) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _recently_checked(state: dict[str, Any], code: str, now: float) -> bool:
+def _recently_checked(
+    state: dict[str, Any], code: str, now: float, today: date | None = None
+) -> bool:
+    """Whether ``code`` should wait before it is asked for again: tried in
+    the last RECHECK_S, or today's edition is on app.media_lifecycle's
+    backoff (30 minutes doubling, a few tries a day) after failed tries."""
     last = _section(state, "checked").get(code)
-    return isinstance(last, (int, float)) and 0 <= now - last < RECHECK_S
+    if isinstance(last, (int, float)) and 0 <= now - last < RECHECK_S:
+        return True
+    if today is None:
+        return False
+    retry = _section(state, "retry").get(code)
+    return not lifecycle.may_try(retry if isinstance(retry, dict) else None, today.isoformat(), now)
 
 
 # ----- the download worker ---------------------------------------------------
@@ -1263,8 +1369,9 @@ def _work(run: _Run) -> None:
             _refresh(run.data_dir, job)
             with _RUNS_LOCK:
                 run.active = None
-    except Exception:
+    except Exception as err:
         logger.exception("%s: the download worker stopped", PLUGIN_ID)
+        _log_stop(run.data_dir, err)
     finally:
         with _RUNS_LOCK:
             run.active = None
@@ -1278,12 +1385,13 @@ def _refresh(data_dir: Path, job: _Job) -> None:
     """One job: look at the state again (the render that queued it read it
     before earlier jobs landed), download outside the lock, save under it.
     Today's page already saved as the blurry JPEG fallback is redrawn from
-    the PDF when that may now work (``_wants_sharper``)."""
+    the PDF when that may now work (``_wants_sharper``). What it asked for
+    and got goes to the log the admin page shows (``state["log"]``)."""
     pages = data_dir / PAGES_DIR
     state_path = data_dir / STATE_FILE
     with _LOCK:
         state = _read_json(state_path)
-        if not job.force and _recently_checked(state, job.code, _wall()):
+        if not job.force and _recently_checked(state, job.code, _wall(), job.today):
             return
         have = newest_page(pages, job.code, job.today)
     current = have is not None and have.day >= job.today
@@ -1294,29 +1402,44 @@ def _refresh(data_dir: Path, job: _Job) -> None:
     )
     if current and not sharpen:
         return
+    notes: list[tuple[float, str]] = []
+
+    def note(text: str) -> None:
+        notes.append((_wall(), text))
+
+    if sharpen and have is not None:
+        tries = _pdf_retry(state, job.code, have.day)[0]
+        which = f"try {tries + 1} of {PDF_MAX_TRIES}" if tries < PDF_MAX_TRIES else "a refresh"
+        note(f"{have.day}: saved from the JPG, asking for the PDF again ({which})")
     saved: tuple[date, bytes] | None = None
+    saved_how: tuple[Trace, float] | None = None
     failure = "missing"
     deadline = _clock() + JOB_BUDGET_S
     for back in range(LOOKBACK_DAYS):
         day = job.today - timedelta(days=back)
         if have is not None and (day < have.day or (day == have.day and not sharpen)):
             break  # nothing older can beat an edition already kept
+        trace = Trace()
+        started = _clock()
         try:
-            body = download_edition(job.code, day, deadline, pdf_only=sharpen)
+            body = download_edition(job.code, day, deadline, pdf_only=sharpen, trace=trace)
         except Exception as err:  # CdnUnreachable, or the host refusing the egress
             logger.warning("%s: Freedom Forum unreachable (%s)", PLUGIN_ID, err)
+            note(f"{day}: Freedom Forum unreachable ({_short(err)})")
             failure = "unreachable"
             break
         if body is not None:
             saved = (day, body)
+            saved_how = (trace, max(0.0, _clock() - started))
             break
+        note(f"{day}: {_not_found(trace, pdf_only=sharpen)}")
+    size = page_size(saved[1]) if saved is not None else None
     # The edition left on its JPEG by this job, whose PDF is asked for again
     # later: a JPEG saved in its place, or a redraw that came to nothing
     # (no PDF yet, one that didn't draw, an outage).
     blurry_day: date | None = None
     sharp_day: date | None = None
     if saved is not None and rasteriser_available():
-        size = page_size(saved[1])
         if size is not None and size[0] < SHARP_MIN_WIDTH_PX:
             blurry_day = saved[0]
         else:
@@ -1330,9 +1453,27 @@ def _refresh(data_dir: Path, job: _Job) -> None:
                 _write_atomic(edition_path(pages, job.code, saved[0]), saved[1])
             except OSError as err:
                 logger.warning("%s: could not save %s: %s", PLUGIN_ID, job.code, err)
+                note(f"{saved[0]}: downloaded, but couldn't be saved ({_short(err)})")
                 saved = None
+                blurry_day = sharp_day = None
             else:
-                prune(pages, job.today, now)
+                state_now = _read_json(state_path)
+                since = state_now.get("wanted_since")
+                # Only once renders have been tracked for ORPHAN_AFTER_S does
+                # "not asked for" mean anything (an upgrade starts tracking).
+                tracked = isinstance(since, (int, float)) and now - since >= ORPHAN_AFTER_S
+                wanted = {
+                    code
+                    for code, when in _section(state_now, "wanted").items()
+                    if isinstance(when, (int, float)) and now - when < ORPHAN_AFTER_S
+                }
+                prune(pages, job.today, now, wanted if tracked and wanted else None)
+                note(f"{saved[0]}: {_saved_line(saved[1], size, saved_how, redraw=sharpen)}")
+        if saved is None and not sharpen:
+            if have is not None:
+                note(f"keeping the {have.day} page")
+            elif failure == "missing":
+                note(f"no page in the last {LOOKBACK_DAYS} days")
         state = _read_json(state_path)
         state["checked"] = {
             code: when
@@ -1344,6 +1485,26 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if saved is None and have is None:
             failed[job.code] = failure
         state["failed"] = failed
+        # Today's edition still missing (not out yet, or the CDN failing):
+        # back off before asking again; the last good page stays up.
+        backoff = _section(state, "retry")
+        got_today = (saved is not None and saved[0] >= job.today) or current
+        if got_today:
+            backoff.pop(job.code, None)
+        else:
+            entry = backoff.get(job.code)
+            backoff[job.code] = lifecycle.failed(
+                entry if isinstance(entry, dict) else None, job.today.isoformat(), now
+            )
+            note(
+                f"today's edition: {lifecycle.describe(backoff[job.code], job.today.isoformat(), now)}"
+            )
+        today_iso = job.today.isoformat()
+        state["retry"] = {
+            code: entry
+            for code, entry in backoff.items()
+            if isinstance(entry, dict) and entry.get("day") == today_iso
+        }
         oldest = (job.today - timedelta(days=LOOKBACK_DAYS)).isoformat()
         retry = {
             code: entry
@@ -1352,15 +1513,98 @@ def _refresh(data_dir: Path, job: _Job) -> None:
             and isinstance(entry.get("day"), str)
             and entry["day"] >= oldest
         }
-        if blurry_day is not None:
+        if blurry_day is not None and blurry_day < job.today:
+            # Only today's edition is ever redrawn (_wants_sharper runs for
+            # today's page), so an earlier one gets no retry record.
+            retry.pop(job.code, None)
+            note(f"{blurry_day}: keeping the JPG, an earlier edition's PDF isn't asked for again")
+        elif blurry_day is not None:
             tries = _pdf_retry(state, job.code, blurry_day)[0] + 1
             wait = min(PDF_RETRY_S * 2 ** min(tries - 1, 16), PDF_RETRY_MAX_S)
             retry[job.code] = {"day": blurry_day.isoformat(), "tries": tries, "after": now + wait}
+            if tries < PDF_MAX_TRIES:
+                note(f"{blurry_day}: PDF asked for again in {_duration(wait)}")
+            else:
+                note(f"{blurry_day}: no more PDF tries for this edition, keeping the JPG")
         elif sharp_day is not None:
             retry.pop(job.code, None)
         state["pdf_retry"] = retry
         state.pop("jpeg_only", None)  # this file's earlier, give-up-for-the-day record
+        _append_log(state, job.code, notes)
         _write_json(state_path, state)
+
+
+# ----- the worker's log --------------------------------------------------------
+#
+# The admin page shows what the worker did, newest last: per paper, the
+# editions it asked for, where each saved page came from (the PDF drawn at
+# panel width, or the JPEG fallback), its size and how long it took, the PDF
+# retries and the failures. The lines live in state.json, at most LOG_LINES
+# of them. They hold paper codes, dates and what Freedom Forum or the network
+# answered; the widget has no secrets to leak into them.
+
+LOG_LINES = 150
+
+
+def _not_found(trace: Trace, *, pdf_only: bool) -> str:
+    if pdf_only:
+        return f"PDF {trace.pdf or 'not drawn'}"
+    if trace.pdf in ("", "not out yet") and trace.jpg == "not out yet":
+        return "not out yet"
+    parts = [f"PDF {trace.pdf}" if trace.pdf else "", f"JPG {trace.jpg}" if trace.jpg else ""]
+    return ", ".join(part for part in parts if part) or "not found"
+
+
+def _saved_line(
+    body: bytes, size: tuple[int, int] | None, how: tuple[Trace, float] | None, *, redraw: bool
+) -> str:
+    trace, took = how if how is not None else (Trace(), 0.0)
+    source = trace.source or ("PDF" if size and size[0] >= SHARP_MIN_WIDTH_PX else "JPG")
+    dims = f"{size[0]}\u00d7{size[1]} px, " if size else ""
+    line = f"{'redrawn from the PDF' if redraw else source}, {dims}{_kb(len(body))} in {took:.1f} s"
+    if source == "JPG" and trace.pdf:
+        line += f" (PDF {trace.pdf})"
+    elif source == "JPG" and trace.no_rasteriser:
+        line += " (no PDF drawing here: pypdfium2 isn't installed)"
+    return line
+
+
+def _duration(seconds: float) -> str:
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    return f"{minutes / 60:g} h" if minutes % 60 == 0 else f"{minutes // 60} h {minutes % 60} min"
+
+
+def _log_entries(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    return [
+        entry
+        for entry in raw
+        if isinstance(entry, dict)
+        and isinstance(entry.get("at"), (int, float))
+        and isinstance(entry.get("code"), str)
+        and isinstance(entry.get("text"), str)
+    ]
+
+
+def _append_log(state: dict[str, Any], code: str, notes: list[tuple[float, str]]) -> None:
+    """Add ``notes`` to the state's log for ``code``, keeping the newest
+    ``LOG_LINES``. Callers hold ``_LOCK``."""
+    if not notes:
+        return
+    entries = _log_entries(state.get("log"))
+    entries += [{"at": at, "code": code, "text": text} for at, text in notes]
+    state["log"] = entries[-LOG_LINES:]
+
+
+def _log_stop(data_dir: Path, err: BaseException) -> None:
+    """Note in the log that the worker stopped on an error (a bug)."""
+    with contextlib.suppress(Exception), _LOCK:
+        state = _read_json(data_dir / STATE_FILE)
+        _append_log(state, "", [(_wall(), f"The download worker stopped: {type(err).__name__}")])
+        _write_json(data_dir / STATE_FILE, state)
 
 
 # ----- widget contract: fetch ------------------------------------------------
@@ -1436,14 +1680,33 @@ def _select(
                 break
         # A preview (the editor, the dashboards list) shows what the panel gets
         # next but never moves the rotation; repeating the held paper doesn't either.
+        dirty = False
         if chosen and not pinned and not preview and chosen[0] != held:
             state["current"], state["since"] = chosen[0], now
             state["order"] = list(candidates)  # where to resume if the list changes
+            dirty = True
+        # Which papers renders still ask for, for the cleanup; written at
+        # most hourly per paper so a render rarely writes for it.
+        asked = _section(state, "wanted")
+        for code in candidates:
+            when = asked.get(code)
+            if not isinstance(when, (int, float)) or now - when > WANTED_REFRESH_S:
+                asked[code] = now
+                dirty = True
+        if not isinstance(state.get("wanted_since"), (int, float)):
+            state["wanted_since"] = now
+            dirty = True
+        if dirty:
+            state["wanted"] = {
+                code: when
+                for code, when in asked.items()
+                if isinstance(when, (int, float)) and now - when < ORPHAN_AFTER_S
+            }
             _write_json(state_path, state)
         due = [
             code
             for code in candidates
-            if (force or not _recently_checked(state, code, now))
+            if (force or not _recently_checked(state, code, now, today))
             and (
                 not edition_path(pages, code, today).is_file()
                 or _wants_sharper(
@@ -1475,7 +1738,7 @@ def fetch(
         return {"error": f"'{pinned_raw[:60]}' isn't a Freedom Forum paper code."}
     candidates = [pinned] if pinned else [p.code for p in papers if p.enabled]
     if not candidates:
-        where = "under Settings → Widgets → News, Front Pages"
+        where = "under Widgets → Admin pages → Newspapers"
         if papers:
             return {"error": f"Every paper in the list is switched off. Turn one on {where}."}
         return {"error": f"No papers to show. Add paper codes {where}."}
@@ -1530,6 +1793,8 @@ def fetch(
         # This paper's own CSS, sanitised (see sanitize_css); a pinned paper
         # uses its row's CSS too, whether or not the row is in the rotation.
         "css": styles.get(code, ""),
+        # How client.js fits the page on a smaller screen.
+        "fit": "whole" if settings.get("small_screens") == "whole" else "top",
     }
     _LAST_CLAIMED[key] = (now, payload)
     if code in line:
@@ -1610,6 +1875,103 @@ def choices(name: str) -> list[dict[str, str]]:
     return rows
 
 
+# ----- the admin page ----------------------------------------------------------
+
+
+def _timezone() -> tzinfo | None:
+    """The app's time zone (Settings, else the host's); None is the host's."""
+    try:
+        from app.tz_resolve import app_timezone
+
+        return app_timezone()
+    except Exception:
+        return None
+
+
+def downloads_view(
+    data_dir: Path,
+    tz: tzinfo | None,
+    papers: list[str] | None = None,
+    today: date | None = None,
+) -> dict[str, Any]:
+    """The admin page's Downloads card: what the worker is doing now, the
+    PDF retries that will really run (today's edition of a listed paper,
+    still on its JPEG, with a rasteriser to draw the PDF) or have run out,
+    the listed papers with no page, and its log, oldest line first. Records
+    the worker no longer acts on (an earlier edition's retry, a paper taken
+    off the list) are summed up as history. ``papers`` are the codes in the
+    setting; None counts every code the state names."""
+
+    def when(ts: float, fmt: str) -> str:
+        try:
+            return datetime.fromtimestamp(ts, tz).strftime(fmt)
+        except (OverflowError, OSError, ValueError):  # a hand-edited state file
+            return "?"
+
+    today = today or _edition_today()
+    pages = data_dir / PAGES_DIR
+    state = _read_json(data_dir / STATE_FILE)
+    entries = _log_entries(state.get("log"))
+    listed = set(papers) if papers is not None else None
+    status: list[str] = []
+    line, _ = _line(data_dir)
+    if line:
+        more = f", {len(line) - 1} more waiting" if len(line) > 1 else ""
+        status.append(f"Downloading {line[0]} now{more}.")
+    elif entries:
+        status.append(f"Last activity {when(entries[-1]['at'], '%b %d, %H:%M')}.")
+    else:
+        status.append("Nothing downloaded yet: a render that needs a page asks for it.")
+    waiting, spent, history = [], [], []
+    for code, entry in sorted(_section(state, "pdf_retry").items()):
+        if not isinstance(entry, dict) or not isinstance(entry.get("day"), str):
+            continue
+        tries, after = entry.get("tries"), entry.get("after")
+        if isinstance(tries, bool) or not isinstance(tries, int):
+            continue
+        if not isinstance(after, (int, float)):
+            continue
+        current = (
+            entry["day"] == today.isoformat()
+            and (listed is None or code in listed)
+            and rasteriser_available()
+            and (_saved_width(edition_path(pages, code, today)) or SHARP_MIN_WIDTH_PX)
+            < SHARP_MIN_WIDTH_PX
+        )
+        if not current:
+            history.append(f"{code}'s PDF retry for {entry['day']}")
+        elif tries < PDF_MAX_TRIES:
+            waiting.append(
+                f"{code} (try {tries + 1} of {PDF_MAX_TRIES}, after {when(after, '%H:%M')})"
+            )
+        else:
+            spent.append(code)
+    if waiting:
+        status.append(f"Waiting to ask for the PDF again: {', '.join(waiting)}.")
+    if spent:
+        status.append(f"Out of PDF tries, keeping the JPG: {', '.join(spent)}.")
+    reasons = {
+        "unreachable": "Freedom Forum unreachable",
+        "missing": f"none in the last {LOOKBACK_DAYS} days",
+    }
+    failed = []
+    for code, why in sorted(_section(state, "failed").items()):
+        if listed is None or code in listed:
+            failed.append(f"{code} ({reasons.get(str(why), str(why))})")
+        else:
+            history.append(f"{code}'s failed download")
+    if failed:
+        status.append(f"No page yet for {', '.join(failed)}.")
+    if history:
+        status.append(f"History, no longer acted on: {', '.join(history)}.")
+    width = max((len(e["code"]) for e in entries), default=0)
+    log = [
+        f"{when(e['at'], '%b %d %H:%M:%S')}  {e['code'] or '-':<{width}}  {e['text']}"
+        for e in entries
+    ]
+    return {"status": status, "log": log}
+
+
 # ----- page images -----------------------------------------------------------
 
 
@@ -1619,7 +1981,7 @@ def choices(name: str) -> list[dict[str, str]]:
 RENDER_SAFE_ENDPOINTS: tuple[str, ...] = (f"{PLUGIN_ID}.serve_page",)
 
 
-# Settings and controls belong together under Widgets > Admin pages.
+# Settings and controls belong together under Widgets > Admin pages > Newspapers.
 ADMIN_SETTINGS = True
 
 
@@ -1633,7 +1995,25 @@ def blueprint() -> Blueprint:
         plugin = _plugin()
         if plugin is None:
             abort(404)
-        return render_template("news_front_pages/index.html", section=settings_section(plugin))
+        papers = next(
+            (f for f in plugin.manifest.get("settings", []) if f.get("name") == "papers"), {}
+        )
+        section = settings_section(
+            plugin,
+            title="Papers",
+            blurb=papers.get("help", ""),
+            icon="newspaper",
+            repeater_layout="list",
+        )
+        return render_template(
+            "news_front_pages/index.html",
+            section=section,
+            downloads=downloads_view(
+                Path(plugin.data_dir),
+                _timezone(),
+                [p.code for p in parse_papers(_settings().get("papers", DEFAULT_PAPERS))],
+            ),
+        )
 
     @bp.get("/page/<name>")
     def serve_page(name: str) -> Response:

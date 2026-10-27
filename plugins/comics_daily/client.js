@@ -60,6 +60,15 @@ export function gapsFor(opts, scale = 1) {
   return { gap: gap * scale, min: min * scale, max: max * scale };
 }
 
+// Below this a shrunken comic can't be made out: the cell says so instead.
+export const MIN_ZOOM = 0.15;
+
+// How much to shrink a row that is taller than the space it has.
+export function shrinkFor(height, available) {
+  if (!(height > 0) || !(available > 0) || height <= available) return 1;
+  return Math.floor((available / height) * 1000) / 1000;
+}
+
 // Which rows to keep and the gap between them, given each row's height and
 // the height available. A row taller than the whole box can never show, so
 // it is passed over (a short landscape cell still gets its strips when the
@@ -144,6 +153,10 @@ const STYLE = `
     font-size: clamp(11px, 1.2cqw, 26px); line-height: 1.3;
     text-align: center; overflow-wrap: anywhere;
   }
+  .too-small {
+    margin: auto; font-family: var(--font-family, inherit);
+    font-size: clamp(10px, 40cqh, 16px); color: var(--text-muted); text-align: center;
+  }
   .note {
     flex: none; padding-top: clamp(2px, 0.5cqw, 10px);
     font-family: var(--font-family, inherit); font-size: clamp(10px, 0.95cqw, 20px);
@@ -174,9 +187,10 @@ function settle() {
   return Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, SETTLE_MS))]);
 }
 
-function fit(shadow, opts, wantedPanels) {
+function fit(shadow, opts, wantedPanels, tooSmall) {
   const box = shadow.querySelector(".rows");
   if (!box) return;
+  box.querySelector(".too-small")?.remove();
   const width = box.clientWidth;
   const available = box.clientHeight - SAFETY_PX * scaleFor(width);
   // A detached host has no size; leave the natural flow alone.
@@ -186,28 +200,54 @@ function fit(shadow, opts, wantedPanels) {
   shadow.querySelectorAll(".panel").forEach((panel, i) => { panel.hidden = i >= columns; });
 
   // A strip taller than the box would never fit; narrow it until it does,
-  // so a wide, short cell still shows strips rather than nothing.
+  // so a wide, short cell still shows strips rather than nothing. Narrowed
+  // past MIN_ZOOM of the width it can't be made out, and doesn't count.
+  const unreadable = new Set();
   for (const row of shadow.querySelectorAll(".strip")) {
     const ratio = Number(row.dataset.w) / Number(row.dataset.h);
     const img = row.querySelector("img");
-    if (img && ratio > 0) img.style.maxWidth = `${Math.floor(available * ratio)}px`;
+    if (!img || !(ratio > 0)) continue;
+    img.style.maxWidth = `${Math.floor(available * ratio)}px`;
+    if (available * ratio < MIN_ZOOM * width) unreadable.add(row);
   }
 
   const rows = [...box.querySelectorAll(".row")];
-  rows.forEach((row) => { row.hidden = false; });
-  const heights = rows.map((row) => row.getBoundingClientRect().height);
+  rows.forEach((row) => { row.hidden = false; row.style.zoom = ""; });
+  const heights = rows.map((row) => (unreadable.has(row) ? Infinity : row.getBoundingClientRect().height));
   const plan = planRows(heights, available, gapsFor(opts, scaleFor(width)));
-  // Nothing fits at all (a sliver of a cell): show the first row, clipped,
-  // rather than an empty card.
-  const keep = new Set(plan.keep.length ? plan.keep : [0]);
-  rows.forEach((row, i) => { row.hidden = !keep.has(i); });
+  let keep = plan.keep;
+  if (!keep.length) {
+    // Nothing fits whole (one comic a turn on a small screen, still too
+    // tall): draw the first readable row smaller so it fits, never cut off;
+    // and if even that would be too small to make out (an 800 x 50 sliver),
+    // say so plainly rather than clip it or draw a smudge.
+    const first = rows.findIndex((row) => !unreadable.has(row));
+    const zoom = first >= 0 ? shrinkFor(heights[first], available) : 0;
+    if (zoom < MIN_ZOOM) {
+      rows.forEach((row) => { row.hidden = true; });
+      const note = shadow.ownerDocument?.createElement?.("p");
+      if (note) {
+        note.className = "too-small";
+        note.textContent = tooSmall;
+        box.appendChild(note);
+      }
+      return;
+    }
+    rows[first].style.zoom = String(zoom);
+    keep = [first];
+  }
+  const kept = new Set(keep);
+  rows.forEach((row, i) => { row.hidden = !kept.has(i); });
   box.style.gap = `${plan.gap}px`;
 }
 
 export default async function render(shadow, ctx) {
   const t = ctx?.t || ((key, fallback) => fallback ?? key);
   const data = ctx?.data ?? {};
-  const opts = ctx?.cell?.options || {};
+  // The layout comes from the widget's settings (the Comics admin page),
+  // sent with the data; a cell's own old options only fill in for a server
+  // that doesn't send it.
+  const opts = { ...(ctx?.cell?.options || {}), ...(data.layout || {}) };
   const css = `<link rel="stylesheet" href="/static/style/spectra-widgets.css">`;
 
   if (data.error) {
@@ -248,5 +288,5 @@ export default async function render(shadow, ctx) {
       ${note ? `<div class="note">${escapeHtml(note)}</div>` : ""}
     </div>`;
   await settle();
-  fit(shadow, opts, panels.length);
+  fit(shadow, opts, panels.length, t("too_small", "Too small a space for a comic."));
 }

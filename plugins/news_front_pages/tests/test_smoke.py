@@ -20,7 +20,7 @@ import time
 import types
 import urllib.error
 from collections.abc import Iterator
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -736,6 +736,7 @@ def test_payload_carries_size_and_css(tmp_path: Path, cdn: FakeCdn) -> None:
         "width": 700,
         "height": 1342,
         "css": NYT_CSS,
+        "fit": "top",  # the "On smaller screens" setting
     }
     assert cdn.calls == []
 
@@ -1576,3 +1577,237 @@ def test_choices_fall_back_when_freedom_forum_is_down(app: Flask) -> None:
 
 def test_choices_ignores_other_names() -> None:
     assert server.choices("other") == []
+
+
+# ----- the worker's log, on the admin page -------------------------------------
+
+
+def _log(tmp_path: Path) -> list[str]:
+    return [f"{e['code']} {e['text']}" for e in _state(tmp_path).get("log", [])]
+
+
+def test_the_log_says_what_each_download_got(tmp_path: Path, cdn: FakeCdn) -> None:
+    cdn.pages = {_url("WSJ", 24): PAGE}
+    _fetch_settled(tmp_path, paper="WSJ")
+    assert _log(tmp_path) == [
+        "WSJ 2026-10-25: not out yet",
+        f"WSJ 2026-10-24: JPG, 700×1342 px, {server._kb(len(PAGE))} in 0.0 s"
+        " (no PDF drawing here: pypdfium2 isn't installed)",
+        "WSJ today's edition: next try in 30 min (try 2 of 6)",
+    ]
+
+
+def test_the_log_records_an_outage_and_the_page_kept(tmp_path: Path, cdn: FakeCdn) -> None:
+    _seed(tmp_path, "NY_NYT_20261024.jpg")
+    cdn.down = True
+    _fetch_settled(tmp_path, paper="NY_NYT")
+    assert _log(tmp_path) == [
+        "NY_NYT 2026-10-25: Freedom Forum unreachable (connection refused)",
+        "NY_NYT keeping the 2026-10-24 page",
+        "NY_NYT today's edition: next try in 30 min (try 2 of 6)",
+    ]
+    cdn.down = False
+    _fetch_settled(tmp_path, paper="USAT", fresh=True)
+    assert _log(tmp_path)[3:] == [
+        "USAT 2026-10-25: not out yet",
+        "USAT 2026-10-24: not out yet",
+        "USAT 2026-10-23: not out yet",
+        "USAT no page in the last 3 days",
+        "USAT today's edition: next try in 30 min (try 2 of 6)",
+    ]
+
+
+@needs_pdfium
+def test_the_log_tells_the_jpeg_from_the_pdf_and_follows_the_retries(
+    tmp_path: Path, pdf: FakeCdn, clocks: Clocks
+) -> None:
+    pdf.pages = {_url("WSJ", 25): PAGE}  # the PDF isn't out yet
+    _fetch_settled(tmp_path, paper="WSJ")
+    first = _log(tmp_path)
+    assert first[0].startswith("WSJ 2026-10-25: JPG, 700×1342 px, ")
+    assert first[0].endswith(" (PDF not out yet)")
+    assert first[1:] == ["WSJ 2026-10-25: PDF asked for again in 30 min"]
+    pdf.pages[_pdf_url("WSJ", 25)] = _pdf()
+    clocks.wall += server.PDF_RETRY_S + 1
+    _fetch_settled(tmp_path, paper="WSJ")
+    later = _log(tmp_path)[2:]
+    assert later[0] == "WSJ 2026-10-25: saved from the JPG, asking for the PDF again (try 2 of 6)"
+    assert re.fullmatch(
+        r"WSJ 2026-10-25: redrawn from the PDF, 1440×\d+ px, \d+ KB in \d+\.\d s", later[1]
+    )
+    assert len(later) == 2
+
+
+def test_the_log_keeps_only_the_newest_lines() -> None:
+    state: dict[str, Any] = {"log": [{"junk": True}, "x"]}
+    for i in range(server.LOG_LINES + 5):
+        server._append_log(state, "WSJ", [(float(i), f"line {i}")])
+    assert len(state["log"]) == server.LOG_LINES
+    assert state["log"][0] == {"at": 5.0, "code": "WSJ", "text": "line 5"}
+    assert state["log"][-1]["text"] == f"line {server.LOG_LINES + 4}"
+
+
+def test_the_downloads_card_sums_up_the_state_and_lists_the_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "rasteriser_available", lambda: True)
+    at = datetime(2026, 10, 25, 14, 3, 12, tzinfo=UTC).timestamp()
+    for name in ("USAT_20261025.jpg", "NY_NYT_20261025.jpg", "WSJ_20261024.jpg"):
+        _seed(tmp_path, name)  # 700 px: the JPEG fallback
+    server._write_json(
+        tmp_path / "state.json",
+        {
+            "log": [
+                {
+                    "at": at,
+                    "code": "WSJ",
+                    "text": "2026-10-25: PDF, 1440\u00d72794 px, 812 KB in 4.2 s",
+                },
+                {"at": at + 2, "code": "AZ_ADS", "text": "no page in the last 3 days"},
+                {"at": "soon", "code": "WSJ", "text": "a hand-edited line"},
+            ],
+            "pdf_retry": {
+                "USAT": {"day": "2026-10-25", "tries": 2, "after": at + 3600},
+                "NY_NYT": {"day": "2026-10-25", "tries": server.PDF_MAX_TRIES, "after": at},
+                # An earlier edition's retry: jobs only redraw today's.
+                "WSJ": {"day": "2026-10-24", "tries": 1, "after": at},
+                # A paper taken off the list.
+                "LAT": {"day": "2026-10-25", "tries": 1, "after": at},
+                "BAD": "junk",
+            },
+            "failed": {"AZ_ADS": "missing", "OLD": "unreachable"},
+        },
+    )
+    listed = ["NY_NYT", "WSJ", "USAT", "AZ_ADS"]
+    view = server.downloads_view(tmp_path, UTC, listed, today=TODAY)
+    assert view["status"] == [
+        "Last activity Oct 25, 14:03.",
+        "Waiting to ask for the PDF again: USAT (try 3 of 6, after 15:03).",
+        "Out of PDF tries, keeping the JPG: NY_NYT.",
+        "No page yet for AZ_ADS (none in the last 3 days).",
+        "History, no longer acted on: LAT's PDF retry for 2026-10-25, "
+        "WSJ's PDF retry for 2026-10-24, OLD's failed download.",
+    ]
+    assert view["log"] == [
+        "Oct 25 14:03:12  WSJ     2026-10-25: PDF, 1440\u00d72794 px, 812 KB in 4.2 s",
+        "Oct 25 14:03:14  AZ_ADS  no page in the last 3 days",
+    ]
+    # Today's page redrawn sharp since: its retry is history too, and with
+    # no rasteriser nothing would ever redraw it.
+    _seed(tmp_path, "USAT_20261025.jpg", _jpeg(1440, 2700))
+    assert "USAT (try" not in " ".join(
+        server.downloads_view(tmp_path, UTC, listed, today=TODAY)["status"]
+    )
+    monkeypatch.setattr(server, "rasteriser_available", lambda: False)
+    status = server.downloads_view(tmp_path, UTC, listed, today=TODAY)["status"]
+    assert not any(line.startswith(("Waiting", "Out of")) for line in status)
+    empty = server.downloads_view(tmp_path / "none", UTC, today=TODAY)
+    assert empty == {
+        "status": ["Nothing downloaded yet: a render that needs a page asks for it."],
+        "log": [],
+    }
+
+
+@needs_pdfium
+def test_an_earlier_editions_jpeg_gets_no_pdf_retry(tmp_path: Path, pdf: FakeCdn) -> None:
+    """Today's paper isn't out, yesterday's JPEG is kept: only today's edition
+    is ever redrawn, so no retry is recorded or promised for yesterday's."""
+    pdf.pages = {_url("WSJ", 24): PAGE}
+    assert _fetch_settled(tmp_path, paper="WSJ")["date"] == "2026-10-24"
+    assert "WSJ" not in _state(tmp_path).get("pdf_retry", {})
+    assert _log(tmp_path)[-1] == (
+        "WSJ 2026-10-24: keeping the JPG, an earlier edition's PDF isn't asked for again"
+    )
+    status = server.downloads_view(tmp_path, None, ["WSJ"], today=TODAY)["status"]
+    assert not any("PDF again" in line for line in status)
+
+
+def test_the_admin_page_is_newspapers_and_shows_the_log(app: Flask, client: FlaskClient) -> None:
+    plugin = app.config["PLUGIN_REGISTRY"].get("news_front_pages")
+    assert plugin.name == "News, Front Pages"  # the widget keeps its name
+    assert plugin.admin_title == "Newspapers"
+    server._write_json(
+        Path(plugin.data_dir) / "state.json",
+        {"log": [{"at": time.time(), "code": "WSJ", "text": "2026-10-25: JPG, 700 px <b>"}]},
+    )
+    body = client.get("/plugins/news_front_pages/").get_data(as_text=True)
+    assert "Newspapers, Tesserae</title>" in body
+    assert re.search(r"<h1>.*Newspapers</h1>", body)
+    assert re.search(r'href="/plugins/news_front_pages/">\s*<i[^>]*></i>Newspapers\s*</a>', body)
+    downloads = body[body.index('id="downloads"') :]
+    assert "data-log-tail" in downloads
+    assert "WSJ  2026-10-25: JPG, 700 px &lt;b&gt;" in downloads
+
+
+# ----- retries and cleanup (app.media_lifecycle) -----------------------------
+
+
+def test_an_unavailable_edition_is_retried_on_a_backoff(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
+    _seed(tmp_path, "NY_NYT_20261024.jpg")
+    cdn.down = True
+    calls = []
+
+    def render(**kw: Any) -> dict[str, Any]:
+        data = _fetch_settled(tmp_path, paper="NY_NYT", **kw)
+        calls.append(len(cdn.calls))
+        return data
+
+    assert render()["date"] == "2026-10-24"  # the last good page stays up
+    clocks.wall += 31 * 60
+    render()  # try 2, 30 minutes on
+    clocks.wall += 31 * 60
+    render()  # too soon: try 3 waits an hour
+    clocks.wall += 30 * 60
+    render()
+    assert calls == [1, 2, 2, 3]
+    retry = _state(tmp_path)["retry"]["NY_NYT"]
+    assert (retry["day"], retry["tries"]) == ("2026-10-25", 3)
+    # A forced refresh ignores the wait.
+    render(fresh=True)
+    assert calls[-1] == 4
+    # Once it works, the new page shows and the backoff is gone.
+    cdn.down = False
+    cdn.pages = {_url("NY_NYT", 25): PAGE}
+    assert render(fresh=True)["date"] == "2026-10-25"
+    assert "NY_NYT" not in _state(tmp_path).get("retry", {})
+
+
+def test_a_paper_nobody_asks_for_loses_its_pages(
+    tmp_path: Path, cdn: FakeCdn, clocks: Clocks
+) -> None:
+    old_wsj = _seed(tmp_path, "WSJ_20261020.jpg", idle_s=IDLE)
+    old_nyt = _seed(tmp_path, "NY_NYT_20261024.jpg", idle_s=IDLE)
+    # Renders have been tracked for longer than ORPHAN_AFTER_S, and only
+    # NY_NYT has been asked for in that time.
+    long_ago = clocks.wall - server.ORPHAN_AFTER_S - 60
+    server._write_json(
+        tmp_path / "state.json",
+        {"wanted_since": long_ago, "wanted": {"WSJ": long_ago, "NY_NYT": clocks.wall}},
+    )
+    cdn.pages = {_url("NY_NYT", 25): PAGE}
+    _fetch_settled(tmp_path, paper="NY_NYT")
+    assert not old_wsj.exists()  # WSJ's newest, but WSJ left the list
+    assert old_nyt.exists()  # NY_NYT's previous edition, within KEEP_DAYS
+    assert (tmp_path / "pages" / "NY_NYT_20261025.jpg").exists()
+
+
+def test_the_pages_folder_stays_under_budget(tmp_path: Path) -> None:
+    pages = tmp_path / "pages"
+    newest = _seed(tmp_path, "NY_NYT_20261025.jpg", idle_s=IDLE)
+    older = [_seed(tmp_path, f"NY_NYT_202610{d}.jpg", idle_s=IDLE + d) for d in (21, 22, 23)]
+    size = newest.stat().st_size
+    gone = server.prune(pages, TODAY, time.time(), {"NY_NYT"}, max_bytes=size * 2 + 10)
+    assert len(gone) == 2 and newest.exists()
+    assert sum(p.exists() for p in older) == 1
+    server.prune(pages, TODAY, time.time(), {"NY_NYT"}, max_bytes=0)
+    assert newest.exists()  # over budget, the page on screen stays
+
+
+def test_the_smaller_screens_setting_reaches_the_page(tmp_path: Path, cdn: FakeCdn) -> None:
+    _seed(tmp_path, "NY_NYT_20261025.jpg")
+    ctx = {"data_dir": str(tmp_path)}
+    whole = server.fetch({"paper": "NY_NYT"}, {"small_screens": "whole"}, ctx=ctx)
+    assert whole["fit"] == "whole"
+    assert server.fetch({"paper": "NY_NYT"}, {"small_screens": "odd"}, ctx=ctx)["fit"] == "top"
