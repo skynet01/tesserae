@@ -133,6 +133,7 @@
 
 {% call section_card(icon='rss', title='Stories', id='ain-set-stories') %}
   {{ text_setting('sources') }}
+  <p class="field-help ain-feeds-tip">Looking for feeds? <a href="https://rss.feedspot.com/?_src=logo&amp;_origin=news_rss_feeds" target="_blank" rel="noopener noreferrer">Feedspot</a> lists good RSS feeds by topic and country; copy a feed's address into a line here.</p>
   {% if source_problems %}
   <div class="dx-warn-band ain-warn"><i class="ph ph-warning" aria-hidden="true"></i><p>{% for p in source_problems %}{{ p }}.{% if not loop.last %}<br>{% endif %}{% endfor %}</p></div>
   {% endif %}

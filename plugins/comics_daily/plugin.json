@@ -1,6 +1,6 @@
 {
   "tesserae_compat": "1.x",
-  "name": "Comics, Daily",
+  "name": "Comics",
   "version": "0.3.0",
   "kind": "widget",
   "locales": [

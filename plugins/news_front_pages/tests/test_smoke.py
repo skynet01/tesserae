@@ -1750,7 +1750,7 @@ def test_an_earlier_editions_jpeg_gets_no_pdf_retry(tmp_path: Path, pdf: FakeCdn
 
 def test_the_admin_page_is_newspapers_and_shows_the_log(app: Flask, client: FlaskClient) -> None:
     plugin = app.config["PLUGIN_REGISTRY"].get("news_front_pages")
-    assert plugin.name == "News, Front Pages"  # the widget keeps its name
+    assert plugin.name == "News, Newspapers"  # the widget keeps its name
     assert plugin.admin_title == "Newspapers"
     server._write_json(
         Path(plugin.data_dir) / "state.json",
