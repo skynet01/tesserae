@@ -350,10 +350,10 @@
                       placeholder='HH:MM', type='time',
                       help='When this device wakes up. End < start wraps midnight (e.g. 22:00 → 07:00 = overnight).') }}
       </div>
-      {{ days_field(section.id ~ '-qh-days', 'quiet_hours_days', 'Window applies on',
+      {{ days_field(section.id ~ '-qh-days', 'quiet_hours_days', 'Quiet window on',
                     value=section.quiet_hours.get('days', ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
                     help='Weekdays the start/end window is in force, each judged by its own clock: on a ticked day an overnight window covers that morning up to End and that evening from Start.') }}
-      {{ days_field(section.id ~ '-qh-all-day', 'quiet_hours_all_day', 'Quiet all day',
+      {{ days_field(section.id ~ '-qh-all-day', 'quiet_hours_all_day', 'Paused all day on',
                     value=section.quiet_hours.get('all_day', []),
                     help='Weekdays that are quiet from midnight to midnight regardless of the window.') }}
       {{ switch(section.id ~ '-qh-sleep', 'quiet_hours_sleep', 'Sleep through quiet hours',

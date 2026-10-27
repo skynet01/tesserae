@@ -350,7 +350,7 @@
           <div class="dx-toggle-row">
             <div class="dx-toggle-row-text">
               <label class="dx-toggle-row-label" for="{{ section.id }}-qh-enabled">Override the server's quiet hours</label>
-              <p class="dx-toggle-row-desc">Off means this display follows Settings › Server › Quiet hours.</p>
+              <p class="dx-toggle-row-desc">On, this display uses only the hours below and the server's quiet hours don't apply to it. Off, it follows Settings › Server › Quiet hours.</p>
             </div>
             <label class="dx-toggle-switch" for="{{ section.id }}-qh-enabled">
               <input id="{{ section.id }}-qh-enabled" type="checkbox" name="quiet_hours_enabled"
@@ -359,21 +359,25 @@
               <span class="dx-toggle-track" aria-hidden="true"><span class="dx-toggle-knob"></span></span>
             </label>
           </div>
-          <div class="dx-field-grid" data-dep-target>
-            {{ text_input(section.id ~ '-qh-start', 'quiet_hours_start', 'Start',
-                value=section.quiet_hours.get('start', ''), placeholder='HH:MM', type='time', form=_combined_form_id) }}
-            {{ text_input(section.id ~ '-qh-end', 'quiet_hours_end', 'End',
-                value=section.quiet_hours.get('end', ''), placeholder='HH:MM', type='time', form=_combined_form_id) }}
-          </div>
-          {#- The two weekday pickers side by side when there's room. -#}
+          {#- Left: the window's days with its Start and End under them, no
+              wider than the day chips; right: the all-day days. Side by side
+              when both fit, stacked otherwise. -#}
           <div class="dx-field-grid dx-qh-days" data-dep-target>
-            {{ days_field(section.id ~ '-qh-days', 'quiet_hours_days', 'Window applies on',
-                value=section.quiet_hours.get('days', ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
-                help='Weekdays the start/end window is in force, each judged by its own clock: on a ticked day an overnight window covers that morning up to End and that evening from Start.',
-                form=_combined_form_id) }}
-            {{ days_field(section.id ~ '-qh-all-day', 'quiet_hours_all_day', 'Quiet all day',
+            <div class="dx-qh-window">
+              {{ days_field(section.id ~ '-qh-days', 'quiet_hours_days', 'Quiet window on',
+                  value=section.quiet_hours.get('days', ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
+                  help='The days the Start to End window runs, each by its own clock: an overnight window covers that morning up to End and that evening from Start.',
+                  form=_combined_form_id) }}
+              <div class="dx-qh-times">
+                {{ text_input(section.id ~ '-qh-start', 'quiet_hours_start', 'Start',
+                    value=section.quiet_hours.get('start', ''), placeholder='HH:MM', type='time', form=_combined_form_id) }}
+                {{ text_input(section.id ~ '-qh-end', 'quiet_hours_end', 'End',
+                    value=section.quiet_hours.get('end', ''), placeholder='HH:MM', type='time', form=_combined_form_id) }}
+              </div>
+            </div>
+            {{ days_field(section.id ~ '-qh-all-day', 'quiet_hours_all_day', 'Paused all day on',
                 value=section.quiet_hours.get('all_day', []),
-                help='Weekdays that are quiet from midnight to midnight regardless of the window.',
+                help='No scheduled or automatic pictures from midnight to midnight on these days; the display keeps what it shows, and sending one yourself still works. With Sleep through quiet hours on, it sleeps all day.',
                 form=_combined_form_id) }}
           </div>
           {#- Toggle rows like the override above: what it does, in words, beside its switch. -#}
