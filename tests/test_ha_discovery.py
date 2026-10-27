@@ -204,6 +204,7 @@ def test_push_page_command_calls_push(tmp_path: Path) -> None:
     pm.push.return_value = PushResult(status="sent", page_id="home")
     ha.start()
     ha._on_push_page_cmd(CMD_TOPIC_PUSH_PAGE, b"home")
+    assert ha._wait_commands_idle()
     pm.push.assert_called_once_with("home", source="home_assistant")
     # Busy gets tipped on for the duration.
     assert b"1" in list(_payloads_for(client, STATE_TOPIC_BUSY))
@@ -368,6 +369,7 @@ def test_per_device_push_command_targets_single_display(tmp_path: Path) -> None:
     store.save(Page(id="m", name="Morning", panel=Panel(w=100, h=100), device_ids=["lounge"]))
     ha.start()
     ha._on_device_push_cmd("tesserae/ha/dev/lounge/cmd/push", b"Morning")
+    assert ha._wait_commands_idle()
     pm.push.assert_called_once_with("m", device_ids={"lounge"}, source="home_assistant")
 
 

@@ -40,6 +40,13 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Home Assistant's per-display Input event (physical buttons and touch)
   works after a restart; until now it only appeared after the next
   settings save.
+- Home Assistant commands that render or wait on a render (dashboard
+  buttons and pickers, Refresh, Next and Previous, the lineup buttons and
+  picker, notifications, firmware install) run one after another in the
+  background, in the order they arrived, so a slow one no longer holds up
+  Home Assistant's other commands or its connection to Tesserae. Anything
+  that doesn't land shows on Last error. Switches and Hold still apply at
+  once.
 - A display's lineup position follows daily and interval lineups too, so a
   button press or Next after one of them fires steps that lineup rather
   than the one that showed before it.
