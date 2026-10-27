@@ -59,7 +59,7 @@
     <div class="dx-pair-input dx-dash-create-kind">
       <select name="layout_kind" class="dx-input" aria-label="Layout">
         <option value="grid">Grid layout</option>
-        <option value="canvas">Freeform canvas</option>
+        <option value="canvas"{% if request.args.get('layout_kind') == 'canvas' %} selected{% endif %}>Freeform canvas</option>
       </select>
     </div>
     {% endif %}

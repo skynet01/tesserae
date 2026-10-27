@@ -186,14 +186,11 @@ def _empty_layout() -> Any:
 
 @bp.get("/")
 def index() -> Response | str:
-    """Land on the most recent canvas dashboard, or mint a fresh one when there
-    are none, so the editor always opens straight into an editable artboard."""
+    """Open the most recent canvas, or show the POST form when none exists."""
     _guard()
     docs = _canvas_pages()
     if not docs:
-        page = _new_canvas_page()
-        _pages().save(page)
-        return redirect(url_for("panels.editor", canvas_id=page.id))
+        return redirect(url_for("pages.index", create=1, layout_kind="canvas"))
     return redirect(url_for("panels.editor", canvas_id=docs[0].id))
 
 

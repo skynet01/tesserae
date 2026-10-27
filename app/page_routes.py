@@ -1041,10 +1041,8 @@ def index() -> str:
 
 @bp.get("/new")
 def new() -> Response:
-    """Visiting /new in a browser short-circuits straight to a freshly
-    created dashboard so the user lands in the editor without a
-    metadata form to fill in first."""
-    return create()
+    """Open the creation form; a navigation must never create a dashboard."""
+    return redirect(url_for("pages.index", create=1))
 
 
 @bp.post("/new")

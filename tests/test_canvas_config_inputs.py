@@ -86,7 +86,7 @@ _URL_INPUT = {
 
 
 def _make_canvas(client: Any, inputs: list[dict[str, Any]]) -> str:
-    canvas_id: str = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    canvas_id: str = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     resp = client.post(f"/pages/canvas/c/{canvas_id}/save", json=_canvas_with_rest_source(inputs))
     assert resp.status_code == 200, resp.get_data(as_text=True)
     return canvas_id

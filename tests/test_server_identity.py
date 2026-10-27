@@ -138,7 +138,7 @@ def test_saving_a_preset_and_a_custom_colour(app: Flask, client: FlaskClient) ->
 def test_full_screen_editor_is_marked_too(app: Flask, client: FlaskClient) -> None:
     _sign_in(client)
     _set(app, instance_name="dev", server_colour="yellow")
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     html = client.get(f"/pages/canvas/c/{cid}").get_data(as_text=True)
     assert 'class="server-strip"' in html
     assert "<title>dev · Canvas editor" in html

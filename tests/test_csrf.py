@@ -293,6 +293,43 @@ def test_untrusted_ingress_header_does_not_bypass_auth(gated_app) -> None:
     assert "/login" in response.location
 
 
+@pytest.mark.parametrize("path", ["/pages/new", "/pages/canvas/"])
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_dashboard_creation_reads_never_mutate(gated_app, path, method) -> None:
+    client = gated_app.test_client()
+    auth.set_password(gated_app.config["SETTINGS_STORE"], "test-password")
+    with client.session_transaction() as session:
+        session["authed"] = True
+    before = gated_app.config["PAGE_STORE"].list()
+    response = client.open(path, method=method, headers={"Sec-Fetch-Site": "cross-site"})
+    assert response.status_code == 302
+    assert gated_app.config["PAGE_STORE"].list() == before
+    assert response.location.startswith("/pages?create=1")
+    if path == "/pages/canvas/" and method == "GET":
+        form = client.get(response.location).text
+        assert 'method="post" action="/pages/new"' in form
+        assert '<option value="canvas" selected>' in form
+
+
+@pytest.mark.parametrize("path", ["/pages/new", "/pages/canvas/new"])
+@pytest.mark.parametrize("cookie", [False, True])
+def test_dashboard_creation_requires_same_origin_post(gated_app, path, cookie) -> None:
+    client = gated_app.test_client()
+    store = gated_app.config["SETTINGS_STORE"]
+    if cookie:
+        auth.set_password(store, "test-password")
+        with client.session_transaction() as session:
+            session["authed"] = True
+    else:
+        auth.set_password_disabled(store, True)
+    pages = gated_app.config["PAGE_STORE"]
+    before = len(pages.list())
+    assert client.post(path, headers={"Origin": "http://elsewhere.test"}).status_code == 403
+    assert len(pages.list()) == before
+    assert client.post(path, headers={"Origin": "http://localhost"}).status_code == 302
+    assert len(pages.list()) == before + 1
+
+
 def test_rejections_are_logged_once_per_route_without_request_secrets(app, caplog) -> None:
     client = app.test_client()
     client.set_cookie("session", "test")

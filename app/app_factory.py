@@ -571,7 +571,7 @@ def create_app(
     app.secret_key = auth.secret_key(settings)
 
     # Session cookie attributes, set rather than inherited (#251). The
-    # provenance hook below also blocks cross-origin cookie mutations:
+    # provenance hook below also blocks cross-origin admin mutations:
     # SameSite alone permits requests from another port on the same host.
     #
     # ``Lax`` and not ``Strict``: Strict also withholds the cookie on a

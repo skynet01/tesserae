@@ -34,7 +34,7 @@ def _sign_in(client: Any) -> None:
 
 
 def _new_canvas(client: Any) -> str:
-    return str(client.get("/pages/canvas/").location.rsplit("/", 1)[1])
+    return str(client.post("/pages/canvas/new").location.rsplit("/", 1)[1])
 
 
 def test_canvas_element_on_tap_emits_attrs_with_config_origin(app: Flask) -> None:

@@ -21,6 +21,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Untrusted public peers cannot spoof forwarded origins, prefixes or Home
   Assistant ingress metadata; the existing loopback/LAN proxy policy applies
   before origin validation and external link generation.
+- Dashboard and canvas creation requires POST. Navigating to their old GET
+  creation URLs opens the existing POST form without creating records.
 
 ## [0.480.1], 2026-10-26
 

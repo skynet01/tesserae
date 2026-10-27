@@ -44,7 +44,7 @@ def test_composer_reachable_by_default_but_unlinked(app: Flask) -> None:
     client = app.test_client()
     _sign_in(client)
     assert client.get("/pages/canvas/catalog.json").status_code == 200
-    landing = client.get("/pages/canvas/", follow_redirects=False)
+    landing = client.post("/pages/canvas/new", follow_redirects=False)
     assert landing.status_code == 302
     assert "/pages/canvas/c/" in landing.location
 
@@ -57,10 +57,12 @@ def test_composer_can_be_disabled_via_settings(app: Flask) -> None:
     assert client.get("/pages/canvas/catalog.json").status_code == 404
 
 
-def test_index_mints_and_opens_a_canvas(app: Flask) -> None:
+def test_index_reopens_an_existing_canvas(app: Flask) -> None:
     client = app.test_client()
     _sign_in(client)
+    created = client.post("/pages/canvas/new")
     landing = client.get("/pages/canvas/", follow_redirects=False)
+    assert landing.location == created.location
     editor = client.get(landing.location)
     assert editor.status_code == 200
     assert b"panels/editor.js" in editor.data
@@ -131,7 +133,7 @@ def test_appearance_roundtrips(app: Flask, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("TESSERAE_EXPERIMENT_COMPOSER", "1")
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={"theme": "dark", "style": "editorial", "bg": "#101014", "els": []},
@@ -145,7 +147,7 @@ def test_doc_and_save_carry_rev(app: Flask) -> None:
     does. The live-sync stream + editor use it to tell edits apart."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     r0 = client.get(f"/pages/canvas/c/{cid}/doc.json").get_json()["rev"]
     assert isinstance(r0, str) and r0
     saved = client.post(
@@ -192,7 +194,7 @@ def test_live_stream_contract(app: Flask) -> None:
     """The SSE stream opens with a connected preamble and 404s for a bad id."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     resp = client.get(f"/pages/canvas/c/{cid}/stream")
     assert resp.status_code == 200 and resp.mimetype == "text/event-stream"
     assert b"connected" in next(resp.iter_encoded())
@@ -203,7 +205,7 @@ def test_live_stream_contract(app: Flask) -> None:
 def test_compose_applies_theme_and_background(app: Flask) -> None:
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={"theme": "dark", "style": "editorial", "bg": "#101014", "els": []},
@@ -454,7 +456,7 @@ def test_deleted_canvas_page_does_not_resurrect_on_restart(tmp_path: Path) -> No
 def test_compose_renders_decorations(app: Flask) -> None:
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={
@@ -481,7 +483,7 @@ def test_fragment_part_scales_roundtrip_and_compose(app: Flask) -> None:
     compose render as the cell's data-parts payload."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={
@@ -513,7 +515,7 @@ def test_crop_insets_roundtrip_and_compose(app: Flask) -> None:
     reclaim space, undistorted)."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={
@@ -547,7 +549,7 @@ def test_crop_omitted_from_compose_when_zero(app: Flask) -> None:
     clipping and no positioned cell-content, so the common case stays clean."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={"els": [{"id": "e1", "widget": "weather_now", "x": 0, "y": 0, "w": 200, "h": 140}]},
@@ -570,7 +572,7 @@ def test_background_image(app: Flask) -> None:
     """A canvas background image + fit mode persists and reaches the render."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={"bg_image": "https://example.com/bg.jpg", "bg_fit": "contain", "els": []},
@@ -585,7 +587,7 @@ def test_text_element_and_opacity(app: Flask) -> None:
     """Text elements and per-element opacity persist and reach the render."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={
@@ -616,7 +618,7 @@ def test_rotation_and_icon_weight(app: Flask) -> None:
     """Rotation and icon weight persist and reach the compose render."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={
@@ -659,7 +661,7 @@ def test_save_and_doc_roundtrip(app: Flask, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("TESSERAE_EXPERIMENT_COMPOSER", "1")
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     good = {
         "name": "My Panel",
         "w": 600,
@@ -704,7 +706,7 @@ def test_save_coerces_update_policies_to_manifest_capabilities(
     )
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     resp = client.post(
         f"/pages/canvas/c/{cid}/save",
         json={
@@ -745,7 +747,7 @@ def test_canvas_management(app: Flask, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TESSERAE_EXPERIMENT_COMPOSER", "1")
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
 
     # list starts with the auto-minted canvas
     listing = client.get("/pages/canvas/canvases.json").get_json()
@@ -801,7 +803,7 @@ def test_send_pushes_the_page_per_device(app: Flask, monkeypatch: pytest.MonkeyP
     )
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     resp = client.post(f"/pages/canvas/c/{cid}/send", json={"device_ids": ["dev_a"]})
     body = resp.get_json()
     assert resp.status_code == 200 and body["sent"] == ["dev_a"]
@@ -813,7 +815,7 @@ def test_compose_canvas_mounts_widgets(app: Flask) -> None:
     composer.js to mount each as the real widget with its fragment."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     client.post(
         f"/pages/canvas/c/{cid}/save",
         json={
@@ -842,7 +844,7 @@ def test_editor_gated_but_render_not_when_flag_off(app: Flask) -> None:
     whether the editor is enabled."""
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     app.config["SETTINGS_STORE"].update_section("experiments", {"composer": False})
     assert client.get(f"/pages/canvas/c/{cid}").status_code == 404  # editor gated
     assert client.get(f"/compose/{cid}").status_code == 200  # render still works
@@ -964,7 +966,7 @@ def test_generate_bg_sets_bg_image(app: Flask, monkeypatch: Any) -> None:
     monkeypatch.setattr(fb, "generate", lambda prompt, **kw: _mini_png())
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     r = client.post(
         f"/pages/canvas/c/{cid}/generate-bg",
         json={"prompt": "a foggy shore", "style": "watercolor", "fit": "cover"},
@@ -982,7 +984,7 @@ def test_generate_bg_requires_prompt(app: Flask, monkeypatch: Any) -> None:
     monkeypatch.setattr(fb, "resolve_fal_key", lambda reg, ss: "k")
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     assert client.post(f"/pages/canvas/c/{cid}/generate-bg", json={}).status_code == 400
 
 
@@ -992,7 +994,7 @@ def test_generate_bg_no_key_400(app: Flask, monkeypatch: Any) -> None:
     monkeypatch.setattr(fb, "resolve_fal_key", lambda reg, ss: None)
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     r = client.post(f"/pages/canvas/c/{cid}/generate-bg", json={"prompt": "x"})
     assert r.status_code == 400 and "fal" in r.get_json()["error"].lower()
 
@@ -1002,7 +1004,7 @@ def test_editor_includes_code_editor_assets(app: Flask) -> None:
     # vendored assets actually serve.
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     html = client.get(f"/pages/canvas/c/{cid}").get_data(as_text=True)
     assert "vendor/codemirror/codemirror.js" in html
     assert 'id="panels-code"' in html
@@ -1063,7 +1065,7 @@ def test_send_collapses_a_repeated_device(app: Flask, monkeypatch: pytest.Monkey
     )
     client = app.test_client()
     _sign_in(client)
-    cid = client.get("/pages/canvas/").location.rsplit("/", 1)[1]
+    cid = client.post("/pages/canvas/new").location.rsplit("/", 1)[1]
     resp = client.post(
         f"/pages/canvas/c/{cid}/send", json={"device_ids": ["dev_a", "dev_a", "dev_b"]}
     )

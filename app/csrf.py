@@ -54,7 +54,7 @@ def _origin(url: str) -> tuple[str, str, int] | None:
 
 
 def install_protection(app: Flask) -> None:
-    """Check unsafe cookie requests before auth or route handlers can mutate."""
+    """Check unsafe admin requests before auth or route handlers can mutate."""
     logged_routes: set[str] = set()
     log_lock = Lock()
 

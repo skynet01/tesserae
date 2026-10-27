@@ -70,6 +70,9 @@ or malformed origin is refused. Explicit API exemptions let cookie-free device,
 companion, webhook and MCP requests continue through their independent
 authentication. Session-only API actions, such as issuing a device pairing
 code, are protected. Device-authenticated reads and OTA downloads are unchanged.
+Dashboard creation is POST-only. The legacy `/pages/new` and empty
+`/pages/canvas/` GET routes open the existing creation form; the latter
+preselects Freeform canvas. An existing canvas can still be opened with GET.
 Rejections are logged once per route per server process, without request URLs
 or tokens.
 
