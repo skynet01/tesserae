@@ -3,7 +3,7 @@
 //
 // The layout maths behind the comics page: which rows fit, and the gap.
 import assert from "node:assert/strict";
-import { farSideColumns, gapsFor, noteText, planRows, scaleFor, shrinkFor } from "../client.js";
+import { farSideColumns, gapsFor, noteText, planRows, scaleFor, shrinkFor, MIN_ZOOM } from "../client.js";
 
 const gaps = { gap: 32, min: 6, max: 48 };
 
@@ -62,3 +62,8 @@ console.log("comics_daily clamp_check: ok");
 assert.equal(shrinkFor(900, 600), 0.666);
 assert.equal(shrinkFor(500, 600), 1);
 assert.equal(shrinkFor(0, 600), 1);
+
+// An 800 x 50 sliver: the strip would need about a twentieth of its size,
+// below what can be made out, so the cell says it is too small instead.
+assert.ok(shrinkFor(253, 34) < MIN_ZOOM);
+assert.ok(shrinkFor(253, 200) > MIN_ZOOM);

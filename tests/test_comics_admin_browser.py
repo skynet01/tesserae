@@ -149,3 +149,74 @@ def test_discard_brings_rows_back_with_their_extras(live: tuple[str, Flask]) -> 
         rows.nth(1).locator("[data-repeater-open]").click()
         assert rows.nth(1).locator('[data-repeater-key="image_url"]').is_visible()
         browser.close()
+
+
+def _seed_strip(app: Flask) -> None:
+    import datetime as dt
+    import time as _time
+
+    plugin = app.config["PLUGIN_REGISTRY"].get("comics_daily")
+    module = plugin.server_module
+    store = module.images.Store(Path(plugin.data_dir))
+    buf = io.BytesIO()
+    Image.new("L", (1200, 380), 255).save(buf, format="PNG")
+    picture = module.images.normalise(buf.getvalue())
+    name = store.add("gocomics:garfield", picture)
+    today = module._today().isoformat()
+    store.update(
+        "gocomics:garfield",
+        lambda e: e.update(
+            pictures=[{"file": name, "w": 1200, "h": 380}],
+            edition=today,
+            fetched_on=today,
+            last_success=_time.time(),
+            last_attempt=_time.time(),
+            error=None,
+        ),
+    )
+    fields = plugin.manifest["settings"]
+    with app.app_context():
+        values = app.config["SETTINGS_STORE"].get_for_runtime("plugins", plugin.id, fields)
+        values["far_side"] = False
+        values["strips"] = [
+            {"enabled": True, "label": "", "slug": "dilbert", "mode": "upload", "image_url": ""},
+            {"enabled": True, "label": "", "slug": "garfield", "mode": "auto", "image_url": ""},
+        ]
+        values["strips"][0]["enabled"] = False
+        app.config["SETTINGS_STORE"].update_for_namespace("plugins", plugin.id, values, fields)
+    del dt
+
+
+def test_a_sliver_of_a_cell_says_it_is_too_small_rather_than_clip(
+    live: tuple[str, Flask],
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, app = live
+    _seed_strip(app)
+    probe = """() => {
+      const host = [...document.querySelectorAll('*')].find(
+        (el) => el.shadowRoot && el.shadowRoot.querySelector('.rows'));
+      const sr = host && host.shadowRoot;
+      if (!sr) return null;
+      const img = [...sr.querySelectorAll('.row')].find((r) => !r.hidden);
+      const box = sr.querySelector('.rows').getBoundingClientRect();
+      const r = img ? img.getBoundingClientRect() : null;
+      return {
+        small: sr.querySelector('.too-small')?.textContent || '',
+        inside: r ? (r.top >= box.top - 1 && r.bottom <= box.bottom + 1) : null,
+      };
+    }"""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 800, "height": 300})
+        page.goto(f"{base}/_test/render?plugin=comics_daily&w=800&h=300", wait_until="networkidle")
+        page.wait_for_timeout(1800)
+        normal = page.evaluate(probe)
+        page.set_viewport_size({"width": 800, "height": 50})
+        page.goto(f"{base}/_test/render?plugin=comics_daily&w=800&h=50", wait_until="networkidle")
+        page.wait_for_timeout(1800)
+        sliver = page.evaluate(probe)
+        browser.close()
+    assert normal == {"small": "", "inside": True}
+    assert sliver["small"] == "Too small a space for a comic."
