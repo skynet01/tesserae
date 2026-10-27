@@ -556,12 +556,9 @@ def create_app(
         apply_ha_options(settings)
     app.secret_key = auth.secret_key(settings)
 
-    # Session cookie attributes, set rather than inherited (#251). Every
-    # state-changing admin POST rides this cookie, and the app carries no CSRF
-    # tokens, so what stops a cross-site submission today is the browser's own
-    # SameSite default. Relying on a default means the protection is whatever
-    # the operator's browser decided, which is not a property this app can
-    # state.
+    # Session cookie attributes, set rather than inherited (#251). The
+    # provenance hook below also blocks cross-origin cookie mutations:
+    # SameSite alone permits requests from another port on the same host.
     #
     # ``Lax`` and not ``Strict``: Strict also withholds the cookie on a
     # top-level GET arriving from another origin, so following a link to the
@@ -580,6 +577,10 @@ def create_app(
     # ``Secure`` sets them after ``create_app`` returns.
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_HTTPONLY"] = True
+
+    from app.csrf import install_protection
+
+    install_protection(app)
 
     # v0.49: at-rest encryption for manifest-declared ``secret: true``
     # fields. Resolve the SecretBox after ``auth.secret_key`` has run

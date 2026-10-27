@@ -48,6 +48,24 @@ The installer:
 When it finishes, start the server with `./run.sh` (or `.\run.ps1`) from the
 install dir and open `http://localhost:8765/`.
 
+## Browser request protection
+
+Unsafe requests (POST, PUT, PATCH and DELETE) carrying Tesserae's session cookie
+must have `Sec-Fetch-Site: same-origin` or `none` when that header is present.
+In its absence, `Origin`, or otherwise `Referer`, must match the request's scheme,
+host and port. Cross-port requests are refused with a clear 403. Proxy-forwarded
+origins, Home Assistant ingress and the configured Public URL use the existing
+middleware's effective origin. Proxies must preserve the browser's provenance
+headers and supply the correct forwarded scheme, host and port.
+
+For compatibility, requests with all three provenance headers missing are
+allowed. This leaves legacy browsers that omit every header with only the
+cookie's SameSite protection. Without Fetch Metadata, an explicit `Origin: null`
+or malformed origin is refused. No route exemptions are needed: requests without a session cookie
+continue through the existing device, OTA, webhook and MCP authentication.
+Rejections are logged once per route per server process, without request URLs
+or tokens.
+
 ## Manual install
 
 If you'd rather do it by hand (or already cloned the repo):

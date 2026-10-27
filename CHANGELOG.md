@@ -10,6 +10,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 - Quiet-hours sleep ends at the first real opening across DST gaps and repeated
   hours, and devices remain quiet throughout the configured end minute.
+- Session-cookie mutations reject cross-origin browser requests, including
+  forms posted from another port on the same host, without changing forms or
+  cookie-free device, webhook and MCP clients.
 
 ## [0.480.1], 2026-10-26
 
