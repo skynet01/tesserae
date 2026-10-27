@@ -1,7 +1,7 @@
 {
   "tesserae_compat": "1.x",
   "name": "News, Front Pages",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "kind": "widget",
   "admin_title": "Newspapers",
   "locales": ["en"],
@@ -82,6 +82,17 @@
           "css": ""
         }
       ]
+    },
+    {
+      "name": "small_screens",
+      "type": "select",
+      "label": "On smaller screens",
+      "default": "top",
+      "choices": [
+        { "value": "top", "label": "The top of the page, large enough to read (masthead and headlines)" },
+        { "value": "whole", "label": "The whole page, smaller" }
+      ],
+      "help": "A big portrait screen shows the page full width from the top, as it always has. A smaller or landscape screen can't show the whole page at a readable size: by default it shows the top of the page, the masthead and the main headlines, at a size you can read; or choose the whole page, smaller."
     }
   ],
   "updates": {

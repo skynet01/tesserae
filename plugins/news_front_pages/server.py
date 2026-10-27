@@ -1793,6 +1793,8 @@ def fetch(
         # This paper's own CSS, sanitised (see sanitize_css); a pinned paper
         # uses its row's CSS too, whether or not the row is in the rotation.
         "css": styles.get(code, ""),
+        # How client.js fits the page on a smaller screen.
+        "fit": "whole" if settings.get("small_screens") == "whole" else "top",
     }
     _LAST_CLAIMED[key] = (now, payload)
     if code in line:

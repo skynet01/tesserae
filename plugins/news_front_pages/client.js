@@ -51,6 +51,21 @@ function snapToPixels(img) {
   }
 }
 
+// Narrower than this, a page drawn at the cell's width has headlines too
+// small to read: the page is drawn this wide instead and centred, so the
+// top of it (masthead and headlines) shows at a readable size.
+export const READABLE_PX = 720;
+
+// How the page sits in a ``w`` x ``h`` cell: "full" (the cell's width, from
+// the top, as on the big portrait panel), "zoom" (READABLE_PX wide, centred,
+// from the top) or "whole" (the whole page, smaller). ``fit`` is the
+// "On smaller screens" setting; ``ratio`` the page's height over its width.
+export function pageFit(w, h, ratio, fit) {
+  if (!(w > 0) || !(h > 0) || !(ratio > 0)) return "full";
+  if (fit === "whole" && w * ratio > h) return "whole";
+  return w < READABLE_PX ? "zoom" : "full";
+}
+
 export default function render(shadow, ctx) {
   const t = ctx?.t || ((key, fallback) => fallback ?? key);
   const data = ctx?.data ?? {};
@@ -85,6 +100,12 @@ export default function render(shadow, ctx) {
   const width = Math.round(Number(data.width) || 0);
   const height = Math.round(Number(data.height) || 0);
   const size = width > 0 && height > 0 ? ` width="${width}" height="${height}"` : "";
+  const fit = pageFit(
+    Number(ctx?.cell?.w) || 0,
+    Number(ctx?.cell?.h) || 0,
+    width > 0 ? height / width : 0,
+    data.fit,
+  );
   shadow.innerHTML = `
     ${css}
     <style>
@@ -97,8 +118,20 @@ export default function render(shadow, ctx) {
         height: auto;
         object-fit: fill;
       }
+      .w.is-bleed.fit-zoom > img.page {
+        width: ${READABLE_PX}px;
+        max-width: none;
+        align-self: center;
+      }
+      .w.is-bleed.fit-whole { align-items: center; }
+      .w.is-bleed.fit-whole > img.page {
+        width: auto;
+        height: 100%;
+        max-width: 100%;
+        object-fit: contain;
+      }
     </style>
-    <div class="w is-bleed" data-widget="news_front_pages">
+    <div class="w is-bleed fit-${fit}" data-widget="news_front_pages">
       <img class="page" src="${escapeHtml(data.url)}" alt="${escapeHtml(alt)}"${size}>
     </div>`;
   const img = shadow.querySelector("img.page");

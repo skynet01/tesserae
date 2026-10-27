@@ -736,6 +736,7 @@ def test_payload_carries_size_and_css(tmp_path: Path, cdn: FakeCdn) -> None:
         "width": 700,
         "height": 1342,
         "css": NYT_CSS,
+        "fit": "top",  # the "On smaller screens" setting
     }
     assert cdn.calls == []
 
@@ -1802,3 +1803,11 @@ def test_the_pages_folder_stays_under_budget(tmp_path: Path) -> None:
     assert sum(p.exists() for p in older) == 1
     server.prune(pages, TODAY, time.time(), {"NY_NYT"}, max_bytes=0)
     assert newest.exists()  # over budget, the page on screen stays
+
+
+def test_the_smaller_screens_setting_reaches_the_page(tmp_path: Path, cdn: FakeCdn) -> None:
+    _seed(tmp_path, "NY_NYT_20261025.jpg")
+    ctx = {"data_dir": str(tmp_path)}
+    whole = server.fetch({"paper": "NY_NYT"}, {"small_screens": "whole"}, ctx=ctx)
+    assert whole["fit"] == "whole"
+    assert server.fetch({"paper": "NY_NYT"}, {"small_screens": "odd"}, ctx=ctx)["fit"] == "top"
