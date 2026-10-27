@@ -1062,9 +1062,9 @@ def test_add_keeps_a_strip_it_could_not_fetch_yet(
 
 def test_add_stops_at_the_most_strips(client: FlaskClient) -> None:
     client.get("/plugins/comics_daily/")
-    rows = [
+    rows = [{"enabled": True, "label": "", "slug": "dilbert", "mode": "auto", "image_url": ""}] + [
         {"enabled": True, "label": "", "slug": f"strip{i}", "mode": "auto", "image_url": ""}
-        for i in range(srv.MAX_STRIPS)
+        for i in range(srv.MAX_STRIPS - 1)
     ]
     client.post("/settings/plugin-comics_daily", data={"strips": json.dumps(rows)})
     client.post("/plugins/comics_daily/strips/add", data={"strip": "peanuts"})
@@ -1520,3 +1520,39 @@ def test_patch_for_namespace_is_one_step(app: Any) -> None:
     seen: list[set[str]] = []
     store.patch_for_namespace("plugins", "toy", fields, lambda cur, stored: seen.append(stored))
     assert seen == [{"n"}]
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [{"slug": "garfield"}],  # Dilbert left out
+        [{"slug": "dilbert2"}, {"slug": "garfield"}],  # Dilbert renamed
+    ],
+)
+def test_dilbert_is_kept_by_every_save_path(
+    client: FlaskClient, rows: list[dict[str, Any]]
+) -> None:
+    client.get("/plugins/comics_daily/")
+    before = _settings(client)["strips"]
+    full = [{"enabled": True, "label": "", "mode": "auto", "image_url": "", **r} for r in rows]
+    client.post("/settings/plugin-comics_daily", data={"strips": json.dumps(full)})
+    assert _settings(client)["strips"] == before
+    assert any("built in" in m for m in _messages(client))
+    # The plugin's own writes go through the same check.
+    module = _app_module(client)
+    from app.repeater import RepeaterValueError
+
+    with client.application.test_request_context(), pytest.raises(RepeaterValueError):
+        module._patch_rows(_plugin(client), lambda current: full)
+    assert _settings(client)["strips"] == before
+
+
+def test_legacy_rows_always_carry_dilbert() -> None:
+    rows = srv.legacy_strip_rows("garfield\npeanuts")
+    assert rows[-1] == {
+        "enabled": False,
+        "label": "Dilbert",
+        "slug": "dilbert",
+        "mode": "auto",
+        "image_url": "",
+    }

@@ -708,6 +708,17 @@ def parse_rows(field: Mapping[str, Any], raw: Any) -> list[dict[str, Any]]:
                 seen[name].add(key)
             row[name] = value
         rows.append(row)
+    # A fixed row (``list.fixed``) is part of the setting, whichever page or
+    # request saves it: it can't be left out, and its value there can't change.
+    for key, values in list_options(field)["fixed"].items():
+        have = {str(row.get(key) or "").strip() for row in rows}
+        for value in values:
+            if value not in have:
+                row_label = field.get("row_label") or "row"
+                raise RepeaterValueError(
+                    f"{label}: the {value} {str(row_label).lower()} is built in and can't be "
+                    "removed or renamed (switch it off instead)"
+                )
     return rows
 
 

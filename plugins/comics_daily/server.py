@@ -578,6 +578,18 @@ def legacy_strip_rows(text: str) -> list[dict[str, Any]]:
                     "image_url": source.url,
                 }
             )
+    if "dilbert" not in seen:
+        # Dilbert is built into the list (it can only be switched off).
+        rows = rows[: MAX_STRIPS - 1]
+        rows.append(
+            {
+                "enabled": False,
+                "label": "Dilbert",
+                "slug": "dilbert",
+                "mode": "auto",
+                "image_url": "",
+            }
+        )
     return rows[:MAX_STRIPS]
 
 
