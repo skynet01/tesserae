@@ -329,3 +329,31 @@ def test_nothing_is_unreadable_without_a_box(tmp_path: Path) -> None:
     store = SettingsStore(tmp_path / "s.json")
     store.update_for_namespace("plugins", "weather", {"api_key": "plain"}, WIDGET_FIELDS)
     assert store.unreadable_secrets("plugins", "weather") == set()
+
+
+def test_update_item_changes_only_its_own_keys(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path / "settings.json")
+    store.update_for_namespace(
+        "devices", "hall", {"uuid": "u-1", "dither": "on"}, [{"name": "uuid"}, {"name": "dither"}]
+    )
+    store.update_item("devices", "hall", {"refresh_mode": "full"})
+    assert store.get_section("devices")["hall"] == {
+        "uuid": "u-1",
+        "dither": "on",
+        "refresh_mode": "full",
+    }
+    store.update_item(
+        "devices", "hall", {"button_map": {"left": "refresh"}}, remove=("refresh_mode",)
+    )
+    assert store.get_section("devices")["hall"] == {
+        "uuid": "u-1",
+        "dither": "on",
+        "button_map": {"left": "refresh"},
+    }
+    store.update_item("devices", "new", {"a": 1})
+    assert store.get_section("devices")["new"] == {"a": 1}
+    assert store.remove_item("devices", "new") is True
+    assert store.remove_item("devices", "new") is False
+    assert set(store.get_section("devices")) == {"hall"}
+    # Persisted.
+    assert SettingsStore(tmp_path / "settings.json").get_section("devices")["hall"]["uuid"] == "u-1"

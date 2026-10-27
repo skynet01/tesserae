@@ -1582,20 +1582,20 @@ def devices_update_combined(instance_id: str) -> Response:
         if bm_error is not None:
             flash(f"{device.name} button map: {bm_error}", "error")
         else:
-            devices_section = store.get_section("devices") or {}
-            device_section = dict(devices_section.get(instance_id) or {})
-            existing = device_section.get("button_map")
+            existing = ((store.get_section("devices") or {}).get(instance_id) or {}).get(
+                "button_map"
+            )
+            # Only this key changes, atomically: writing back a copy of the
+            # whole entry would undo a save (a sign binding) made meanwhile.
             if parsed_map is None:
                 # Empty submission -> clear the override.
                 if isinstance(existing, dict) and existing:
-                    device_section.pop("button_map", None)
-                    store.patch_section("devices", {instance_id: device_section})
+                    store.update_item("devices", instance_id, {}, remove=("button_map",))
                     ok_messages.append("button map cleared")
                     any_change = True
             else:
                 if existing != parsed_map:
-                    device_section["button_map"] = parsed_map
-                    store.patch_section("devices", {instance_id: device_section})
+                    store.update_item("devices", instance_id, {"button_map": parsed_map})
                     ok_messages.append("button map saved")
                     any_change = True
 
@@ -1626,18 +1626,17 @@ def devices_update_combined(instance_id: str) -> Response:
     # the device manifest.
     if "refresh_mode" in form:
         wanted = (form.get("refresh_mode") or "").strip().lower()
-        devices_section = store.get_section("devices") or {}
-        device_section = dict(devices_section.get(instance_id) or {})
-        existing_mode = device_section.get("refresh_mode")
+        existing_mode = ((store.get_section("devices") or {}).get(instance_id) or {}).get(
+            "refresh_mode"
+        )
+        # Only this key, atomically (see the button map above).
         if wanted == "full":
             if existing_mode != "full":
-                device_section["refresh_mode"] = "full"
-                store.patch_section("devices", {instance_id: device_section})
+                store.update_item("devices", instance_id, {"refresh_mode": "full"})
                 ok_messages.append("update delivery saved")
                 any_change = True
         elif existing_mode is not None:
-            device_section.pop("refresh_mode", None)
-            store.patch_section("devices", {instance_id: device_section})
+            store.update_item("devices", instance_id, {}, remove=("refresh_mode",))
             ok_messages.append("update delivery saved")
             any_change = True
 
@@ -1698,11 +1697,9 @@ def devices_update_combined(instance_id: str) -> Response:
             for target_id in wa_targets:
                 target_section = dict(devices_section.get(target_id) or {})
                 before = {k: target_section.get(k) for k in wa_keys}
-                for k in wa_keys:
-                    target_section.pop(k, None)
-                target_section.update(wa_block)
-                if before != {k: target_section.get(k) for k in wa_keys}:
-                    store.patch_section("devices", {target_id: target_section})
+                if before != {k: wa_block.get(k) for k in wa_keys}:
+                    # Only the alignment keys, atomically (see the button map).
+                    store.update_item("devices", target_id, wa_block, remove=wa_keys)
                     wa_changed += 1
             if wa_changed:
                 any_change = True

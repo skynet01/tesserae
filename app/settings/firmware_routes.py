@@ -446,9 +446,9 @@ def firmware_auto() -> Response:
         return _redirect()
 
     store_settings = settings_store()
-    section = dict((store_settings.get_section("devices") or {}).get(device_id) or {})
-    section["auto_fw_update"] = enabled
-    store_settings.patch_section("devices", {device_id: section})
+    # Only this key, atomically: a copied whole entry written back would undo
+    # a save made meanwhile.
+    store_settings.update_item("devices", device_id, {"auto_fw_update": enabled})
     _log("auto_update", kind_id, "ok", device_id=device_id, enabled=enabled)
 
     if enabled:
