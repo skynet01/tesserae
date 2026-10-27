@@ -2,8 +2,8 @@
 
 Cookie-free device/API requests keep their own authentication. Legacy clients
 with no Fetch Metadata, Origin or Referer are allowed; an explicitly opaque,
-invalid or cross-origin provenance is refused. ProxyFix and public_url have
-already resolved the browser-facing origin before this hook runs.
+invalid or cross-origin provenance is refused. ProxyFix resolves the actual
+request origin; public_url is an additional permitted origin.
 """
 
 from __future__ import annotations
@@ -78,8 +78,10 @@ def install_protection(app: Flask) -> None:
                 source = request.headers.get("Referer")
             # Preserve header-less legacy browsers and scripted session clients.
             source_origin = _origin(source) if source is not None else None
+            actual_origin = request.environ.get("tesserae.request_origin", request.host_url)
             allowed = source is None or (
-                source_origin is not None and source_origin == _origin(request.host_url)
+                source_origin is not None
+                and source_origin in {_origin(actual_origin), _origin(request.host_url)}
             )
         if allowed:
             return None

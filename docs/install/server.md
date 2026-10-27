@@ -51,17 +51,18 @@ install dir and open `http://localhost:8765/`.
 ## Browser request protection
 
 Unsafe admin requests (POST, PUT, PATCH and DELETE), including cookie-free setup
-and login submissions,
-must have `Sec-Fetch-Site: same-origin` or `none` when that header is present.
+and login submissions, must have `Sec-Fetch-Site: same-origin` or `none` when
+that header is present.
 In its absence, `Origin`, or otherwise `Referer`, must match the request's scheme,
-host and port. Cross-port requests are refused with a clear 403. Proxy-forwarded
-origins, Home Assistant ingress and the configured Public URL use the existing
-middleware's effective origin. Proxies must preserve the browser's provenance
-headers and supply the correct forwarded scheme, host and port.
+host and port. Cross-port requests are refused with a clear 403. The actual
+request origin, resolved through proxy middleware, and the configured Public
+URL origin are both accepted, so direct LAN forms keep working with a Public
+URL configured. Proxies must preserve the browser's provenance headers and
+supply the correct forwarded scheme, host and port.
 
 For compatibility, requests with all three provenance headers missing are
-allowed. This leaves legacy browsers that omit every header with only the
-cookie's SameSite protection. Without Fetch Metadata, an explicit `Origin: null`
+allowed. Their provenance cannot be checked; when a session cookie is present,
+only its SameSite protection remains. Without Fetch Metadata, an explicit `Origin: null`
 or malformed origin is refused. Explicit API exemptions let cookie-free device,
 companion, webhook and MCP requests continue through their independent
 authentication. Session-only API actions, such as issuing a device pairing

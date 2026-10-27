@@ -16,6 +16,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Cookie-free admin, setup and login mutations also reject cross-origin
   requests; only explicitly identified independently authenticated APIs bypass
   that check without a session cookie.
+- Configuring a Public URL preserves same-origin admin form posts through the
+  direct LAN address as well as the public address.
 
 ## [0.480.1], 2026-10-26
 

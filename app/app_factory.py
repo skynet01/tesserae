@@ -354,6 +354,12 @@ def create_app(
             self._app_config = app_config
 
         def __call__(self, environ: dict[str, Any], start_response: Any) -> Any:
+            # ProxyFix has resolved the request's actual origin by this point.
+            # Keep it for provenance checks before public_url replaces it for
+            # external link generation (direct LAN forms must keep working).
+            from werkzeug.wrappers import Request
+
+            environ["tesserae.request_origin"] = Request(environ).host_url
             store = self._app_config.get("SETTINGS_STORE")
             if store is None:
                 return self._inner(environ, start_response)

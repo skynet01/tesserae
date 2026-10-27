@@ -217,8 +217,49 @@ def test_public_url_override_is_the_effective_origin(app) -> None:
         == 204
     )
     assert (
-        client.post("/_csrf_probe/one", headers={"Origin": "http://localhost"}).status_code == 403
+        client.post("/_csrf_probe/one", headers={"Origin": "http://elsewhere.test"}).status_code
+        == 403
     )
+
+
+@pytest.mark.parametrize(
+    "request_origin,origin",
+    [
+        ("http://192.168.1.23:8765", "http://192.168.1.23:8765"),
+        ("https://public.test", "https://public.test"),
+        ("http://192.168.1.23:8765", "https://public.test"),
+    ],
+)
+@pytest.mark.parametrize("source_header", ["Origin", "Referer"])
+def test_public_url_also_allows_direct_lan_admin_forms(
+    gated_app, request_origin, origin, source_header
+) -> None:
+    store = gated_app.config["SETTINGS_STORE"]
+    store.patch_section("app", {"public_url": "https://public.test/paper"})
+    auth.set_password_disabled(store, True)
+    client = gated_app.test_client()
+    response = client.post(
+        "/settings/system/auth/enable",
+        base_url=request_origin,
+        environ_overrides={"REMOTE_ADDR": "192.168.1.45"},
+        headers={source_header: origin},
+    )
+    assert response.status_code == 302
+    assert auth.password_required(store)
+
+
+def test_public_url_does_not_allow_another_lan_port(gated_app) -> None:
+    store = gated_app.config["SETTINGS_STORE"]
+    store.patch_section("app", {"public_url": "https://public.test/paper"})
+    auth.set_password_disabled(store, True)
+    response = gated_app.test_client().post(
+        "/settings/system/auth/enable",
+        base_url="http://192.168.1.23:8765",
+        environ_overrides={"REMOTE_ADDR": "192.168.1.45"},
+        headers={"Origin": "http://192.168.1.23:9999"},
+    )
+    assert response.status_code == 403
+    assert not auth.password_required(store)
 
 
 def test_rejections_are_logged_once_per_route_without_request_secrets(app, caplog) -> None:
