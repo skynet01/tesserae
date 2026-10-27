@@ -1,14 +1,21 @@
 {
   "tesserae_compat": "1.x",
-  "name": "News, AI Illustrated",
-  "version": "0.1.2",
+  "name": "AI Illustrated News",
+  "version": "0.2.0",
   "kind": "widget",
-  "locales": ["en"],
-  "description": "AI News: once a day, the top story of each of your feeds, summarised by Groq and drawn as a satirical ink cartoon (kie.ai, Gemini, Pollinations or HuggingFace). Shows one story at a time, poster style, moving to the next on each refresh.",
+  "locales": [
+    "en"
+  ],
+  "description": "Once a day, the top story of each of your feeds, summarised by an AI and drawn as a satirical ink cartoon (kie.ai, Gemini, Pollinations or HuggingFace). Shows one story at a time, poster style, moving to the next on each refresh.",
   "icon": "ph-newspaper-clipping",
   "category": "reading",
   "supports": {
-    "sizes": ["xs", "sm", "md", "lg"]
+    "sizes": [
+      "xs",
+      "sm",
+      "md",
+      "lg"
+    ]
   },
   "cell_options": [
     {
@@ -33,14 +40,46 @@
       "label": "Sources",
       "rows": 4,
       "default": "Tech | https://hnrss.org/frontpage?points=100\nBusiness | https://feeds.bbci.co.uk/news/business/rss.xml\nGlobal | https://feeds.bbci.co.uk/news/world/rss.xml",
-      "help": "One feed per line, as Label | feed URL (RSS or Atom). Each feed gives one story a day: its newest item."
+      "help": "One feed per line, as Label | feed address (RSS or Atom). Each feed gives one story a day: its newest. The label is the tag shown on the frame."
     },
     {
       "name": "run_at",
       "type": "time",
-      "label": "Daily at",
+      "label": "Time to make today's stories",
       "default": "06:05",
-      "help": "New stories are made at the first panel render after this time (the server's time zone). For an exact time, turn on the placement's daily refresh at the same time."
+      "help": "In the server's time zone. The stories are made at the first frame update after this time. For an exact time, turn on the placement's daily refresh at the same time."
+    },
+    {
+      "name": "summary_words",
+      "type": "number",
+      "label": "Summary length (words)",
+      "default": 70,
+      "min": 10,
+      "max": 300,
+      "help": "About how long each summary is. Short articles get shorter summaries."
+    },
+    {
+      "name": "summary_service",
+      "type": "select",
+      "label": "Summaries by",
+      "default": "groq",
+      "choices": [
+        {
+          "value": "groq",
+          "label": "Groq (recommended)"
+        },
+        {
+          "value": "off",
+          "label": "Off: the article's opening words"
+        }
+      ],
+      "help": "Groq writes a short summary of each article. Off shows the article's opening words instead."
+    },
+    {
+      "name": "groq_model",
+      "type": "string",
+      "label": "Groq model",
+      "default": "openai/gpt-oss-120b"
     },
     {
       "name": "groq_api_key",
@@ -51,12 +90,38 @@
       "help": "Writes the summaries. Without it a story shows the opening words of the article."
     },
     {
+      "name": "summary_prompt",
+      "type": "textarea",
+      "label": "Summary prompt",
+      "rows": 3,
+      "default": "Summarize this news story in about {words} words. Use simple, plain language that anyone can understand. No jargon, no bullet points, no headers — just clear flowing sentences.",
+      "help": "{words} is the summary length. Rules against inventing facts are always added."
+    },
+    {
+      "name": "provider_order",
+      "type": "string",
+      "label": "Image provider order",
+      "default": "kie, gemini, pollinations, huggingface",
+      "help": "The image providers to use, first choice first, comma separated (kie, gemini, pollinations, huggingface), or none. The first picture wins; a story's picture has 150 seconds across all of them."
+    },
+    {
+      "name": "kie_model",
+      "type": "string",
+      "label": "kie.ai model",
+      "default": "google/nano-banana"
+    },
+    {
       "name": "kie_api_key",
       "type": "string",
       "label": "kie.ai API key",
       "secret": true,
-      "default": "",
-      "help": "Image providers are tried in turn (kie.ai, Gemini, Pollinations, HuggingFace, or the order under More options) and the first picture wins. Leave a key blank to skip that provider."
+      "default": ""
+    },
+    {
+      "name": "gemini_model",
+      "type": "string",
+      "label": "Gemini model",
+      "default": "gemini-2.5-flash-image"
     },
     {
       "name": "gemini_api_key",
@@ -66,11 +131,23 @@
       "default": ""
     },
     {
+      "name": "pollinations_model",
+      "type": "string",
+      "label": "Pollinations model",
+      "default": "flux"
+    },
+    {
       "name": "pollinations_api_key",
       "type": "string",
       "label": "Pollinations API key",
       "secret": true,
       "default": ""
+    },
+    {
+      "name": "huggingface_model",
+      "type": "string",
+      "label": "HuggingFace model",
+      "default": "black-forest-labs/FLUX.1-schnell"
     },
     {
       "name": "huggingface_api_key",
@@ -80,74 +157,96 @@
       "default": ""
     },
     {
-      "name": "summary_words",
-      "type": "number",
-      "label": "Summary words",
-      "default": 70,
-      "min": 10,
-      "max": 300,
-      "help": "About how long each summary is. Short articles get shorter summaries."
-    },
-    {
-      "name": "provider_order",
-      "type": "string",
-      "label": "Image provider order",
-      "default": "kie, gemini, pollinations, huggingface",
-      "advanced": true,
-      "help": "Any of kie, gemini, pollinations and huggingface, comma separated. A story's picture has 150 seconds across all of them."
-    },
-    {
-      "name": "summary_prompt",
-      "type": "textarea",
-      "label": "Summary prompt",
-      "rows": 3,
-      "advanced": true,
-      "default": "Summarize this news story in about {words} words. Use simple, plain language that anyone can understand. No jargon, no bullet points, no headers — just clear flowing sentences.",
-      "help": "{words} is the summary length. Rules against inventing facts are always added."
-    },
-    {
       "name": "image_prompt",
       "type": "textarea",
       "label": "Illustration prompt",
-      "rows": 6,
-      "advanced": true,
-      "default": "Draw a black and white comic illustration. The comic should be a witty/funny observation or ironic comment on this specific news story like Far Side. Think: what is the absurd or ironic none spoken truth hiding inside this story? Show that moment. Characters should be consistent across all panels, right amount of hands, legs etc. Black and white ink art, bold outlines, dramatic composition, crosshatching for shading. CRITICAL: the ratio should be 9:16, leave the bottom 10% of the image completely empty — no characters, objects, speech bubbles, or any detail whatsoever in that zone. Story for the comic: {summary}.",
-      "help": "For kie.ai and Gemini; {title} and {summary} are filled in. Pollinations and HuggingFace get a short prompt of their own, which suits FLUX better."
+      "rows": 10,
+      "default": "A single-panel gag cartoon in the style of Gary Larson's The Far Side, about this news story.\nHeadline: {title}\nStory: {summary}\n\nFirst decide the joke: the one absurd or ironic truth behind the headline that everyone thinks but nobody says. Show it as ONE visual gag that someone who has only read the headline gets in two seconds: take a phrase from the story literally, swap who is in charge, or show where this ends up if nobody stops it. Ordinary people, animals or objects in an everyday place work best, rather than likenesses of the people named. Leave out the rest of the story's details.\n\nRules: one scene, no panels, borders or split screens. Two or three characters at most, each with the right number of arms, hands and legs. At most one short line of text in the whole picture (one speech bubble or one sign, under eight words, spelled correctly); no labels, logos or captions.\nStyle: black and white ink, bold clean outlines, crosshatched shading, plain white background, high contrast. {shape} picture that fills the whole canvas edge to edge. Keep the bottom quarter simple, just floor, ground or sky with no faces or text, because the headline is printed over it.",
+      "help": "For kie.ai and Gemini. {title}, {summary} and {shape} (the picture's shape, such as Tall portrait (9:16)) are filled in. Pollinations and HuggingFace get a short prompt of their own, which suits FLUX better."
     },
     {
-      "name": "groq_model",
-      "type": "string",
-      "label": "Groq model",
-      "default": "openai/gpt-oss-120b",
-      "advanced": true
+      "name": "image_shape",
+      "type": "select",
+      "label": "Picture shape",
+      "default": "auto",
+      "choices": [
+        {
+          "value": "auto",
+          "label": "Automatic: the shape of your frame"
+        },
+        {
+          "value": "9:16",
+          "label": "Tall portrait (9:16)"
+        },
+        {
+          "value": "2:3",
+          "label": "Portrait (2:3)"
+        },
+        {
+          "value": "3:4",
+          "label": "Portrait (3:4)"
+        },
+        {
+          "value": "1:1",
+          "label": "Square (1:1)"
+        },
+        {
+          "value": "4:3",
+          "label": "Landscape (4:3)"
+        },
+        {
+          "value": "3:2",
+          "label": "Landscape (3:2)"
+        },
+        {
+          "value": "16:9",
+          "label": "Wide landscape (16:9)"
+        }
+      ],
+      "help": "Automatic draws pictures the shape of the biggest frame that showed this widget lately (9:16 until one has)."
     },
     {
-      "name": "kie_model",
-      "type": "string",
-      "label": "kie.ai model",
-      "default": "google/nano-banana",
-      "advanced": true
+      "name": "caption_bg",
+      "type": "color",
+      "label": "Gradient colour",
+      "default": "#000000",
+      "help": "The band behind the text at the foot of the picture, fading upwards."
     },
     {
-      "name": "gemini_model",
-      "type": "string",
-      "label": "Gemini model",
-      "default": "gemini-2.5-flash-image",
-      "advanced": true
+      "name": "caption_fg",
+      "type": "color",
+      "label": "Text colour",
+      "default": "#ffffff"
     },
     {
-      "name": "pollinations_model",
-      "type": "string",
-      "label": "Pollinations model",
-      "default": "flux",
-      "advanced": true
+      "name": "show_tag",
+      "type": "boolean",
+      "label": "Source tag",
+      "default": true
     },
     {
-      "name": "huggingface_model",
-      "type": "string",
-      "label": "HuggingFace model",
-      "default": "black-forest-labs/FLUX.1-schnell",
-      "advanced": true
+      "name": "show_date",
+      "type": "boolean",
+      "label": "Date",
+      "default": true
+    },
+    {
+      "name": "show_count",
+      "type": "boolean",
+      "label": "Story number",
+      "default": true
+    },
+    {
+      "name": "show_headline",
+      "type": "boolean",
+      "label": "Headline",
+      "default": true
+    },
+    {
+      "name": "show_summary",
+      "type": "boolean",
+      "label": "Summary",
+      "default": true
     }
   ],
   "requires": [
@@ -162,7 +261,10 @@
   },
   "updates": {
     "on_schedule": [
-      { "kind": "daily", "suggested_at": "06:05" }
+      {
+        "kind": "daily",
+        "suggested_at": "06:05"
+      }
     ]
   },
   "design": {
@@ -171,12 +273,36 @@
   "data_schema": {
     "color": "#1F1F1F",
     "fields": [
-      { "name": "title", "type": "str", "label": "Headline" },
-      { "name": "summary", "type": "str", "label": "Summary" },
-      { "name": "source", "type": "str", "label": "Source" },
-      { "name": "date", "type": "str", "label": "Date" },
-      { "name": "image", "type": "str", "label": "Illustration URL" },
-      { "name": "url", "type": "str", "label": "Article link" }
+      {
+        "name": "title",
+        "type": "str",
+        "label": "Headline"
+      },
+      {
+        "name": "summary",
+        "type": "str",
+        "label": "Summary"
+      },
+      {
+        "name": "source",
+        "type": "str",
+        "label": "Source"
+      },
+      {
+        "name": "date",
+        "type": "str",
+        "label": "Date"
+      },
+      {
+        "name": "image",
+        "type": "str",
+        "label": "Illustration URL"
+      },
+      {
+        "name": "url",
+        "type": "str",
+        "label": "Article link"
+      }
     ],
     "sample": {
       "title": "Ukraine says Starlink connection 'now stable' after network limits",

@@ -68,24 +68,28 @@ def test_news_settings_save_and_form_action_preserve_a_mount_prefix(client):
     assert result.location == "/tesserae/plugins/news_front_pages/#plugin-news_front_pages"
 
 
-def test_ai_settings_are_folded_right_above_the_last_run(app, client):
+def test_ai_news_page_reads_stories_run_then_settings(app, client):
+    """AI news: today's stories, the last run, then the settings as one form
+    over four cards (open, not folded), saved by one bar."""
     plugin = app.config["PLUGIN_REGISTRY"].get("news_illustrated")
     (plugin.data_dir / "state.json").write_text(
         '{"last_run": {"reason": "manual", "started": 1, "finished": 2, "log": ["Run started"]}}',
         encoding="utf-8",
     )
     body = client.get("/plugins/news_illustrated/").get_data(as_text=True)
-    card = body.index('id="plugin-news_illustrated"')
-    assert '<details class="dx-section-fold" data-fold>' in body[card:]
-    assert body.index('id="last-run"') > card
-    between = body[card : body.index('id="last-run"')]
-    assert between.count("<section") == 1  # nothing sits between the two cards
+    order = [body.index(f'id="{i}"') for i in ("stories", "last-run", "plugin-news_illustrated")]
+    assert order == sorted(order)
+    form = body[body.index('id="plugin-news_illustrated"') :]
+    form = form[: form.index("</form>")]
+    for card in ("ain-set-stories", "ain-set-summaries", "ain-set-pictures", "ain-set-frame"):
+        assert f'id="{card}"' in form
+    assert form.count("data-save-bar") == 1 and "data-fold" not in form
     assert "data-log-tail" in body[body.index('id="last-run"') :]
 
 
 def test_an_admin_page_is_titled_like_its_widget_unless_it_says_otherwise(app):
     registry = app.config["PLUGIN_REGISTRY"]
-    assert registry.get("news_illustrated").admin_title == "News, AI Illustrated"
+    assert registry.get("news_illustrated").admin_title == "AI Illustrated News"
     assert registry.get("news_front_pages").admin_title == "Newspapers"
 
 
