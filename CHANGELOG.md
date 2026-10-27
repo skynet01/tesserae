@@ -30,8 +30,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   home page), while manual sends and Next / Previous still go. When it
   ends, or is set to 0, the display gets what it missed: its lineup's
   current page, or a daily or interval fire it sat out that day if that
-  came later, waiting for quiet hours to end if need be. The other
-  displays aren't repainted. Until now it only held a rotation the panel
+  came later, waiting for quiet hours to end if need be (not one whose
+  lineup or schedule was deleted, turned off or moved off the display
+  meanwhile). The other displays aren't repainted. Until now it only held a rotation the panel
   had been paged away from by a button, so lineups kept advancing through
   it.
 
@@ -45,8 +46,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   picker, notifications, firmware install) run one after another in the
   background, in the order they arrived, so a slow one no longer holds up
   Home Assistant's other commands or its connection to Tesserae. Anything
-  that doesn't land shows on Last error. Switches and Hold still apply at
-  once.
+  that doesn't land shows on Last error, and one still running after two
+  minutes is reported there while the commands behind it go ahead. Hold and
+  the app switches still apply at once.
 - A display's lineup position follows daily and interval lineups too, so a
   button press or Next after one of them fires steps that lineup rather
   than the one that showed before it.

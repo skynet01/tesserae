@@ -591,3 +591,51 @@ def test_a_failed_catch_up_retries_after_a_pause(tmp_path: Path) -> None:
     assert len(rig.push.calls) == 2
     assert rig.push.calls[-1]["page_id"] == "a"
     assert "frame" not in rig.sched._hold_catchups
+
+
+def _dinner_missed(rig: Rig) -> None:
+    rig.decks.upsert(_shared_dinner())
+    rig.sched._tick_once(at(17, 0))
+    _hold(rig, "frame", at(18, 30))
+    rig.sched._tick_once(at(18, 0, 30))
+    rig.push.calls.clear()
+
+
+def test_a_deleted_lineup_is_not_replayed(tmp_path: Path) -> None:
+    # The reproduced bug: dinner deleted while frame was held, and dinner
+    # still painted when the hold ended.
+    rig = _rig(tmp_path)
+    _dinner_missed(rig)
+    rig.decks.delete("dinner")
+    rig.sched._tick_once(at(18, 31))
+    assert rig.push.calls == []
+    assert "frame" not in rig.sched._hold_catchups
+
+
+def test_a_disabled_lineup_is_not_replayed(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    _dinner_missed(rig)
+    rig.decks.upsert(_shared_dinner().model_copy(update={"enabled": False}))
+    rig.sched._tick_once(at(18, 31))
+    assert rig.push.calls == []
+
+
+def test_a_lineup_that_dropped_the_display_is_not_replayed(tmp_path: Path) -> None:
+    rig = _rig(tmp_path)
+    _dinner_missed(rig)
+    rig.decks.upsert(_shared_dinner().model_copy(update={"device_ids": ["hall"]}))
+    rig.sched._tick_once(at(18, 31))
+    assert rig.push.calls == []
+
+
+def test_a_deleted_schedule_is_not_replayed(tmp_path: Path) -> None:
+    rig = _rig(tmp_path, bound={"news": ["frame", "hall"]})
+    rig.schedules.upsert(
+        Schedule(id="news", name="News", page_id="news", type="interval", interval_minutes=60)
+    )
+    _hold(rig, "frame", at(10, 20))
+    rig.sched._tick_once(at(10, 0))
+    rig.push.calls.clear()
+    rig.schedules.delete("news")
+    rig.sched._tick_once(at(10, 21))
+    assert rig.push.calls == []

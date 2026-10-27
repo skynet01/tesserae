@@ -124,6 +124,12 @@ HOLD_MAX_MINUTES = 720
 # is plenty; more are refused with a Last error.
 COMMAND_QUEUE_MAX = 32
 
+# A command running longer than this is reported on Last error and left to
+# finish on its own thread while a fresh worker takes the rest of the
+# queue, so one stuck render can't hold up every display's commands. Above
+# the navigation-lock wait (30 s) and a typical settle, below forever.
+COMMAND_TIME_LIMIT_S = 120.0
+
 # App-section switches (Settings -> Server -> Network & integrations) that
 # trim what's published. Both default ON when absent, so an install that
 # never saved them keeps every entity it had.
@@ -875,8 +881,13 @@ class HomeAssistantDiscovery:
         self._commands: queue.Queue[tuple[str, Callable[[], str | None]] | None] = queue.Queue(
             maxsize=COMMAND_QUEUE_MAX
         )
+        # The thread that owns the queue. It clears this itself on exit;
+        # a worker that finds it isn't the owner any more (abandoned over
+        # a stuck job) stops after its current job.
         self._command_worker: threading.Thread | None = None
         self._command_worker_lock = threading.Lock()
+        self._commands_stopping = threading.Event()
+        self._command_time_limit_s = COMMAND_TIME_LIMIT_S
         self._ticker: threading.Thread | None = None
 
     # -- device helpers -------------------------------------------------
@@ -1396,7 +1407,11 @@ class HomeAssistantDiscovery:
             if leaf == "enabled":
                 on = self._on_off(payload)
                 if on is not None:
-                    self._set_lineup_enabled(deck, on)
+                    # Invalidating the lineup's warmed frames takes the push
+                    # manager's render lock: on the worker, not inline.
+                    self._enqueue(
+                        str(deck.name), lambda: self._set_lineup_enabled_by_id(deck_id, on)
+                    )
             elif leaf == "action":
                 label = str(deck.name)
                 if text == "push":
@@ -1416,6 +1431,12 @@ class HomeAssistantDiscovery:
     def _lineup_step_by_id(self, deck_id: str, delta: int) -> str | None:
         deck = self._deck(deck_id)
         return self._lineup_step(deck, delta) if deck is not None else None
+
+    def _set_lineup_enabled_by_id(self, deck_id: str, enabled: bool) -> str | None:
+        deck = self._deck(deck_id)
+        if deck is not None:
+            self._set_lineup_enabled(deck, enabled)
+        return None
 
     def _set_lineup_enabled(self, deck: Any, enabled: bool) -> None:
         store = self._hooks.deck_store
@@ -1731,38 +1752,63 @@ class HomeAssistantDiscovery:
             )
 
     def _ensure_command_worker(self) -> None:
+        """Make sure a worker owns the queue. A worker that is shutting down
+        but hasn't exited yet is taken back (the stop is cancelled) rather
+        than run alongside a replacement, so commands keep their order
+        across a stop / start."""
         with self._command_worker_lock:
             worker = self._command_worker
             if worker is not None and worker.is_alive():
+                self._commands_stopping.clear()
                 return
-            self._command_worker = threading.Thread(
+            self._commands_stopping.clear()
+            worker = threading.Thread(
                 target=self._command_worker_loop, name="ha-discovery-commands", daemon=True
             )
-            self._command_worker.start()
+            self._command_worker = worker
+            worker.start()
 
     def _stop_command_worker(self) -> None:
-        """Let queued commands finish, then end the worker (bounded wait)."""
+        """Ask the worker to finish what's queued and exit (bounded wait).
+        The stop is an Event, so a full queue can't swallow it; the
+        sentinel only wakes an idle worker sooner. The worker keeps owning
+        the queue until it has actually exited."""
         with self._command_worker_lock:
-            worker, self._command_worker = self._command_worker, None
+            worker = self._command_worker
+            self._commands_stopping.set()
         if worker is None or not worker.is_alive():
             return
         with contextlib.suppress(queue.Full):
-            self._commands.put(None, timeout=1.0)
+            self._commands.put_nowait(None)
         worker.join(timeout=2.0)
 
     def _command_worker_loop(self) -> None:
+        me = threading.current_thread()
         while True:
-            item = self._commands.get()
+            with self._command_worker_lock:
+                if self._command_worker is not me:
+                    return  # abandoned over a stuck job; a new worker has the queue
             try:
-                if item is None:
-                    return
-                self._run_command(*item)
+                item = self._commands.get(timeout=0.2)
+            except queue.Empty:
+                with self._command_worker_lock:
+                    if self._commands_stopping.is_set() and self._command_worker is me:
+                        self._command_worker = None
+                        return
+                continue
+            try:
+                if item is not None:
+                    self._run_command(*item)
             except Exception:
                 logger.exception("HA discovery: command worker failed")
             finally:
                 self._commands.task_done()
 
     def _run_command(self, label: str, job: Callable[[], str | None]) -> None:
+        me = threading.current_thread()
+        watchdog = threading.Timer(self._command_time_limit_s, self._command_overran, (me, label))
+        watchdog.daemon = True
+        watchdog.start()
         self._publish_str(STATE_TOPIC_BUSY, "1", retain=True)
         try:
             err = job()
@@ -1770,11 +1816,33 @@ class HomeAssistantDiscovery:
             logger.exception("HA discovery: %s failed", label)
             err = "failed"
         finally:
+            watchdog.cancel()
             self._publish_str(STATE_TOPIC_BUSY, "0", retain=True)
         if err:
             # Hooks that already name the display don't get it twice.
             message = err if err.startswith(f"{label}:") else f"{label}: {err}"
             self._publish_str(STATE_TOPIC_LAST_ERROR, message[:240], retain=True)
+
+    def _command_overran(self, worker: threading.Thread, label: str) -> None:
+        """A job ran past the time limit: say so, and hand the rest of the
+        queue to a fresh worker. The stuck one finishes its job and exits."""
+        with self._command_worker_lock:
+            if self._command_worker is not worker:
+                return
+            self._command_worker = None
+        logger.warning(
+            "HA discovery: %s still running after %.0fs; later commands go ahead",
+            label,
+            self._command_time_limit_s,
+        )
+        self._publish_str(
+            STATE_TOPIC_LAST_ERROR,
+            f"{label}: still running after {self._command_time_limit_s:.0f}s; "
+            "later commands go ahead"[:240],
+            retain=True,
+        )
+        if not self._commands_stopping.is_set():
+            self._ensure_command_worker()
 
     def _wait_commands_idle(self, timeout: float = 5.0) -> bool:
         """Block until every queued command has run (tests, shutdown)."""

@@ -211,10 +211,12 @@ def test_lineup_enabled_command_flips_deck_and_invalidates(tmp_path: Path) -> No
     )
     ha.start()
     ha._on_lineup_cmd("tesserae/ha/lineup/morning/cmd/enabled", b"OFF")
+    assert ha._wait_commands_idle()
     assert decks.get("morning").enabled is False
     assert invalidated == ["morning"]
     assert _payload_for(client, "tesserae/ha/lineup/morning/state/enabled") == b"OFF"
     ha._on_lineup_cmd("tesserae/ha/lineup/morning/cmd/enabled", b"ON")
+    assert ha._wait_commands_idle()
     assert decks.get("morning").enabled is True
     assert _payload_for(client, "tesserae/ha/lineup/morning/state/enabled") == b"ON"
 
@@ -1329,17 +1331,18 @@ def test_every_slow_command_returns_from_the_mqtt_callback_at_once(tmp_path: Pat
     # Cheap toggles still apply inline, while the worker is busy.
     ha._on_device_cmd("tesserae/ha/dev/lounge/cmd/hold", b"30")
     ha._on_automation_cmd(CMD_TOPIC_AUTOMATION, b"OFF")
-    ha._on_lineup_cmd("tesserae/ha/lineup/morning/cmd/enabled", b"OFF")
+    ha._on_lineup_cmd("tesserae/ha/lineup/morning/cmd/enabled", b"OFF")  # queued too
     assert time.monotonic() - t0 < 1.0
     assert rot_state.get("lounge").automation_hold_until is not None
     assert settings.get_section("app")["automation_paused"] is True
-    assert decks.get("morning").enabled is False
+    assert decks.get("morning").enabled is True
     assert notes == [] and installs == [] and steps == []
     gate.set()
     assert ha._wait_commands_idle()
     assert notes == [("lounge", "Bins tonight"), (None, "Dinner is ready")]
     assert installs == ["lounge"]
     assert steps == [("lounge", 1)]
+    assert decks.get("morning").enabled is False
 
 
 def test_commands_for_a_display_run_in_the_order_sent(tmp_path: Path) -> None:
@@ -1419,3 +1422,114 @@ def test_queued_commands_skip_a_display_or_lineup_removed_meanwhile(tmp_path: Pa
     gate.set()
     assert ha._wait_commands_idle()
     assert order == [("home", None)]  # nothing ran for the removed targets
+
+
+# ---------- command worker lifecycle and limits ----------
+
+
+def _gated_jobs(ha, labels: list[str], gate, done: list[str]) -> None:
+    for label in labels:
+
+        def job(label: str = label) -> str | None:
+            if label == labels[0]:
+                assert gate.wait(5)
+            done.append(label)
+            return None
+
+        ha._enqueue(label, job)
+
+
+def test_lineup_toggle_returns_at_once_while_invalidation_waits(tmp_path: Path) -> None:
+    # The reproduced stall: invalidating the lineup's warmed frames takes the
+    # push manager's render lock, so the OFF callback waited out a render.
+    import threading
+    import time
+
+    decks, _nav, settings = _stores(tmp_path)
+    decks.upsert(_deck())
+    gate = threading.Event()
+    ha, _client, _pm, _ = _wire(
+        tmp_path,
+        hooks=HaHooks(
+            deck_store=decks, settings_store=settings, invalidate_deck_fn=lambda _d: gate.wait(5)
+        ),
+    )
+    ha.start()
+    t0 = time.monotonic()
+    ha._on_lineup_cmd("tesserae/ha/lineup/morning/cmd/enabled", b"OFF")
+    assert time.monotonic() - t0 < 0.5
+    gate.set()
+    assert ha._wait_commands_idle()
+    assert decks.get("morning").enabled is False
+
+
+def test_stop_with_a_full_queue_still_ends_the_worker(tmp_path: Path) -> None:
+    import threading
+
+    from app import ha_discovery as ha_module
+
+    ha, _client, _pm, _ = _wire(tmp_path)
+    ha.start()
+    gate, started, done = threading.Event(), threading.Event(), []
+
+    def first() -> str | None:
+        started.set()
+        assert gate.wait(5)
+        done.append("first")
+        return None
+
+    ha._enqueue("first", first)
+    assert started.wait(5)  # the worker holds it, so the queue can fill
+    for i in range(ha_module.COMMAND_QUEUE_MAX):
+        ha._enqueue(f"j{i}", lambda i=i: done.append(f"j{i}"))
+    worker = ha._command_worker
+    assert worker is not None and ha._commands.full()
+    stopper = threading.Thread(target=ha.stop)
+    stopper.start()
+    # Past the old sentinel's 1 s put timeout: a stop that relied on the
+    # sentinel alone lost it to the full queue and the worker never exited.
+    threading.Event().wait(1.5)
+    gate.set()
+    stopper.join(5)
+    worker.join(5)
+    assert not worker.is_alive()
+    assert ha._command_worker is None
+    assert len(done) == ha_module.COMMAND_QUEUE_MAX + 1  # queued work still ran
+
+
+def test_restart_keeps_command_order(tmp_path: Path) -> None:
+    # The reproduced reordering: after a stop / start the replacement worker
+    # ran jobs alongside the old one (second, first, third).
+    import threading
+
+    ha, _client, _pm, _ = _wire(tmp_path)
+    ha.start()
+    gate, done = threading.Event(), []
+    _gated_jobs(ha, ["first", "second"], gate, done)
+    old = ha._command_worker
+    ha._stop_command_worker()  # times out: "first" is still running
+    _gated_jobs(ha, ["third"], gate, done)  # restart before the old one exited
+    assert ha._command_worker is old  # handed back, not a second worker
+    gate.set()
+    assert ha._wait_commands_idle()
+    assert done == ["first", "second", "third"]
+
+
+def test_a_stuck_command_is_reported_and_later_ones_go_ahead(tmp_path: Path) -> None:
+    import threading
+
+    ha, client, _pm, _ = _wire(tmp_path)
+    ha.start()
+    ha._command_time_limit_s = 0.2
+    gate, done = threading.Event(), []
+    _gated_jobs(ha, ["Lounge", "Hall"], gate, done)
+    for _ in range(50):
+        if done == ["Hall"]:
+            break
+        threading.Event().wait(0.1)
+    assert done == ["Hall"]  # ran while the stuck one was still going
+    error = _payload_for(client, "tesserae/ha/state/last_error") or b""
+    assert error.startswith(b"Lounge: still running after")
+    gate.set()
+    assert ha._wait_commands_idle()
+    assert done == ["Hall", "Lounge"]

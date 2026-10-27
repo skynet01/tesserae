@@ -1015,7 +1015,13 @@ class Scheduler:
                         ),
                     )
                 )
-        for fire in entry.fires.values():
+        for schedule_id, fire in list(entry.fires.items()):
+            if not self._missed_fire_still_valid(device_id, schedule_id, fire):
+                # Deleted, disabled, or no longer aimed at this display
+                # since it missed it: nothing to replay.
+                with self._lock:
+                    entry.fires.pop(schedule_id, None)
+                continue
             candidates.append(
                 (
                     fire.fired_at,
@@ -1031,6 +1037,25 @@ class Scheduler:
         # (the order the fire pass lands them in).
         _when, _priority, _rank, deliver = max(candidates, key=lambda c: (c[0], c[1], c[2]))
         return deliver()
+
+    def _missed_fire_still_valid(
+        self, device_id: str, schedule_id: str, fire: _PendingFire
+    ) -> bool:
+        """Whether a missed fire may still be replayed: its record exists,
+        is enabled and still targets ``device_id``, and its page exists."""
+        if self._page_exists is not None and not self._page_exists(fire.page_id):
+            return False
+        record = next((r for r in self._timed_records() if r.id == schedule_id), None)
+        if record is None or not record.enabled:
+            return False
+        if fire.deck_id is not None:
+            deck = self._deck_store.get(fire.deck_id) if self._deck_store is not None else None
+            return deck is not None and deck.enabled and device_id in deck.device_ids
+        record_devices = getattr(record, "device_ids", None)
+        if record_devices:
+            return device_id in record_devices
+        bound = self._page_devices(record.page_id)
+        return not bound or device_id in bound
 
     def _catchup_cycle(
         self,
