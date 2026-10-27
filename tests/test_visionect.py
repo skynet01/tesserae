@@ -736,7 +736,7 @@ def test_glass_check_resends_once_after_the_crc_has_had_time() -> None:
     svc._check_glass(sign, status)
     assert sign.shown_digest == "frame-a"  # never a loop
     svc._check_glass(sign, SimpleNamespace(display_state_crc=111))
-    assert not sign.crc_corrected  # a match re-arms the check
+    assert sign.crc_corrected  # a match doesn't re-arm it (only a new frame's ACK does)
 
 
 def test_a_slow_stop_never_lets_a_new_run_share_its_state(harness: Harness, monkeypatch) -> None:
@@ -1849,3 +1849,69 @@ def test_busy_addresses_cant_lock_the_sign_out(tmp_path: Path, monkeypatch) -> N
             s.close()
     finally:
         h.svc.stop()
+
+
+def test_restart_adoption_uses_the_status_that_arrived_during_the_encode(
+    harness: Harness, monkeypatch
+) -> None:
+    """The first status reports another CRC; one with the same geometry,
+    arriving while the frame encodes, reports the frame's. Adoption must
+    read the newer one (it used to read the first: a needless resend)."""
+    harness.render("frame-a")
+    status = StatusPacket(records=STATUS_TAGS, sentinel=0)
+    path = harness.renders / "frame-a.png"
+    checksum = int(visionect._encode(path, visionect.sign_panel(status)).state_checksum)
+    real = visionect._encode
+
+    def _slow_encode(path: Path, panel: Any) -> Any:
+        time.sleep(0.6)
+        return real(path, panel)
+
+    monkeypatch.setattr(visionect, "_encode", _slow_encode)
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status(with_tag(9, checksum ^ 1))
+        time.sleep(0.2)
+        sign.status(with_tag(9, checksum))
+        assert _wait(lambda: (harness.svc.sign_view(UUID) or {}).get("in_sync") is True)
+        sign.wait_for(lambda s: len(s.images()) > 0, timeout=1.0)
+        assert sign.images() == []
+    finally:
+        sign.close()
+
+
+def test_a_matching_status_doesnt_rearm_the_correction_of_the_same_frame() -> None:
+    """Corrective resend acked, then a matching status, then a mismatch
+    again: still no second correction of that frame."""
+    from pyvisionect.packets import ControlPacket as Control
+    from pyvisionect.session import Acked
+
+    svc = visionect.VisionectService()
+    sign = svc._sign(UUID)
+    conn = SimpleNamespace(device_id=visionect.uuid_bytes(UUID), closed=False)
+    sign.conn = conn
+    sign.shown_digest, sign.shown_checksum = "frame-a", 111
+    long_ago = time.time() - visionect.CRC_CONVERGE_S - 1
+    sign.shown_at = long_ago
+    svc._check_glass(sign, SimpleNamespace(display_state_crc=222))
+    assert sign.crc_corrected and sign.shown_digest == ""
+    sign.inflight = visionect._Inflight(
+        kind="image", packet_id=1, conn=conn, writer=None, digest="frame-a", checksum=111
+    )
+    svc._handle_event(
+        conn, Acked(packet_id=1, control=Control.ack(), device_id=visionect.uuid_bytes(UUID))
+    )
+    svc._check_glass(sign, SimpleNamespace(display_state_crc=111))  # it matches for a while
+    sign.shown_at = long_ago
+    svc._check_glass(sign, SimpleNamespace(display_state_crc=222))  # then drifts again
+    assert sign.shown_digest == "frame-a"
+
+
+def test_a_long_run_of_render_failures_doesnt_overflow_the_backoff() -> None:
+    svc = visionect.VisionectService()
+    sign = svc._sign(UUID)
+    device = SimpleNamespace(id="lobby")
+    sign.failed_digest, sign.failed_tries = "frame-a", 1024
+    svc._render_failed(sign, device, "frame-a", 1.0, FileNotFoundError("gone"))  # type: ignore[arg-type]
+    assert sign.failed_retry_at - time.monotonic() <= visionect.FAILED_RETRY_MAX_S + 1

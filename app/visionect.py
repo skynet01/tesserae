@@ -938,7 +938,9 @@ class VisionectService:
                 sign.repaint_until = 0.0
                 sign.last_error = ""
                 checksum = int(frame.state_checksum)
-                reported = status.display_state_crc
+                # The newest status (same geometry, checked above): one that
+                # arrived during the encode may report a different CRC.
+                reported = getattr(sign.status, "display_state_crc", None)
                 if not sign.shown_digest and reported in (checksum, perturbed_checksum(checksum)):
                     # Before our first ACK this run (a restart) the sign's CRC
                     # is the best evidence: it already shows this frame (as a
@@ -1047,8 +1049,8 @@ class VisionectService:
         if digest != sign.failed_digest:
             sign.failed_tries = 0
         sign.failed_digest, sign.failed_stamp = digest, stamp
-        sign.failed_tries += 1
-        backoff = min(FAILED_RETRY_S * 2 ** (sign.failed_tries - 1), FAILED_RETRY_MAX_S)
+        sign.failed_tries = min(sign.failed_tries + 1, 32)
+        backoff = min(FAILED_RETRY_S * 2 ** min(sign.failed_tries - 1, 16), FAILED_RETRY_MAX_S)
         sign.failed_retry_at = time.monotonic() + backoff
         sign.last_error = "The latest render couldn't be read, so the sign keeps its last frame."
         if sign.failed_logged == digest:
@@ -1348,8 +1350,7 @@ class VisionectService:
         if reported is None or sign.shown_checksum is None or sending:
             return
         if reported == sign.shown_checksum:
-            sign.crc_corrected = False
-            return
+            return  # (a match doesn't re-arm the correction: only a new frame's ACK does)
         if time.time() - sign.shown_at < CRC_CONVERGE_S or sign.crc_corrected:
             return
         sign.crc_corrected = True
