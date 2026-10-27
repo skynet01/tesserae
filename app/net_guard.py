@@ -17,6 +17,16 @@ Guards, best-effort (not a substitute for network isolation):
   initial host check. Each redirect hop is re-validated before it's followed.
 * **Response cap.** Reads at most ``max_bytes`` so a hostile or runaway
   endpoint can't stream gigabytes into memory.
+* **Pinned connections.** ``fetch_bytes`` / ``fetch_json`` (and anything
+  using :func:`guarded_opener`) connect to an address that was checked,
+  trying each checked address in turn, never one a second DNS lookup
+  returns; the Host header and TLS name are the IDNA form of the host.
+* **No proxies.** That path ignores ``http_proxy`` / ``https_proxy``: a
+  proxy would resolve the host itself and undo the check. A deployment
+  that can only reach the web through a proxy can't fetch user-chosen URLs
+  (remote images, fonts, REST widgets, comics imports) until this grows an
+  explicit, checked proxy setting. Other outbound calls (updates, the
+  marketplace) are unaffected.
 
 mypy --strict applies, see pyproject.toml.
 """
@@ -30,6 +40,7 @@ import json
 import re
 import socket
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -199,7 +210,7 @@ class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
         self, req, fp, code, msg, headers, newurl
     ):
         _validate_url(newurl, allow_local=self._allow_local)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        return super().redirect_request(req, fp, code, msg, headers, canonical_url(newurl))
 
 
 # -- connecting to the address that was checked ---------------------------------
@@ -211,37 +222,76 @@ class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
 # keeping the URL's host for the Host header and TLS (SNI, certificate).
 
 
-def _pin(req: urllib.request.Request, allow_local: bool) -> str:
+def canonical_url(url: str) -> str:
+    """``url`` with its host as the socket and the wire will see it:
+    percent-decoded and IDNA-encoded (``bücher.example`` becomes
+    ``xn--bcher-kva.example``), the port kept, user info dropped. The Host
+    header and TLS's SNI are then plain ASCII, the name that was checked.
+    Raises :class:`BlockedURLError` for a URL that can't be one."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port
+    except ValueError as err:
+        raise BlockedURLError("malformed url") from err
+    host = canonical_host(parts.hostname or "")
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def _pin(req: urllib.request.Request, allow_local: bool) -> list[str]:
     try:
         parts = urllib.parse.urlsplit(req.full_url)
         port = parts.port
     except ValueError as err:
         raise BlockedURLError("malformed url") from err
-    return resolve_checked(parts.hostname or "", port, allow_local=allow_local)[0]
+    return resolve_checked(parts.hostname or "", port, allow_local=allow_local)
+
+
+def _connect(addresses: list[str], port: int, timeout: Any, source: Any) -> socket.socket:
+    """A connection to the first of the checked ``addresses`` that answers,
+    in the order the resolver gave them (an IPv6 address that can't be
+    reached falls back to IPv4), all inside ``timeout``."""
+    deadline = None
+    if isinstance(timeout, (int, float)):
+        deadline = time.monotonic() + timeout
+    failure: OSError | None = None
+    for addr in addresses:
+        left = timeout
+        if deadline is not None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+        try:
+            return socket.create_connection((addr, port), left, source)
+        except OSError as err:
+            failure = err
+    raise failure or TimeoutError("timed out")
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, host: str, *, pinned_ip: str, **kwargs: Any) -> None:
+    def __init__(self, host: str, *, pinned: list[str], **kwargs: Any) -> None:
         super().__init__(host, **kwargs)
-        self._pinned_ip = pinned_ip
+        self._pinned = pinned
 
     def connect(self) -> None:
-        self.sock = socket.create_connection(
-            (self._pinned_ip, self.port), self.timeout, getattr(self, "source_address", None)
+        self.sock = _connect(
+            self._pinned, self.port, self.timeout, getattr(self, "source_address", None)
         )
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     def __init__(
-        self, host: str, *, pinned_ip: str, context: ssl.SSLContext, **kwargs: Any
+        self, host: str, *, pinned: list[str], context: ssl.SSLContext, **kwargs: Any
     ) -> None:
         super().__init__(host, context=context, **kwargs)
-        self._pinned_ip = pinned_ip
+        self._pinned = pinned
         self._tls = context
 
     def connect(self) -> None:
-        sock = socket.create_connection(
-            (self._pinned_ip, self.port), self.timeout, getattr(self, "source_address", None)
+        sock = _connect(
+            self._pinned, self.port, self.timeout, getattr(self, "source_address", None)
         )
         self.sock = self._tls.wrap_socket(sock, server_hostname=self.host)
 
@@ -252,8 +302,8 @@ class _PinnedHTTPHandler(urllib.request.HTTPHandler):
         self._allow_local = allow_local
 
     def http_open(self, req: urllib.request.Request) -> Any:
-        ip = _pin(req, self._allow_local)
-        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned_ip=ip), req)
+        pinned = _pin(req, self._allow_local)
+        return self.do_open(functools.partial(_PinnedHTTPConnection, pinned=pinned), req)
 
 
 class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
@@ -263,19 +313,27 @@ class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
         self._allow_local = allow_local
 
     def https_open(self, req: urllib.request.Request) -> Any:
-        ip = _pin(req, self._allow_local)
+        pinned = _pin(req, self._allow_local)
         return self.do_open(
-            functools.partial(_PinnedHTTPSConnection, pinned_ip=ip, context=self._tls), req
+            functools.partial(_PinnedHTTPSConnection, pinned=pinned, context=self._tls), req
         )
 
 
-def guarded_opener(*, allow_local: bool = False) -> urllib.request.OpenerDirector:
+def guarded_opener(
+    *,
+    allow_local: bool = False,
+    redirects: urllib.request.BaseHandler | None = None,
+) -> urllib.request.OpenerDirector:
     """An opener whose every request (and redirect hop) is checked and
-    connects to the address it was checked at. No proxies: a proxy would
-    resolve the host itself."""
+    connects to an address it was checked at. ``redirects`` replaces the
+    guarded redirect follower (a caller that follows redirects itself passes
+    a handler that doesn't). Proxies are not used, deliberately: a proxy
+    resolves the host itself, which would undo the check, so the
+    ``http_proxy`` / ``https_proxy`` environment variables are ignored on
+    this path (user-chosen URLs only; other outbound calls keep them)."""
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
-        _GuardedRedirect(allow_local=allow_local),
+        redirects if redirects is not None else _GuardedRedirect(allow_local=allow_local),
         _PinnedHTTPHandler(allow_local=allow_local),
         _PinnedHTTPSHandler(allow_local=allow_local),
     )
@@ -322,7 +380,7 @@ def fetch_bytes(
     req_headers = {"User-Agent": _USER_AGENT}
     if headers:
         req_headers.update(headers)
-    req = urllib.request.Request(url, headers=req_headers)
+    req = urllib.request.Request(canonical_url(url), headers=req_headers)
     opener = guarded_opener(allow_local=allow_local)
     with opener.open(req, timeout=timeout) as resp:
         raw = resp.read(max_bytes + 1)

@@ -195,3 +195,67 @@ def test_a_pinned_request_keeps_the_host_name(monkeypatch: pytest.MonkeyPatch) -
     assert body == b"ok"
     assert connected == [("93.184.216.34", 8080)]
     assert b"Host: pictures.example:8080" in b"".join(sent)
+
+
+class _FakeSock:
+    def __init__(self, sent: list[bytes]) -> None:
+        self._sent = sent
+
+    def sendall(self, data: bytes) -> None:
+        self._sent.append(data)
+
+    def makefile(self, *a: Any, **k: Any) -> Any:
+        import io
+
+        return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+    def close(self) -> None:
+        pass
+
+    def setsockopt(self, *a: Any) -> None:
+        pass
+
+
+def test_an_unreachable_ipv6_address_falls_back_to_ipv4(monkeypatch: pytest.MonkeyPatch) -> None:
+    answers = [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:2800:220:1::1", 0, 0, 0)),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+    ]
+    monkeypatch.setattr(net_guard.socket, "getaddrinfo", lambda *a, **k: answers)
+    tried: list[str] = []
+    sent: list[bytes] = []
+
+    def connect(address: tuple[str, int], *a: Any, **k: Any) -> Any:
+        tried.append(address[0])
+        if ":" in address[0]:
+            raise OSError("network unreachable")
+        return _FakeSock(sent)
+
+    monkeypatch.setattr(net_guard.socket, "create_connection", connect)
+    body, _ = net_guard.fetch_bytes("http://dual.example/x")
+    assert body == b"ok"
+    assert tried == ["2606:2800:220:1::1", "93.184.216.34"]
+
+
+def test_the_host_header_carries_the_idna_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        net_guard.socket,
+        "getaddrinfo",
+        lambda host, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))],
+    )
+    sent: list[bytes] = []
+    monkeypatch.setattr(net_guard.socket, "create_connection", lambda *a, **k: _FakeSock(sent))
+    net_guard.fetch_bytes("http://BÜCHER.example:8080/x")
+    wire = b"".join(sent)
+    assert b"Host: xn--bcher-kva.example:8080" in wire
+    assert net_guard.canonical_url("https://user:pw@BÜCHER.example./a?b=1") == (
+        "https://xn--bcher-kva.example/a?b=1"
+    )
+
+
+def test_the_guarded_path_ignores_proxy_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Documented: a proxy would resolve the host itself, undoing the check."""
+    monkeypatch.setenv("http_proxy", "http://proxy.invalid:3128")
+    opener = net_guard.guarded_opener()
+    proxies = [h for h in opener.handlers if isinstance(h, net_guard.urllib.request.ProxyHandler)]
+    assert all(not h.proxies for h in proxies)  # none at all, or one with no proxies
