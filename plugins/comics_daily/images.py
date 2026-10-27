@@ -38,6 +38,8 @@ from typing import Any
 
 from PIL import Image, ImageOps
 
+from app import media_lifecycle as lifecycle
+
 STATE_FILE = "state.json"
 LOG_FILE = "log.json"
 COOKIE_STATUS_FILE = "gocomics-cookie-status.json"
@@ -59,6 +61,8 @@ JPEG_QUALITY = 90
 PRUNE_GRACE_S = 3600
 # A source nobody has asked for in this long is forgotten with its pictures.
 FORGET_AFTER_S = 30 * 86400
+# The pictures folder stays under this; past it the oldest unreferenced go.
+MAX_BYTES = 200 * 1024 * 1024
 
 _NAME_RE = re.compile(r"^[a-z0-9-]{1,80}-[0-9a-f]{12}\.(?:png|jpg)$")
 _KEY_SAFE_RE = re.compile(r"[^a-z0-9]+")
@@ -339,17 +343,38 @@ class Store:
         path = self.image_dir / name
         return path if path.is_file() else None
 
-    def prune(self, now: float | None = None) -> None:
-        """Forget long-unused sources and delete pictures nothing points at."""
+    def prune(
+        self,
+        now: float | None = None,
+        wanted: set[str] | None = None,
+        max_bytes: int = MAX_BYTES,
+    ) -> list[str]:
+        """Forget sources nothing shows any more and delete the pictures
+        nothing points at (app.media_lifecycle's policy).
+
+        ``wanted`` is every source the settings still name (each strip in
+        any mode, its manual picture, the Far Side), when the caller knows
+        them: a record outside it (a removed or renamed strip, the manual
+        picture of a strip that left the list) is forgotten once untouched
+        for PRUNE_GRACE_S. Without it, a record is forgotten after
+        FORGET_AFTER_S without a try, manual pictures excepted. Then the
+        pictures no record points at go after PRUNE_GRACE_S, and older
+        unreferenced ones first while the folder is over ``max_bytes``. A
+        picture a record points at (the one on screen) is never deleted.
+        Returns the files deleted."""
         now = time.time() if now is None else now
         with _LOCK:
             sources = self.sources()
-            stale = [
-                key
-                for key, entry in sources.items()
-                if not key.startswith(MANUAL_PREFIX)
-                and now - float(entry.get("last_attempt") or 0) > FORGET_AFTER_S
-            ]
+            stale = []
+            for key, entry in sources.items():
+                touched = max(
+                    float(entry.get("last_attempt") or 0), float(entry.get("last_success") or 0)
+                )
+                if wanted is not None and key not in wanted:
+                    if now - touched > PRUNE_GRACE_S:
+                        stale.append(key)
+                elif not key.startswith(MANUAL_PREFIX) and now - touched > FORGET_AFTER_S:
+                    stale.append(key)
             for key in stale:
                 del sources[key]
             if stale:
@@ -361,10 +386,7 @@ class Store:
                 if isinstance(pic, dict)
             }
         if not self.image_dir.is_dir():
-            return
-        for path in self.image_dir.iterdir():
-            if path.name in keep or not path.is_file():
-                continue
-            with contextlib.suppress(OSError):
-                if now - path.stat().st_mtime > PRUNE_GRACE_S:
-                    path.unlink()
+            return []
+        return lifecycle.sweep(
+            self.image_dir, keep=keep, max_bytes=max_bytes, grace_s=PRUNE_GRACE_S, now=now
+        )

@@ -110,6 +110,7 @@ from flask import Blueprint, abort, current_app, render_template, send_from_dire
 from PIL import Image
 from werkzeug.wrappers import Response
 
+from app import media_lifecycle as lifecycle
 from app.plugin_http import fetch_text
 
 try:
@@ -181,6 +182,13 @@ HOST_FOLLOW_UPS = 8
 
 LOOKBACK_DAYS = 3  # today, yesterday, the day before
 RECHECK_S = 30 * 60  # how often to look again for an edition not out yet
+# A paper no render has asked for in this long (taken off the list, its
+# pinned cell gone) loses its pages, its newest included.
+ORPHAN_AFTER_S = 2 * 86400
+WANTED_REFRESH_S = 3600
+# The pages folder stays under this; past it the oldest pages that aren't a
+# listed paper's newest go first.
+MAX_BYTES = 300 * 1024 * 1024
 KEEP_DAYS = 5
 LAST_GOOD_MAX_DAYS = 30
 # A Last-Modified this many days before the edition date is last month's file.
@@ -1058,12 +1066,23 @@ def _claim(page: Page) -> bool:
     return True
 
 
-def prune(pages: Path, today: date, now: float) -> None:
+def prune(
+    pages: Path,
+    today: date,
+    now: float,
+    wanted: set[str] | None = None,
+    max_bytes: int | None = None,
+) -> list[str]:
     """Drop editions past ``KEEP_DAYS`` unless they are a paper's newest (its
-    last good page), everything past ``LAST_GOOD_MAX_DAYS``, and temp files an
-    interrupted write left behind; each only once it has gone unused for
-    ``PRUNE_GRACE_S``, since a renderer may still be loading a page a render
-    handed out a moment ago."""
+    last good page), everything past ``LAST_GOOD_MAX_DAYS``, a paper's pages
+    once no render has asked for it in ``ORPHAN_AFTER_S`` (a paper taken off
+    the list; ``wanted`` is the codes still asked for, when known), and temp
+    files an interrupted write left behind; each only once it has gone unused
+    for ``PRUNE_GRACE_S``, since a renderer may still be loading a page a
+    render handed out a moment ago. Then, while the folder is over
+    ``max_bytes`` (default MAX_BYTES), the oldest pages that aren't a wanted
+    paper's newest go first (app.media_lifecycle); a wanted paper's newest
+    page, the one on screen, never does. Returns the files deleted."""
     found: list[tuple[Path, str, date]] = []
     newest: dict[str, date] = {}
     for path in pages.glob("*.jpg"):
@@ -1074,12 +1093,34 @@ def prune(pages: Path, today: date, now: float) -> None:
     doomed = list(pages.glob(".*.tmp"))
     for path, code, day in found:
         age = (today - day).days
-        if age > LAST_GOOD_MAX_DAYS or (age > KEEP_DAYS and day != newest[code]):
+        orphan = wanted is not None and code not in wanted
+        if age > LAST_GOOD_MAX_DAYS or ((age > KEEP_DAYS or orphan) and day != newest[code]):
             doomed.append(path)
+        elif orphan:
+            doomed.append(path)  # the newest of a paper nobody asks for any more
+    gone: list[str] = []
     for path in doomed:
         identity = _identity(path)
-        if identity is not None and now - identity[2] / 1e9 > PRUNE_GRACE_S:
-            _unlink_if_same(path, identity)
+        if (
+            identity is not None
+            and now - identity[2] / 1e9 > PRUNE_GRACE_S
+            and _unlink_if_same(path, identity)
+        ):
+            gone.append(path.name)
+    protected = {
+        edition_path(pages, code, day).name
+        for code, day in newest.items()
+        if wanted is None or code in wanted
+    }
+    gone += lifecycle.sweep(
+        pages,
+        keep=protected,
+        max_bytes=MAX_BYTES if max_bytes is None else max_bytes,
+        grace_s=float("inf"),
+        now=now,
+        pattern="*.jpg",
+    )
+    return gone
 
 
 def _saved_width(path: Path) -> int | None:
@@ -1168,9 +1209,19 @@ def _section(state: dict[str, Any], name: str) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _recently_checked(state: dict[str, Any], code: str, now: float) -> bool:
+def _recently_checked(
+    state: dict[str, Any], code: str, now: float, today: date | None = None
+) -> bool:
+    """Whether ``code`` should wait before it is asked for again: tried in
+    the last RECHECK_S, or today's edition is on app.media_lifecycle's
+    backoff (30 minutes doubling, a few tries a day) after failed tries."""
     last = _section(state, "checked").get(code)
-    return isinstance(last, (int, float)) and 0 <= now - last < RECHECK_S
+    if isinstance(last, (int, float)) and 0 <= now - last < RECHECK_S:
+        return True
+    if today is None:
+        return False
+    retry = _section(state, "retry").get(code)
+    return not lifecycle.may_try(retry if isinstance(retry, dict) else None, today.isoformat(), now)
 
 
 # ----- the download worker ---------------------------------------------------
@@ -1340,7 +1391,7 @@ def _refresh(data_dir: Path, job: _Job) -> None:
     state_path = data_dir / STATE_FILE
     with _LOCK:
         state = _read_json(state_path)
-        if not job.force and _recently_checked(state, job.code, _wall()):
+        if not job.force and _recently_checked(state, job.code, _wall(), job.today):
             return
         have = newest_page(pages, job.code, job.today)
     current = have is not None and have.day >= job.today
@@ -1406,7 +1457,17 @@ def _refresh(data_dir: Path, job: _Job) -> None:
                 saved = None
                 blurry_day = sharp_day = None
             else:
-                prune(pages, job.today, now)
+                state_now = _read_json(state_path)
+                since = state_now.get("wanted_since")
+                # Only once renders have been tracked for ORPHAN_AFTER_S does
+                # "not asked for" mean anything (an upgrade starts tracking).
+                tracked = isinstance(since, (int, float)) and now - since >= ORPHAN_AFTER_S
+                wanted = {
+                    code
+                    for code, when in _section(state_now, "wanted").items()
+                    if isinstance(when, (int, float)) and now - when < ORPHAN_AFTER_S
+                }
+                prune(pages, job.today, now, wanted if tracked and wanted else None)
                 note(f"{saved[0]}: {_saved_line(saved[1], size, saved_how, redraw=sharpen)}")
         if saved is None and not sharpen:
             if have is not None:
@@ -1424,6 +1485,26 @@ def _refresh(data_dir: Path, job: _Job) -> None:
         if saved is None and have is None:
             failed[job.code] = failure
         state["failed"] = failed
+        # Today's edition still missing (not out yet, or the CDN failing):
+        # back off before asking again; the last good page stays up.
+        backoff = _section(state, "retry")
+        got_today = (saved is not None and saved[0] >= job.today) or current
+        if got_today:
+            backoff.pop(job.code, None)
+        else:
+            entry = backoff.get(job.code)
+            backoff[job.code] = lifecycle.failed(
+                entry if isinstance(entry, dict) else None, job.today.isoformat(), now
+            )
+            note(
+                f"today's edition: {lifecycle.describe(backoff[job.code], job.today.isoformat(), now)}"
+            )
+        today_iso = job.today.isoformat()
+        state["retry"] = {
+            code: entry
+            for code, entry in backoff.items()
+            if isinstance(entry, dict) and entry.get("day") == today_iso
+        }
         oldest = (job.today - timedelta(days=LOOKBACK_DAYS)).isoformat()
         retry = {
             code: entry
@@ -1599,14 +1680,33 @@ def _select(
                 break
         # A preview (the editor, the dashboards list) shows what the panel gets
         # next but never moves the rotation; repeating the held paper doesn't either.
+        dirty = False
         if chosen and not pinned and not preview and chosen[0] != held:
             state["current"], state["since"] = chosen[0], now
             state["order"] = list(candidates)  # where to resume if the list changes
+            dirty = True
+        # Which papers renders still ask for, for the cleanup; written at
+        # most hourly per paper so a render rarely writes for it.
+        asked = _section(state, "wanted")
+        for code in candidates:
+            when = asked.get(code)
+            if not isinstance(when, (int, float)) or now - when > WANTED_REFRESH_S:
+                asked[code] = now
+                dirty = True
+        if not isinstance(state.get("wanted_since"), (int, float)):
+            state["wanted_since"] = now
+            dirty = True
+        if dirty:
+            state["wanted"] = {
+                code: when
+                for code, when in asked.items()
+                if isinstance(when, (int, float)) and now - when < ORPHAN_AFTER_S
+            }
             _write_json(state_path, state)
         due = [
             code
             for code in candidates
-            if (force or not _recently_checked(state, code, now))
+            if (force or not _recently_checked(state, code, now, today))
             and (
                 not edition_path(pages, code, today).is_file()
                 or _wants_sharper(

@@ -75,6 +75,15 @@
     </div>
   </details>
   {% endif %}
+  {% if runs|length > 1 %}
+  <details class="dx-disclosure">
+    <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Earlier runs</span></summary>
+    <div class="dx-disclosure-body">
+      <pre class="dx-code dx-log-view dx-log-view--wrap">{% for r in runs %}{{ when(r.started) }}  {{ 'By hand  ' if r.reason == 'manual' else ('Collect  ' if r.reason == 'collect' else 'Scheduled') }}  {{ ('FAILED ' if r.failed else '') ~ (r.outcome or 'nothing made') }}
+{% endfor %}</pre>
+    </div>
+  </details>
+  {% endif %}
 {% endcall %}
 {% endif %}
 </div>

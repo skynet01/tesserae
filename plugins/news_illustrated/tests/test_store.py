@@ -6,6 +6,7 @@ import importlib.util
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -122,7 +123,9 @@ def test_pictures_are_named_by_content_and_only_ours_are_served(tmp_path: Path) 
     assert store.image_path(tmp_path, name) == tmp_path / "images" / name
     assert store.image_path(tmp_path, "../stories.json") is None
     assert store.image_path(tmp_path, "missing-1.jpg") is None
-    assert store.prune_images(tmp_path, set()) == 1
+    # Unused, but just written: it stays for the grace period, then goes.
+    assert store.prune_images(tmp_path, set()) == 0
+    assert store.prune_images(tmp_path, set(), now=time.time() + 2 * 3600) == 1
 
 
 def test_stories_round_trip_and_bad_files_read_as_empty(tmp_path: Path) -> None:

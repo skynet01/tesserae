@@ -147,6 +147,7 @@ def blueprint() -> Blueprint:
             running=pipeline.RUNNER.running(data_dir),
             edition_done=state.get("edition") == current,
             last=last,
+            runs=[r for r in state.get("runs") or [] if isinstance(r, dict)][::-1],
             when=lambda ts: datetime.fromtimestamp(int(ts or 0), tz).strftime("%Y-%m-%d %H:%M"),
             section=settings_section(
                 current_app.config["PLUGIN_REGISTRY"].get(PLUGIN_ID),

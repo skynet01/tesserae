@@ -12,6 +12,7 @@ import gzip
 import importlib.util
 import io
 import json
+import os
 import re
 import sys
 import threading
@@ -876,7 +877,7 @@ def test_settings_decide_what_shows_and_the_layout(
     monkeypatch.setattr(
         srv,
         "_enqueue",
-        lambda root, sources, today, force=False, pasted=None: queued.append(
+        lambda root, sources, today, force=False, pasted=None, **_: queued.append(
             ([s.key for s in sources], pasted)
         ),
     )
@@ -1418,7 +1419,7 @@ def test_renders_and_fetch_now_hand_the_cookies_to_the_worker(
     monkeypatch.setattr(
         module,
         "_enqueue",
-        lambda root, sources, today, force=False, pasted=None: handed.append(pasted),
+        lambda root, sources, today, force=False, pasted=None, **_: handed.append(pasted),
     )
     client.get("/plugins/comics_daily/")
     client.post("/plugins/comics_daily/cookies", data={"cookies": SHIELD})
@@ -1595,3 +1596,126 @@ def test_a_malformed_image_url_is_refused_on_save_and_harmless_if_stored(
     wanted, problems = module.sources_for(config)
     assert "gocomics:garfield" not in [s.key for s in wanted]
     assert [p.message for p in problems] == ["That image address isn't a web address."]
+
+
+# -- retries, reuse and cleanup (app.media_lifecycle) ----------------------------
+
+
+def test_a_failing_source_backs_off_and_keeps_its_last_good_picture(
+    web: FakeWeb, tmp_path: Path
+) -> None:
+    store = images.Store(tmp_path)
+    go = srv.Source(key="gocomics:garfield", kind="gocomics", name="garfield")
+    yesterday = date(2026, 10, 24)
+    srv.record_fetch(store, go, srv.Fetched([(_png(), "")], edition="2026-10-24"), yesterday, 0)
+    good = store.sources()[go.key]["pictures"]
+    now = time.time()
+    tries = []
+    for n in range(1, srv.lifecycle.TRIES_PER_DAY + 1):
+        srv.record_fetch(store, go, srv.SourceError("GoComics is blocking."), TODAY, now)
+        record = store.sources()[go.key]
+        tries.append(record["retry"]["tries"])
+        assert record["pictures"] == good  # the last good picture stays up
+        wait = srv.lifecycle.retry_wait(n)
+        assert not srv.is_due(go, record, TODAY.isoformat(), now + wait - 60)
+        if n < srv.lifecycle.TRIES_PER_DAY:
+            assert srv.is_due(go, record, TODAY.isoformat(), now + wait + 1)
+    assert tries == list(range(1, srv.lifecycle.TRIES_PER_DAY + 1))
+    assert [srv.lifecycle.retry_wait(n) / 60 for n in (1, 2, 3, 4, 5, 6)] == [
+        30,
+        60,
+        120,
+        240,
+        360,
+        360,
+    ]
+    # Out of tries today; tomorrow starts over.
+    assert not srv.is_due(go, record, TODAY.isoformat(), now + 10 * 3600)
+    assert srv.is_due(go, record, "2026-10-26", now + 10 * 3600)
+    log = store.log()
+    assert log[1]["text"].endswith(
+        "; the last good picture stays up; next try in 30 min (try 2 of 6)"
+    )
+    assert log[-1]["text"].endswith("no more tries today")
+    # A try that works replaces the picture at once and clears the backoff.
+    srv.record_fetch(store, go, srv.Fetched([(_png((99, 33)), "")], edition="2026-10-25"), TODAY, 0)
+    record = store.sources()[go.key]
+    assert "retry" not in record and record["pictures"] != good and record["error"] is None
+
+
+def test_fetch_now_ignores_the_backoff(
+    client: FlaskClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _app_module(client)
+    queued: list[tuple[list[str], bool]] = []
+    monkeypatch.setattr(
+        module,
+        "_enqueue",
+        lambda root, sources, today, force=False, **_: queued.append(
+            ([s.key for s in sources], force)
+        ),
+    )
+    client.get("/plugins/comics_daily/")
+    store = _store(client)
+    store.update(
+        "gocomics:garfield",
+        lambda e: e.update(
+            error="x", retry={"day": TODAY.isoformat(), "tries": 6, "after": time.time() + 9e9}
+        ),
+    )
+    client.post("/plugins/comics_daily/fetch")
+    assert "gocomics:garfield" in queued[-1][0] and queued[-1][1] is True
+
+
+def _keep_picture(store: Any, key: str, size: tuple[int, int] = (60, 20), age: float = 0) -> str:
+    picture = images.normalise(_png(size))
+    name = store.add(key, picture)
+    when = time.time() - age
+    store.update(
+        key,
+        lambda e: e.update(
+            pictures=[{"file": name, "w": size[0], "h": size[1]}],
+            last_attempt=when,
+            last_success=when,
+        ),
+    )
+    os.utime(store.image_dir / name, (when, when))
+    return name
+
+
+def test_cleanup_forgets_what_the_settings_no_longer_name(tmp_path: Path) -> None:
+    store = images.Store(tmp_path)
+    hour = images.PRUNE_GRACE_S + 60
+    shown = _keep_picture(store, "gocomics:garfield", age=hour)
+    removed = _keep_picture(store, "gocomics:peanuts", (61, 20), age=hour)
+    fresh = _keep_picture(store, "gocomics:bc", (62, 20))  # removed a minute ago
+    orphan_manual = _keep_picture(store, "manual:peanuts", (63, 20), age=hour)
+    kept_manual = _keep_picture(store, "manual:garfield", (64, 20), age=40 * 86400)
+    wanted = {"farside", "gocomics:garfield", "manual:garfield"}
+    gone = store.prune(wanted=wanted)
+    records = store.sources()
+    assert set(records) == {"gocomics:garfield", "manual:garfield", "gocomics:bc"}
+    # Their pictures go once unused for the grace period: these were
+    # written an hour ago; bc's is still in its grace.
+    assert sorted(gone) == sorted([removed, orphan_manual])
+    for name in (shown, kept_manual, fresh):
+        assert (store.image_dir / name).exists()
+
+
+def test_cleanup_keeps_the_folder_under_budget_but_never_what_is_shown(tmp_path: Path) -> None:
+    store = images.Store(tmp_path)
+    shown = _keep_picture(store, "gocomics:garfield", (400, 300), age=10 * 60)
+    store.image_dir.mkdir(exist_ok=True)
+    spare = []
+    for n in range(3):
+        path = store.image_dir / f"gocomics-old-{n:012x}.png"
+        path.write_bytes(b"x" * 1000)
+        when = time.time() - (30 - n) * 60  # in the grace period, oldest first
+        os.utime(path, (when, when))
+        spare.append(path.name)
+    on_screen = (store.image_dir / shown).stat().st_size
+    gone = store.prune(wanted={"gocomics:garfield"}, max_bytes=on_screen + 1500)
+    assert gone == spare[:2]  # the oldest unreferenced first, until under budget
+    gone = store.prune(wanted={"gocomics:garfield"}, max_bytes=0)
+    assert gone == spare[2:]
+    assert (store.image_dir / shown).exists()  # over budget, still never deleted

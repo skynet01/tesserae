@@ -138,9 +138,14 @@ def test_removed_sources_and_their_pictures_go(fake_net: FakeNet, tmp_path: Path
     _run(tmp_path, _cfg(sources=f"Global | {FEEDS['Global']}"))
     stories = store.load_stories(tmp_path)
     assert [s["source"] for s in stories] == ["Global"]
+    # Tech's and Business's pictures stay for the grace period (a render may
+    # still be loading them), then go; the one on screen stays.
+    assert len({p.name for p in (tmp_path / "images").iterdir()}) == 3
+    keep = {stories[0]["image"]}
+    assert store.prune_images(tmp_path, keep, now=time.time() + 2 * 3600) == 2
     left = {p.name for p in (tmp_path / "images").iterdir()}
-    assert left == {stories[0]["image"]}
-    assert len(old - left) == 2  # Tech's and Business's pictures were pruned
+    assert left == keep
+    assert len(old - left) == 2
 
 
 def test_a_stop_ends_the_run_between_stories(fake_net: FakeNet, tmp_path: Path) -> None:
@@ -208,16 +213,26 @@ def test_when_a_run_is_due(tmp_path: Path) -> None:
 
 
 def test_a_failed_day_is_retried_a_little_later_then_left(tmp_path: Path) -> None:
+    """The shared backoff (app.media_lifecycle): 30 minutes after the first
+    try, then an hour, then two, and at most MAX_ATTEMPTS tries a day."""
     store.save_stories(tmp_path, [{"title": "x"}])
-    first = _at("2026-10-25 06:10")
-    store.save_state(
-        tmp_path, {"edition": "2026-10-24", "attempts": {"2026-10-25": [first.timestamp()]}}
-    )
-    assert not pipeline.due(tmp_path, "06:05", _at("2026-10-25 07:00"))
-    assert pipeline.due(tmp_path, "06:05", _at("2026-10-25 08:11"))
-    two = [first.timestamp(), _at("2026-10-25 08:11").timestamp()]
-    store.save_state(tmp_path, {"edition": "2026-10-24", "attempts": {"2026-10-25": two}})
-    assert not pipeline.due(tmp_path, "06:05", _at("2026-10-25 23:00"))
+    tries = [_at("2026-10-25 06:10").timestamp()]
+
+    def due_at(when: str) -> bool:
+        store.save_state(tmp_path, {"edition": "2026-10-24", "attempts": {"2026-10-25": tries}})
+        return bool(pipeline.due(tmp_path, "06:05", _at(f"2026-10-25 {when}")))
+
+    assert not due_at("06:35")
+    assert due_at("06:41")
+    tries.append(_at("2026-10-25 06:41").timestamp())
+    assert not due_at("07:35")
+    assert due_at("07:42")
+    tries.append(_at("2026-10-25 07:42").timestamp())
+    assert not due_at("09:35")
+    assert due_at("09:43")
+    tries.append(_at("2026-10-25 09:43").timestamp())
+    assert len(tries) == pipeline.MAX_ATTEMPTS
+    assert not due_at("23:00")  # out of tries for the day
 
 
 def _only_job(data_dir: Path) -> dict[str, Any]:
@@ -615,3 +630,16 @@ def test_one_timestamp_decides_owed_and_expiry(fake_net: FakeNet, tmp_path: Path
     # Past the window it is no longer owed, and only then may a new task be ordered.
     _owe(tmp_path, cfg, link, "Tech headline-now", time.time() - painters.KIE_RESUME_S - 1)
     assert pipeline.owed(tmp_path, time.time()) == []
+
+
+def test_every_run_is_kept_as_a_line(tmp_path: Path) -> None:
+    import threading
+    from types import SimpleNamespace
+
+    run = SimpleNamespace(data_dir=tmp_path, stop=threading.Event(), edition="2026-10-25")
+    for n in range(pipeline.RUN_HISTORY + 5):
+        pipeline._record_run(run, "schedule", float(n), None, "Feed failed" if n % 2 else "", [])
+    runs = store.load_state(tmp_path)["runs"]
+    assert len(runs) == pipeline.RUN_HISTORY
+    assert runs[-1] == {"reason": "schedule", "started": 34, "outcome": "", "failed": False}
+    assert runs[-2]["failed"] is True and runs[-2]["outcome"] == "Feed failed"

@@ -106,6 +106,8 @@ pages = _load_sibling("pages")
 images = _load_sibling("images")
 cookies = _load_sibling("cookies")
 
+from app import media_lifecycle as lifecycle  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 # -- sources -------------------------------------------------------------------
@@ -158,8 +160,11 @@ IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
 # -- refresh timing --------------------------------------------------------------
 
-# After a failed attempt: retry soon while there is nothing to show, slowly
-# while the last good picture is still up.
+# After a failed try a source is asked again on app.media_lifecycle's
+# backoff (30 minutes doubling, at most 6 hours apart, TRIES_PER_DAY a day;
+# the record's ``retry``). A record from before that kept only
+# ``last_attempt``: it reads as one failed try. These two are the old waits,
+# kept for reference by older tests.
 RETRY_MISSING_S = 15 * 60
 RETRY_STALE_S = 60 * 60
 # A GoComics strip still on yesterday's edition: look again this often, this
@@ -652,6 +657,22 @@ def sources_for(config: Config) -> tuple[list[Source], list[Problem]]:
     return wanted, problems
 
 
+def wanted_keys(config: Config) -> set[str]:
+    """Every record the settings still name, shown or not: the Far Side,
+    and for each strip in the list (on or off) its download, its Direct
+    image URL and its manual picture, so switching a strip off or between
+    sources never loses its last good picture."""
+    keys = {FARSIDE.key}
+    for row in config.strips:
+        keys.add(f"manual:{row.slug}")
+        keys.add("dilbert" if row.slug == "dilbert" else f"gocomics:{row.slug}")
+        if row.image_url:
+            found = _source_for(row.slug, row.image_url)
+            if isinstance(found, Source):
+                keys.add(found.key)
+    return keys
+
+
 def row_source(row: StripRow) -> Source | Problem:
     """Where one strip row's picture comes from, as its Source says."""
     if row.mode == "upload":
@@ -1036,8 +1057,11 @@ def is_due(source: Source, record: dict[str, Any] | None, today: str, now: float
             and int(record.get("attempts") or 0) < EDITION_ATTEMPTS
             and now - last_attempt >= EDITION_RETRY_S
         )
-    backoff = RETRY_STALE_S if record.get("pictures") else RETRY_MISSING_S
-    return now - last_attempt >= backoff
+    retry = record.get("retry")
+    if not isinstance(retry, dict) and last_attempt:
+        day = str(record.get("attempted_on") or today)
+        retry = {"day": day, "tries": 1, "after": last_attempt + lifecycle.RETRY_FIRST_S}
+    return lifecycle.may_try(retry, today, now)
 
 
 @dataclass
@@ -1061,6 +1085,9 @@ class _Run:
     # The GoComics cookies pasted on the Comics page, as the latest render
     # or admin request read them (the worker has no settings to read).
     pasted: str = ""
+    # Every source the settings name, for the cleanup at the run's end;
+    # None when the caller didn't say (a direct call).
+    wanted: set[str] | None = None
 
     def keys(self) -> set[str]:
         keys = {s.key for s, _ in self.queue}
@@ -1085,6 +1112,7 @@ def _enqueue(
     *,
     force: bool = False,
     pasted: str | None = None,
+    wanted: set[str] | None = None,
 ) -> _Run:
     """Queue ``sources`` on the running refresh, starting one if none runs.
 
@@ -1101,6 +1129,8 @@ def _enqueue(
         assert run is not None
         if pasted is not None:
             run.pasted = pasted
+        if wanted is not None:
+            run.wanted = wanted
         known = run.keys() | (set() if force else run.completed)
         run.queue.extend((s, force) for s in sources if s.key not in known)
         if start:
@@ -1185,7 +1215,9 @@ def _work(run: _Run) -> None:
         if gocomics is not None:
             note_pasted_result(store, gocomics)
         with contextlib.suppress(Exception):
-            store.prune()
+            gone = store.prune(wanted=run.wanted)
+            if gone:
+                logger.info("comics_daily: removed %d unused pictures", len(gone))
         _finish_job(run, crashed)
 
 
@@ -1263,7 +1295,7 @@ def record_fetch(
             logger.exception("comics_daily: storing %s failed", source.key)
             fetched = SourceError(f"Couldn't keep the pictures for {source.label}.")
     if isinstance(fetched, SourceError):
-        outcome: Callable[[dict[str, Any]], None] = _failed(str(fetched))
+        outcome: Callable[[dict[str, Any]], None] = _failed(str(fetched), today_iso)
         complete = False
     else:
         expected = max(fetched.expected or 0, len(fetched.pictures))
@@ -1313,7 +1345,11 @@ def _log_fetch(
     if isinstance(fetched, SourceError):
         message = str(fetched)
         outcome = "blocked" if "blocking" in message else "error"
-        log_entry(store, label, outcome, f"{message} ({seconds})")
+        retry = lifecycle.describe(entry.get("retry"), today, time.time())
+        kept = "; the last good picture stays up" if entry.get("pictures") else ""
+        log_entry(
+            store, label, outcome, f"{message} ({seconds}){kept}{'; ' + retry if retry else ''}"
+        )
         return
     edition = fetched.edition or today
     count = len(stored)
@@ -1328,8 +1364,15 @@ def _log_fetch(
     log_entry(store, label, "ok", f"{edition}, {what}")
 
 
-def _failed(message: str) -> Callable[[dict[str, Any]], None]:
-    return lambda entry: entry.update(error=message)
+def _failed(message: str, today: str) -> Callable[[dict[str, Any]], None]:
+    """A failed try: the error, and the backoff before the next one. What
+    was on disk stays up meanwhile."""
+
+    def record(entry: dict[str, Any]) -> None:
+        entry["error"] = message
+        entry["retry"] = lifecycle.failed(entry.get("retry"), today, time.time())
+
+    return record
 
 
 def _succeeded(
@@ -1345,6 +1388,7 @@ def _succeeded(
                 entry.update(pictures=stored, edition=fetched.edition, partial=True)
             entry["error"] = f"Only {len(stored)} of {expected} pictures came through."
             return
+        entry.pop("retry", None)
         entry.update(
             pictures=stored,
             edition=fetched.edition,
@@ -1438,7 +1482,11 @@ def fetch(
         s for s in wanted if s.fetched and (force or is_due(s, records.get(s.key), today_iso, now))
     ]
     pasted = saved_cookie_header() if any(s.kind == "gocomics" for s in due) else None
-    run = _enqueue(store.root, due, today, force=force, pasted=pasted) if due else None
+    run = (
+        _enqueue(store.root, due, today, force=force, pasted=pasted, wanted=wanted_keys(config))
+        if due
+        else None
+    )
     if run is not None and not any(_pictures(records.get(s.key) or {}, store) for s in wanted):
         # Nothing to show yet: give a quick source the chance to land in this
         # render rather than painting "fetching" and waiting for the repaint.
@@ -1981,7 +2029,14 @@ def blueprint() -> Blueprint:
             flash("Nothing to fetch: every strip shown is a manual picture, or none is on.", "warn")
         else:
             with _scope(plugin):
-                _enqueue(store.root, sources, _today(), force=True, pasted=saved_cookie_header())
+                _enqueue(
+                    store.root,
+                    sources,
+                    _today(),
+                    force=True,
+                    pasted=saved_cookie_header(),
+                    wanted=wanted_keys(config),
+                )
             names = ", ".join(s.label for s in sources)
             log_entry(store, "Fetch now", "started", f"asked for {names}")
             flash("Fetching today's comics now; the job tray shows how far it got.", "ok")
