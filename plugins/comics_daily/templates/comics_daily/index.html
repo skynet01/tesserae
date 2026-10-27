@@ -1,5 +1,5 @@
 {% extends "_base.html" %}
-{% from "_components.html" import auto_field, button, repeater_field, section_card with context %}
+{% from "_components.html" import auto_field, button, info_pop, number_input, repeater_field, section_card with context %}
 {% block title %}Comics, Tesserae{% endblock %}
 {% block head_extra %}<script src="{{ url_for('static', filename='pages/settings.js') }}" defer></script>{% endblock %}
 
@@ -95,6 +95,40 @@
       {% endif %}
     </form>
   </div>
+  <div class="cx-today">
+  {#- The preview: one screen at a time, the user's own first. All are
+      drawn; the picker shows one (the page's script, no reload). -#}
+  {%- set default = view.screen_default %}
+  <aside class="cx-onscreen" aria-labelledby="cx-screen-pick-label">
+    <label class="cx-onscreen-label" id="cx-screen-pick-label" for="cx-screen-pick">Preview on</label>
+    <select id="cx-screen-pick" class="dx-input cx-screen-pick" data-screen-pick>
+      {%- for group in ['Your screens', 'Reference screens'] %}
+      {%- set screens = view.screens | selectattr('group', 'equalto', group) | list %}
+      {%- if screens %}
+      <optgroup label="{{ group }}">
+        {%- for sc in screens %}
+        <option value="{{ sc.id }}"{% if sc.id == default %} selected{% endif %}>{{ sc.name }} ({{ sc.w }}×{{ sc.h }})</option>
+        {%- endfor %}
+      </optgroup>
+      {%- endif %}
+      {%- endfor %}
+    </select>
+    {%- for sc in view.screens %}
+    <figure class="cx-screen" data-screen="{{ sc.id }}"{% if sc.id != default %} hidden{% endif %}>
+      <div class="cx-screen-frame" style="--sw: {{ sc.w }}; --sh: {{ sc.h }}">
+        {%- for item in sc.shown %}
+          {%- if item.farside %}
+          <div class="cx-screen-panels">{% for p in item.pictures[:4] %}<img src="{{ p.src }}" alt="" loading="lazy">{% endfor %}</div>
+          {%- else %}
+          <img class="cx-screen-strip" src="{{ item.pictures[0].src }}" alt="{{ item.label }}" loading="lazy">
+          {%- endif %}
+        {%- endfor %}
+      </div>
+      <figcaption>{{ sc.text }}</figcaption>
+    </figure>
+    {%- endfor %}
+    <p class="cx-onscreen-note">Comics never shrink past reading size or get cut off. When they don't all fit, they take turns.</p>
+  </aside>
   <div class="cx-preview">
     {% if view.farside %}
     <section class="cx-source" aria-label="The Far Side">
@@ -121,30 +155,12 @@
       {% if item.warning %}<div class="dx-warn-band cx-warn"><i class="ph ph-warning" aria-hidden="true"></i><p>{{ item.warning }}{{ cookie_hint(item) }}</p></div>{% endif %}
     </section>
     {% endfor %}
-    <section class="cx-source" aria-label="On other screens">
-      <p class="cx-source-head"><strong>On other screens</strong><span class="cx-source-line">Comics never shrink past reading size or get cut off; when they don't all fit, they take turns.</span></p>
-      <div class="cx-screens">
-        {% for sc in view.screens %}
-        <figure class="cx-screen">
-          <div class="cx-screen-frame" style="aspect-ratio: {{ sc.w }} / {{ sc.h }}">
-            {% for item in sc.shown %}
-              {% if item.farside %}
-              <div class="cx-screen-panels">{% for p in item.pictures[:4] %}<img src="{{ p.src }}" alt="">{% endfor %}</div>
-              {% else %}
-              <img class="cx-screen-strip" src="{{ item.pictures[0].src }}" alt="{{ item.label }}">
-              {% endif %}
-            {% endfor %}
-          </div>
-          <figcaption><strong>{{ sc.name }}</strong> <span>{{ sc.w }}×{{ sc.h }}</span><br>{{ sc.text }}</figcaption>
-        </figure>
-        {% endfor %}
-      </div>
-    </section>
     {% for p in view.problems %}
     <section class="cx-source" aria-label="{{ p.name }}">
       <p class="cx-source-head"><strong>{{ p.name }}</strong><span class="tg tg--sm tg--bad cx-chip">Can't show</span><span class="cx-source-line">{{ p.message }}</span></p>
     </section>
     {% endfor %}
+  </div>
   </div>
 {% endcall %}
 
@@ -217,10 +233,30 @@
   </div>
 {% endcall %}
 
+{#- Layout: the small-screen choice, the space between comics (one
+    labelled row of three), the out-of-date note, then any setting no
+    card placed, so a new one always shows somewhere. -#}
+{%- set LAYOUT = ['small_screens', 'gap_min', 'gap', 'gap_max', 'status_note'] %}
 {% call section_card(icon='layout', title='Layout', id='layout',
                      description="How the comics share a cell, in every comics cell.") %}
+  {%- if F.small_screens %}
+  {{ auto_field(section.id ~ '-small_screens', 'small_screens', F.small_screens, section.state.get('small_screens', F.small_screens.get('default'))) }}
+  {%- endif %}
+  {%- if F.gap_min and F.gap and F.gap_max %}
+  <fieldset class="cx-space">
+    <legend class="cx-space-legend">Space between comics <span class="cx-unit">px</span>{{ info_pop("The empty space between one comic and the next, in pixels on a 1440 px wide screen; narrower cells scale it down. It sits at Usual, grows toward Largest when there's height to spare, and shrinks toward Smallest to fit one more comic.") }}</legend>
+    <div class="dx-field-row">
+      {%- for name, short in [('gap_min', 'Smallest'), ('gap', 'Usual'), ('gap_max', 'Largest')] %}
+      {%- set spec = F[name] %}
+      {{ number_input(section.id ~ '-' ~ name, name, short, value=section.state.get(name, spec.get('default', 0)),
+                      min=spec.get('min'), max=spec.get('max'), step=spec.get('step', 1)) }}
+      {%- endfor %}
+    </div>
+  </fieldset>
+  {%- endif %}
+  {%- if F.status_note %}{{ toggle_row(F.status_note) }}{% endif %}
   {%- set ns = namespace(row=none) %}
-  {%- for field in section.fields if field.name not in PLACED %}
+  {%- for field in section.fields if field.name not in PLACED and field.name not in LAYOUT %}
     {%- set this_row = field.get('row') if field.type not in ('switch', 'repeater') else none %}
     {%- if ns.row and this_row != ns.row %}</div>{% set ns.row = none %}{% endif %}
     {%- if this_row and this_row != ns.row %}<div class="dx-field-row">{% set ns.row = this_row %}{% endif %}
@@ -293,6 +329,15 @@
         }
       });
     });
+    // The preview shows one screen at a time; the picker swaps it.
+    var pick = document.querySelector('[data-screen-pick]');
+    if (pick) {
+      pick.addEventListener('change', function () {
+        document.querySelectorAll('.cx-screen[data-screen]').forEach(function (fig) {
+          fig.hidden = fig.getAttribute('data-screen') !== pick.value;
+        });
+      });
+    }
     // The log shows open: start it on its newest lines.
     function tail() {
       document.querySelectorAll('.cx-log[data-log-tail]').forEach(function (log) { log.scrollTop = log.scrollHeight; });
@@ -306,8 +351,22 @@
   .cx-today-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
   .cx-today-head .lede { margin: 0; flex: 1 1 320px; }
   .cx-fetch { margin: 0; flex: none; }
-  .cx-preview { margin-top: 16px; border-top: 1px solid var(--t-border); }
+  /* Today: the preview of one screen on the left (about 30%), the comics
+     one by one on the right. On a phone the preview comes first. */
+  .cx-today { display: grid; grid-template-columns: minmax(264px, 3fr) minmax(0, 7fr); gap: 32px; align-items: start; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--t-border); }
+  .cx-onscreen { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 12px; padding: 14px; background: var(--t-surface-sunk); border: 1px solid var(--t-border); border-radius: var(--t-radius); }
+  .cx-onscreen-label { font-family: var(--t-font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--t-muted); margin-bottom: -6px; }
+  .cx-screen-pick.dx-input { padding: 8px 30px 8px 11px; font-size: 13px; text-overflow: ellipsis; border-radius: var(--t-radius); }
+  .cx-screen { margin: 0; }
+  /* The screen at its own shape, as tall as the window allows. */
+  .cx-screen-frame { --fit: min(62vh, 560px); box-sizing: border-box; aspect-ratio: var(--sw) / var(--sh); width: min(100%, calc(var(--fit) * var(--sw) / var(--sh))); margin: 0 auto; padding: 4px; overflow: hidden; display: flex; flex-direction: column; justify-content: center; gap: 4px; background: #fff; border: 1px solid var(--t-border-strong); }
+  .cx-screen-panels { display: flex; gap: 2px; }
+  .cx-screen-panels img { flex: 1 1 0; min-width: 0; height: auto; }
+  .cx-screen-strip { display: block; width: 100%; height: auto; min-height: 0; object-fit: contain; }
+  .cx-screen figcaption { margin-top: 10px; font-size: 12.5px; line-height: 1.5; color: var(--t-fg-soft); }
+  .cx-onscreen-note { margin: 0; padding-top: 10px; border-top: 1px solid var(--t-border); font-size: 12px; line-height: 1.5; color: var(--t-muted); }
   .cx-source { padding: 14px 0; border-bottom: 1px solid var(--t-border); }
+  .cx-preview > .cx-source:first-child { padding-top: 0; }
   .cx-source:last-child { border-bottom: 0; padding-bottom: 0; }
   .cx-source-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 10px; font-size: 14px; }
   .cx-source-line { font-size: 12.5px; color: var(--t-muted); }
@@ -318,15 +377,6 @@
   .cx-strip { max-width: 460px; }
   .cx-panels figcaption { margin-top: 6px; font-size: 12px; color: var(--t-fg-soft); }
   .cx-warn { margin: 10px 0 0; }
-  .cx-screens { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; align-items: start; }
-  .cx-screen { margin: 0; }
-  .cx-screen-frame { box-sizing: border-box; width: 100%; max-height: 260px; margin: 0 auto; padding: 4px; overflow: hidden; display: flex; flex-direction: column; justify-content: center; gap: 4px; background: #fff; border: 1px solid var(--t-border-strong); }
-  .cx-screen:first-child .cx-screen-frame { width: auto; height: 260px; }
-  .cx-screen-panels { display: flex; gap: 2px; }
-  .cx-screen-panels img { flex: 1 1 0; min-width: 0; height: auto; }
-  .cx-screen-strip { display: block; width: 100%; height: auto; min-height: 0; object-fit: contain; }
-  .cx-screen figcaption { margin-top: 8px; font-size: 12px; color: var(--t-fg-soft); }
-  .cx-screen figcaption span { font-family: var(--t-font-mono); color: var(--t-muted); }
   .cx-row-status { margin-top: 12px; }
   .cx-status-line { margin: 0; font-size: 12.5px; color: var(--t-fg-soft); }
   .cx-kind { font-family: var(--t-font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--t-muted); margin-right: 8px; }
@@ -371,6 +421,20 @@
   .cx-log-line--bad .cx-log-outcome { color: var(--t-danger); font-weight: 600; }
   .cx-log-line--warn .cx-log-outcome { color: color-mix(in oklab, var(--t-warn) 80%, var(--t-fg)); font-weight: 600; }
   .cx-log:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; }
+  /* Space between comics: one ruled row, a legend over three short
+     fields, like the settings card's own rows. */
+  .dx-section-body > .cx-space { margin: 0; padding: 14px 0 0; border: 0; min-width: 0; }
+  .dx-section-body > .field + .cx-space,
+  .dx-section-body > .cx-space + .dx-toggle-row { border-top: 1px solid var(--dx-border-faint, #f1f0eb); }
+  .cx-space-legend { float: left; width: 100%; display: flex; align-items: center; gap: 6px; padding: 0; font-size: 13px; font-weight: 600; color: var(--t-fg); }
+  .cx-space .dx-field-row { clear: both; display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); column-gap: 16px; align-items: end; }
+  .cx-space .dx-field-row > .field { padding-top: 8px; }
+  .cx-unit { font-family: var(--t-font-mono); font-size: 11px; font-weight: 400; color: var(--t-muted); }
+  @media (max-width: 900px) {
+    .cx-today { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+    .cx-onscreen { position: static; }
+    .cx-screen-frame { --fit: 340px; }
+  }
   @media (max-width: 640px) {
     .cx-log { grid-template-columns: max-content minmax(0, 1fr) max-content; row-gap: 0; font-size: 11.5px; }
     .cx-log-text { grid-column: 1 / -1; margin-bottom: 8px; }

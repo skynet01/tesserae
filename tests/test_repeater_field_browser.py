@@ -449,6 +449,11 @@ def test_newspaper_rows_move_remove_and_discard_around_closed_rows(live):
 
         served = codes()
         assert served == ["NY_NYT", "WSJ", "USAT", "AZ_ADS"]
+        # A closed row moves from its head, left of the switch, and stays closed.
+        rows.nth(3).locator(".repeater-row-head [data-repeater-up]").click()
+        assert codes() == ["NY_NYT", "WSJ", "AZ_ADS", "USAT"] and open_codes() == []
+        rows.nth(2).locator("[data-repeater-down]").click()
+        assert codes() == served and open_codes() == []
         rows.nth(1).locator("[data-repeater-open]").click()
         rows.nth(1).locator("[data-repeater-down]").click()
         assert codes() == ["NY_NYT", "USAT", "WSJ", "AZ_ADS"]

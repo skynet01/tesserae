@@ -485,9 +485,9 @@ macro here instead.
 
 {#- The list layout's row, like a row of the Devices or Dashboards list: the
    row's title (its first string sub-field), a one-line summary of its first
-   textarea, its first boolean as a switch and a caret; the caret (or a
-   click on the row) opens the other sub-fields under it, with the move and
-   remove buttons. Rows are drawn open: CSS closes them only once scripts run
+   textarea, its move buttons, its first boolean as a switch and a caret;
+   the caret (or a click on the row) opens the other sub-fields under it,
+   with the remove button. Rows are drawn open: CSS closes them only once scripts run
    (``.js`` on <html>), so without scripts every field still shows. -#}
 {%- macro _repeater_list_row(field_id, view, row, idx, form=None, extra=None) -%}
 {%- set opts = view.list -%}
@@ -506,6 +506,7 @@ macro here instead.
       {%- endif %}
     </button>
     {%- if extra %}{{ extra(row, 'head') }}{% endif %}
+    <span class="repeater-row-moves">{{ _repeater_moves(view, 'dx-btn-ghost-sm dx-btn-icon-only') }}</span>
     {%- if toggle %}
     {%- set cid = field_id ~ '-' ~ idx ~ '-' ~ toggle.name %}
     <label class="dx-toggle-switch repeater-row-toggle" for="{{ cid }}" title="{{ toggle.label }}" data-repeater-toggle-label="{{ toggle.label }}">
@@ -525,7 +526,6 @@ macro here instead.
     </div>
     {%- if extra %}{{ extra(row, 'body') }}{% endif %}
     <div class="repeater-row-actions">
-      {{ _repeater_moves(view, 'dx-btn-ghost-sm dx-btn-icon-only') }}
       <button type="button" class="dx-btn-ghost-sm repeater-remove" data-repeater-remove aria-label="Remove {{ view.row_label }}"
               {%- if picked.fixed %} aria-disabled="true" title="Built in: switch it off instead"{% endif %}><i class="ph ph-trash" aria-hidden="true"></i><span>Remove</span></button>
     </div>

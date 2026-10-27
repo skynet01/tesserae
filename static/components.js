@@ -1180,9 +1180,13 @@
 
       list.addEventListener("click", (ev) => {
         // A list-layout row opens and closes from its caret button or from
-        // a click anywhere else on its head, bar the switch.
+        // a click anywhere else on its head, bar the switch and the moves.
         const head = ev.target.closest(".repeater-row-head");
-        if (head && list.contains(head) && !ev.target.closest(".repeater-row-toggle")) {
+        if (
+          head &&
+          list.contains(head) &&
+          !ev.target.closest(".repeater-row-toggle, .repeater-row-moves")
+        ) {
           const row = head.closest("[data-repeater-row]");
           setOpen(row, !row.classList.contains("is-open"));
           return;
