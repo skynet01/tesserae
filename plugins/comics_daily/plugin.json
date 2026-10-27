@@ -92,7 +92,8 @@
           "label": "Image URL",
           "max_length": 2000,
           "placeholder": "https://…",
-          "help": "For Direct image URL, or for Import URL: any picture address on the web, downloaded once now and kept as a manual upload."
+          "help": "For Direct image URL, or for Import URL: any picture address on the web, downloaded once now and kept as a manual upload.",
+          "format": "url"
         }
       ],
       "default": [

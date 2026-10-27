@@ -1556,3 +1556,28 @@ def test_legacy_rows_always_carry_dilbert() -> None:
         "mode": "auto",
         "image_url": "",
     }
+
+
+@pytest.mark.parametrize(
+    "url", ["https://[", "https://exa mple.org/x.png", "ftp://x/y.png", "nope"]
+)
+def test_a_malformed_image_url_is_refused_on_save_and_harmless_if_stored(
+    client: FlaskClient, url: str
+) -> None:
+    client.get("/plugins/comics_daily/")
+    rows = json.loads(json.dumps(_settings(client)["strips"]))  # a copy, not the store's
+    rows[1].update(mode="url", image_url=url)
+    client.post("/settings/plugin-comics_daily", data={"strips": json.dumps(rows)})
+    assert next(r for r in _settings(client)["strips"] if r["slug"] == "garfield")["mode"] == "auto"
+    assert any("must be a web address" in m for m in _messages(client))
+    # One stored before this check (a hand-edited file) is a row problem,
+    # not a crash, on the page and in a render.
+    store = client.application.config["SETTINGS_STORE"]
+    store.patch_section("plugins", {"comics_daily": {**_saved_raw(client), "strips": rows}})
+    assert client.get("/plugins/comics_daily/").status_code == 200
+    module = _app_module(client)
+    with client.application.test_request_context():
+        config = module.resolve_config({}, {})
+    wanted, problems = module.sources_for(config)
+    assert "gocomics:garfield" not in [s.key for s in wanted]
+    assert [p.message for p in problems] == ["That image address isn't a web address."]

@@ -217,7 +217,11 @@ ALLOWED_HOSTS = _allowed_hosts()
 
 
 def _host(url: str) -> str:
-    return (urllib.parse.urlsplit(url).hostname or "").lower()
+    """The URL's host, "" when it has none or doesn't parse (``https://[``)."""
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
 
 
 # -- HTTP -----------------------------------------------------------------------
@@ -390,7 +394,7 @@ class Problem:
 def _source_for(name: str, url: str) -> Source | Problem:
     if url:
         host = _host(url)
-        if not url.lower().startswith("https://") and not url.lower().startswith("http://"):
+        if not _URL_RE.match(url) or not host or any(c.isspace() for c in url):
             return Problem(name, "That image address isn't a web address.")
         if ALLOWED_HOSTS is not None and host not in ALLOWED_HOSTS:
             return Problem(

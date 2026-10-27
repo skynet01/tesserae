@@ -208,6 +208,10 @@
                   "unique": { "type": "boolean", "description": "string or select: no two rows may share a value (compared ignoring case and surrounding spaces)." },
                   "max_length": { "type": "integer", "minimum": 1, "maximum": 20000, "description": "string or textarea; defaults to 500 and 5000." },
                   "pattern": { "type": "string", "maxLength": 200, "description": "string only: what the whole (trimmed) value must look like, in a small regex subset matched without backtracking: literal characters, . and [classes] (ranges, ^, \\d, \\w), each with an optional count (* + ? {n} {n,} {n,m}), at most one part varying in length, no groups, alternation or anchors. Inside a class write a literal - or / as \\- and \\/." },
+                  "format": {
+                    "enum": ["url"],
+                    "description": "string only: \"url\" takes only an http(s) address with a host (or nothing)."
+                  },
                   "pattern_hint": { "type": "string", "description": "What the pattern asks for, in words, shown when a value doesn't match." },
                   "rows": { "type": "integer", "minimum": 1, "maximum": 20 },
                   "monospace": { "type": "boolean", "description": "textarea: a fixed-width font, for code." },

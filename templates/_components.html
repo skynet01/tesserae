@@ -452,6 +452,7 @@ macro here instead.
              maxlength="{{ sub.max_length }}"
              data-repeater-key="{{ sub.name }}" data-repeater-type="string"
              autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+             {% if sub.get('format') == 'url' %}inputmode="url"{% endif %}
              {% if sub.get('placeholder') %}placeholder="{{ sub.placeholder }}"{% endif %}
              {% if sub.get('pattern') %}pattern="{{ sub.pattern }}"{% endif %}
              {% if sub.get('pattern_hint') %}title="{{ sub.pattern_hint }}"{% endif %}

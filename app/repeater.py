@@ -48,6 +48,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeGuard
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -488,6 +489,8 @@ def _subfield_errors(sub: Any, index: int, seen: set[str]) -> list[str]:
             errors.append(f"{where}.pattern only applies to string")
         elif problem is not None:
             errors.append(f"{where}.pattern {problem}")
+    if "format" in sub and (kind != "string" or sub.get("format") != "url"):
+        errors.append(f'{where}: format is only "url", on a string sub-field')
     if "unique" in sub and kind not in ("string", "select"):
         errors.append(f"{where}.unique only applies to string and select")
     if kind == "select":
@@ -614,6 +617,15 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str, *, is_default: b
             if isinstance(hint, str) and hint.strip():
                 raise RepeaterValueError(f"{where}: {label}: {hint.strip()}")
             raise RepeaterValueError(f"{where}: {label} is not in the expected format")
+        if (
+            kind == "string"
+            and sub.get("format") == "url"
+            and value.strip()
+            and not is_web_address(value.strip())
+        ):
+            raise RepeaterValueError(
+                f"{where}: {label} must be a web address starting with https:// or http://"
+            )
         return value
     if kind == "boolean":
         if isinstance(raw, bool):
@@ -656,6 +668,19 @@ def _strict_value(sub: Mapping[str, Any], raw: Any, where: str, *, is_default: b
                 return value
         raise RepeaterValueError(f"{where}: {raw!r} isn't one of the choices for {label}")
     raise RepeaterValueError(f"{where}: {label} has an unsupported type")
+
+
+def is_web_address(text: str) -> bool:
+    """Whether ``text`` is an http(s) address with a host that parses (a
+    ``format: "url"`` sub-field). Where it points isn't judged here."""
+    if any(c.isspace() for c in text):
+        return False
+    try:
+        parts = urlsplit(text)
+        _ = parts.port
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
 def _is_blank(value: Any) -> bool:
