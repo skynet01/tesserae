@@ -268,6 +268,13 @@ class Harness:
         self.svc.on_push()
 
 
+@pytest.fixture(autouse=True)
+def _quick_settings_answers(monkeypatch) -> None:
+    """The fake frames here mostly don't answer settings reads; don't let
+    each one hold the next picture or sleep for the real PARAM_WAIT_S."""
+    monkeypatch.setattr(visionect, "PARAM_WAIT_S", 0.2)
+
+
 @pytest.fixture
 def harness(tmp_path: Path):
     h = Harness(tmp_path)
@@ -2088,6 +2095,37 @@ def test_full_refresh_repaints_the_frame_the_sign_shows(tmp_path: Path) -> None:
             sign.ack(sign.images()[1].id)
             sign.wait_for(lambda s: len(s.images()) > 2, timeout=1.5)
             assert len(sign.images()) == 2
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_settings_are_read_only_with_the_picture_shown_and_hold_the_next_picture(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The settings read never goes out on top of a picture: first the
+    picture and its ACK, then the read; a new picture waits for the
+    frame's answer (the 32" frame dropped the connection with "protocol
+    error" when a picture followed an unanswered settings packet)."""
+    monkeypatch.setattr(visionect, "PARAM_WAIT_S", 3.0)
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        h.render("frame-a")
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.images()) == 1)
+            assert _params(sign) == []  # nothing before the ACK
+            sign.ack(sign.images()[0].id)
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            h.render("frame-b", shade=128)
+            h.push()
+            sign.wait_for(lambda s: len(s.images()) > 1, timeout=1.0)
+            assert len(sign.images()) == 1  # held for the answer
+            _answer(sign, {29: _u32(30), 52: _u32(0)})
+            assert sign.wait_for(lambda s: len(s.images()) == 2, timeout=2.0)
         finally:
             sign.close()
     finally:
