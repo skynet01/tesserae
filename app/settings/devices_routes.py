@@ -1138,6 +1138,35 @@ def devices_album_resync(instance_id: str) -> Response:
     return redirect_to
 
 
+_VISIONECT_ACTION_DONE = {
+    "status": "Asked {name}'s sign to report in; its status shows here once it does.",
+    "reboot": "Sent {name}'s sign a reboot. It reconnects in a minute or two and gets the latest frame.",
+    "refresh": "{name}'s sign repaints its frame from scratch now.",
+}
+
+
+@bp.post("/settings/devices/<instance_id>/visionect/<action>")
+def devices_visionect_action(instance_id: str, action: str) -> Response:
+    """Report in, Reboot or Full refresh for a Visionect sign (the device
+    page's Overview). Only a connected sign can be asked anything."""
+    redirect_to = _device_page_redirect(instance_id, "overview")
+    device = devices().get(instance_id)
+    if device is None or not visionect.is_visionect_device(device):
+        flash(f"Unknown Visionect device {instance_id!r}.", "error")
+        return redirect_to
+    svc = visionect.service()
+    problem = (
+        svc.request_action(device.id, action)
+        if svc is not None
+        else "Tesserae isn't listening for signs right now."
+    )
+    if problem:
+        flash(problem, "error")
+    else:
+        flash(_VISIONECT_ACTION_DONE[action].format(name=device.name), "ok")
+    return redirect_to
+
+
 # Wake counts the Logs section offers; 0 stops a running collection.
 _LOG_COLLECT_CHOICES = (0, 1, 5, 20)
 
@@ -1356,6 +1385,9 @@ def devices_update_combined(instance_id: str) -> Response:
             if ok
             else None
         )
+        svc = visionect.service() if ok and not conflict else None
+        if svc is not None and visionect.is_visionect_device(device):
+            svc.on_push()  # a connected sign gets changed settings now
         if not ok:
             flash(f"Invalid {device.name} config: {err}", "error")
         elif conflict:

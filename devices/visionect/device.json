@@ -22,6 +22,33 @@
       "label": "Sign UUID",
       "default": "",
       "help": "The sign's UUID, e.g. 36002000-1247-3830-3933-303600000000 (on the label, or in the old Visionect server's device list). Leave blank and the first unknown sign that connects within an hour of adding the device (or clearing this field) is bound to it; later ones are listed as discovered devices."
+    },
+    "heartbeat_min": {
+      "type": "select",
+      "label": "Check-in interval",
+      "default": "",
+      "choices": [
+        {"value": "", "label": "Leave as the sign has it"},
+        {"value": "1", "label": "Every minute"},
+        {"value": "2", "label": "Every 2 minutes"},
+        {"value": "5", "label": "Every 5 minutes"},
+        {"value": "10", "label": "Every 10 minutes"},
+        {"value": "15", "label": "Every 15 minutes"},
+        {"value": "30", "label": "Every 30 minutes"},
+        {"value": "60", "label": "Every hour"}
+      ],
+      "help": "How often the sign reports in (battery, signal, what it shows) between frames. Shorter keeps Home Assistant's sensors fresher and notices a dropped connection sooner, for a little more power. Written to the sign and saved in its flash when it next connects."
+    },
+    "sign_sleep": {
+      "type": "select",
+      "label": "Sign sleep between check-ins",
+      "default": "",
+      "choices": [
+        {"value": "", "label": "Leave as the sign has it"},
+        {"value": "sleep", "label": "Sleep (saves power)"},
+        {"value": "awake", "label": "Stay awake"}
+      ],
+      "help": "Whether the sign's processor sleeps between check-ins (the sign's sleep-mode setting). Staying awake suits a sign on mains power; sleeping saves battery. Quiet hours' deep sleep is separate. Written to the sign and saved in its flash when it next connects."
     }
   }
 }
