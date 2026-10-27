@@ -69,6 +69,9 @@
     html[data-ui="paper"][data-theme="dark"] { background: #191816; }
   </style>
   <script>
+    // Scripts run here: CSS may fold away what scripts reveal (a list's
+    // closed rows), and shows it all without them.
+    document.documentElement.classList.add('js');
     // Apply the theme before paint to avoid a light-mode flash. A saved
     // choice wins; with none, follow the operating system and keep
     // following it until the toggle is used.

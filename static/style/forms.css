@@ -2800,8 +2800,11 @@ input[type="range"].slider:focus::-moz-range-thumb {
   transition: transform 180ms ease-out;
 }
 .repeater-row-head:hover .repeater-row-chev { color: var(--t-fg); }
+/* Without scripts every row is open and the caret can't close it. */
+:root:not(.js) .repeater-row-chev { display: none; }
 .repeater--list .repeater-row.is-open .repeater-row-chev { transform: rotate(90deg); }
 .repeater-row-body { padding: 4px 12px 16px; }
+:root.js .repeater--list .repeater-row:not(.is-open) > .repeater-row-body { display: none; }
 .repeater--list .repeater-row-fields {
   grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
   align-items: start;

@@ -485,7 +485,8 @@ macro here instead.
    row's title (its first string sub-field), a one-line summary of its first
    textarea, its first boolean as a switch and a caret; the caret (or a
    click on the row) opens the other sub-fields under it, with the move and
-   remove buttons. -#}
+   remove buttons. Rows are drawn open: CSS closes them only once scripts run
+   (``.js`` on <html>), so without scripts every field still shows. -#}
 {%- macro _repeater_list_row(field_id, view, row, idx, form=None) -%}
 {%- set toggle = view.subs|selectattr('type', 'equalto', 'boolean')|first -%}
 {%- set title_sub = view.subs|selectattr('type', 'equalto', 'string')|first -%}
@@ -494,8 +495,7 @@ macro here instead.
 {%- set body_id = field_id ~ '-' ~ idx ~ '-body' -%}
 <li class="repeater-row repeater-row--list{% if toggle and not row.get(toggle.name) %} is-off{% endif %}" data-repeater-row>
   <div class="repeater-row-head">
-    <button type="button" class="repeater-row-open" data-repeater-open
-            aria-expanded="false" aria-controls="{{ body_id }}">
+    <button type="button" class="repeater-row-open" data-repeater-open aria-controls="{{ body_id }}">
       <span class="repeater-row-title" data-repeater-title>{{ title }}</span>
       {%- if meta_sub %}
       <span class="repeater-row-meta" data-repeater-meta>{{ row.get(meta_sub.name) or '' }}</span>
@@ -512,7 +512,7 @@ macro here instead.
     {%- endif %}
     <span class="repeater-row-chev" aria-hidden="true"><i class="ph ph-caret-right"></i></span>
   </div>
-  <div class="repeater-row-body" id="{{ body_id }}" data-repeater-body hidden>
+  <div class="repeater-row-body" id="{{ body_id }}" data-repeater-body>
     <div class="repeater-row-fields">
     {%- for sub in view.subs if not (toggle and sub.name == toggle.name) %}
       {{ _repeater_sub(field_id, sub, row.get(sub.name), idx, form) }}
@@ -552,6 +552,9 @@ macro here instead.
     {%- endfor %}
   </ol>
   <p class="repeater-empty" data-repeater-empty{% if view.rows %} hidden{% endif %}>Nothing here yet.</p>
+  {%- if as_list %}
+  <noscript><p class="field-help">Changing, adding or moving {{ view.row_label|lower }}s here needs JavaScript; the other settings save without it.</p></noscript>
+  {%- endif %}
   <template data-repeater-template>{{ row(field_id, view, view.defaults, '__i__', form) }}</template>
   <div class="repeater-foot">
     <button type="button" class="repeater-add{% if as_list %} dx-btn-ghost-sm{% endif %}" data-repeater-add

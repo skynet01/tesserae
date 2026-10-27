@@ -422,3 +422,148 @@ def test_news_admin_rows_fit_desktop_and_mobile(live):
                         path=str(Path(artifacts) / f"{pid}-{width}-{theme}.png"), full_page=True
                     )
         browser.close()
+
+
+@pytest.mark.parametrize("live", ["news"], indirect=True)
+def test_newspaper_rows_move_remove_and_discard_around_closed_rows(live):
+    """An open row moves past closed neighbours and stays the open one; a
+    removal hands focus to the next row's caret; Discard brings back the
+    served rows, all closed."""
+    from playwright.sync_api import sync_playwright
+
+    base, _ = live
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        errors = []
+        page.on("pageerror", lambda err: errors.append(str(err)))
+        page.goto(f"{base}/plugins/news_front_pages/", wait_until="networkidle")
+        card = page.locator("#plugin-news_front_pages")
+        rows = card.locator("[data-repeater-row]")
+
+        def codes() -> list[str]:
+            return [
+                rows.nth(i).locator('[data-repeater-key="code"]').input_value()
+                for i in range(rows.count())
+            ]
+
+        def open_codes() -> list[str]:
+            return [
+                rows.nth(i).locator('[data-repeater-key="code"]').input_value()
+                for i in range(rows.count())
+                if rows.nth(i).locator('[data-repeater-key="code"]').is_visible()
+            ]
+
+        served = codes()
+        assert served == ["NY_NYT", "WSJ", "USAT", "AZ_ADS"]
+        rows.nth(1).locator("[data-repeater-open]").click()
+        rows.nth(1).locator("[data-repeater-down]").click()
+        assert codes() == ["NY_NYT", "USAT", "WSJ", "AZ_ADS"]
+        assert open_codes() == ["WSJ"]  # the neighbours stay closed
+        focused = page.evaluate(
+            """() => {
+                 const el = document.activeElement;
+                 const row = el.closest("[data-repeater-row]");
+                 return [el.matches("[data-repeater-down]"),
+                         row.querySelector('[data-repeater-key="code"]').value];
+               }"""
+        )
+        assert focused == [True, "WSJ"]  # the button pressed keeps focus
+        up = rows.nth(2).locator("[data-repeater-up]")
+        up.click()
+        page.keyboard.press("Enter")
+        assert codes() == ["WSJ", "NY_NYT", "USAT", "AZ_ADS"]
+        assert open_codes() == ["WSJ"]
+        assert rows.first.locator("[data-repeater-up]").get_attribute("aria-disabled") == "true"
+        rows.first.locator("[data-repeater-remove]").click()
+        assert codes() == ["NY_NYT", "USAT", "AZ_ADS"]
+        assert rows.first.locator("[data-repeater-open]").evaluate(
+            "el => el === document.activeElement"
+        )
+        assert open_codes() == []
+        card.locator(".dx-save-bar-discard").click()
+        page.wait_for_timeout(50)
+        assert codes() == served
+        assert open_codes() == []
+        assert all(
+            rows.nth(i).locator("[data-repeater-open]").get_attribute("aria-expanded") == "false"
+            for i in range(rows.count())
+        )
+        browser.close()
+    assert errors == []
+
+
+@pytest.mark.parametrize("live", ["news"], indirect=True)
+def test_ai_news_fold_opens_on_an_invalid_field(live):
+    """A field that fails validation inside the folded settings opens the
+    fold, so the browser can show and focus it; once fixed, the save goes."""
+    from playwright.sync_api import sync_playwright
+
+    base, app = live
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{base}/plugins/news_illustrated/", wait_until="networkidle")
+        card = page.locator("#plugin-news_illustrated")
+        head = card.locator("summary.dx-section-head")
+        words = card.locator('[name="summary_words"]')
+        head.click()
+        words.fill("5")  # under the field's minimum
+        head.click()
+        assert words.is_hidden()
+        card.locator(".dx-save-bar-save").click()
+        page.wait_for_timeout(200)
+        assert words.is_visible()
+        assert words.evaluate("el => el === document.activeElement && !el.validity.valid")
+        words.fill("60")
+        with page.expect_navigation():
+            card.locator(".dx-save-bar-save").click()
+        browser.close()
+    plugin = app.config["PLUGIN_REGISTRY"].get("news_illustrated")
+    saved = app.config["SETTINGS_STORE"].get_for_runtime(
+        "plugins", plugin.id, plugin.manifest["settings"]
+    )
+    assert saved["summary_words"] == 60
+
+
+@pytest.mark.parametrize("live", ["news"], indirect=True)
+def test_news_admin_pages_work_without_javascript(live):
+    """No scripts: every paper's fields show (rows can't be folded), the
+    page says the list needs JavaScript, and each settings card has a plain
+    Save button; the AI news fold is a native disclosure and saves."""
+    from playwright.sync_api import sync_playwright
+
+    base, app = live
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(java_script_enabled=False)
+        page = context.new_page()
+        # networkidle: leaving a page mid-download of a font leaves the
+        # served file to the garbage collector, a ResourceWarning in pytest.
+        page.goto(f"{base}/plugins/news_front_pages/", wait_until="networkidle")
+        card = page.locator("#plugin-news_front_pages")
+        codes = card.locator('[data-repeater-key="code"]')
+        assert codes.count() == 4
+        assert all(codes.nth(i).is_visible() for i in range(4))
+        assert card.locator(".repeater-row-chev").first.is_hidden()
+        # (Playwright's text and role engines skip <noscript>; CSS reaches it.)
+        note = card.locator("noscript").first
+        assert note.is_visible() and "needs JavaScript" in note.inner_html()
+        assert card.locator("noscript button[type=submit]").is_visible()
+
+        page.goto(f"{base}/plugins/news_illustrated/", wait_until="networkidle")
+        ai = page.locator("#plugin-news_illustrated")
+        sources = ai.locator('[name="sources"]')
+        assert sources.is_hidden()
+        ai.locator("summary.dx-section-head").click()
+        sources.fill("Local | https://example.test/rss")
+        with page.expect_navigation():
+            ai.locator("noscript button[type=submit]").click()
+        page.wait_for_load_state("networkidle")
+        context.close()
+        browser.close()
+    plugin = app.config["PLUGIN_REGISTRY"].get("news_illustrated")
+    saved = app.config["SETTINGS_STORE"].get_for_runtime(
+        "plugins", plugin.id, plugin.manifest["settings"]
+    )
+    assert saved["sources"] == "Local | https://example.test/rss"

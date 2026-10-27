@@ -1073,11 +1073,11 @@
         }
       }
 
+      // CSS shows a list-layout row's body while it is ``is-open`` (and
+      // every body when scripts don't run).
       function setOpen(row, open) {
-        const body = row.querySelector("[data-repeater-body]");
         const btn = row.querySelector("[data-repeater-open]");
-        if (!body || !btn) return;
-        body.hidden = !open;
+        if (!btn) return;
         btn.setAttribute("aria-expanded", open ? "true" : "false");
         row.classList.toggle("is-open", open);
       }
@@ -1086,6 +1086,7 @@
         const all = rows();
         all.forEach((row, i) => {
           row.setAttribute("aria-label", `${rowLabel} ${i + 1} of ${all.length}`);
+          setOpen(row, row.classList.contains("is-open"));
           describe(row);
           setOff(row.querySelector("[data-repeater-up]"), i === 0);
           setOff(row.querySelector("[data-repeater-down]"), i === all.length - 1);
