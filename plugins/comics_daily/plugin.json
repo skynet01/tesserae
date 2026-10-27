@@ -152,31 +152,35 @@
       "help": "The caption under each Far Side panel."
     },
     {
-      "name": "gap",
-      "type": "number",
-      "label": "Gap between rows",
-      "group": "Layout",
-      "default": 32,
-      "min": 0,
-      "max": 200,
-      "help": "Space between rows in pixels on a 1440 px wide panel; narrower cells scale it down. Spare height widens it up to the largest gap."
-    },
-    {
       "name": "gap_min",
       "type": "number",
       "label": "Smallest gap",
+      "group": "Layout",
+      "row": "gaps",
       "default": 6,
       "min": 0,
       "max": 200,
-      "help": "How far the gap may shrink to fit one more strip before the last strip is left out."
+      "help": "How far the gap shrinks to fit one more strip before the last one is left out."
+    },
+    {
+      "name": "gap",
+      "type": "number",
+      "label": "Usual gap",
+      "row": "gaps",
+      "default": 32,
+      "min": 0,
+      "max": 200,
+      "help": "The space between rows, in pixels on a 1440 px wide panel; narrower cells scale it down."
     },
     {
       "name": "gap_max",
       "type": "number",
       "label": "Largest gap",
+      "row": "gaps",
       "default": 48,
       "min": 0,
-      "max": 400
+      "max": 400,
+      "help": "How far the gap grows when there is spare height."
     },
     {
       "name": "small_screens",

@@ -127,23 +127,33 @@
 {% endcall %}
 
 {% call section_card(icon='cookie', title='GoComics cookies', id='cookies',
-                     description="Only needed when GoComics blocks the automatic download.") %}
-  <p class="cx-cookie-status">{{ chip(view.cookies) }}<span>{{ view.cookies.line }}</span></p>
-  <form method="post" action="{{ url_for('comics_daily_media.save_cookies') }}" class="cx-cookie-form">
-    <div class="field">
-      <label for="cx-cookies">{{ 'Replace them' if view.cookies.set else 'Paste cookies' }}</label>
-      <textarea id="cx-cookies" name="cookies" rows="3" required
-                autocomplete="off" autocapitalize="off" spellcheck="false"
-                placeholder="Stored encrypted and never shown again."></textarea>
-      <p class="field-help">In Chrome, add the <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener noreferrer">Get cookies.txt Locally</a> extension, open gocomics.com, click the extension and choose Copy All, then paste it here. A JSON cookie export or a Cookie header works too.</p>
+                     description="GoComics checks for a browser before it serves a strip. Tesserae passes the check itself and keeps the session; paste a browser's cookies only when that gets blocked.") %}
+  <dl class="cx-cookie-status">
+    <dt>Browser check</dt>
+    <dd>{{ chip(view.session) }}<span>{{ view.session.line }}</span></dd>
+    <dt>Pasted</dt>
+    <dd>{{ chip(view.cookies) }}<span>{{ view.cookies.line }}</span></dd>
+  </dl>
+  <details class="dx-disclosure cx-paste"{% if view.cookies.set or view.session.chip != 'Saved' or view.preview | selectattr('cookies_help') | list %} open{% endif %}>
+    <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>{{ 'Replace pasted cookies' if view.cookies.set else 'Paste cookies' }}</span></summary>
+    <div class="dx-disclosure-body">
+      <form method="post" action="{{ url_for('comics_daily_media.save_cookies') }}" class="cx-cookie-form">
+        <div class="field">
+          <label for="cx-cookies" class="sr-only">Cookies</label>
+          <textarea id="cx-cookies" name="cookies" rows="3" required
+                    autocomplete="off" autocapitalize="off" spellcheck="false"
+                    placeholder="Stored encrypted and never shown again."></textarea>
+          <p class="field-help">In Chrome, add the <a href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc" target="_blank" rel="noopener noreferrer">Get cookies.txt Locally</a> extension, open gocomics.com, click the extension and choose Copy All, then paste it here. A JSON cookie export or a Cookie header works too.</p>
+        </div>
+        <div class="cx-cookie-actions">
+          <button type="submit" class="dx-btn-ghost-sm"><i class="ph ph-floppy-disk" aria-hidden="true"></i><span>Save cookies</span></button>
+          {% if view.cookies.set %}
+          <button type="submit" class="dx-btn-ghost-sm cx-clear" formaction="{{ url_for('comics_daily_media.clear_cookies') }}" formnovalidate><i class="ph ph-x" aria-hidden="true"></i><span>Clear</span></button>
+          {% endif %}
+        </div>
+      </form>
     </div>
-    <div class="cx-cookie-actions">
-      <button type="submit" class="dx-btn-ghost-sm"><i class="ph ph-floppy-disk" aria-hidden="true"></i><span>Save cookies</span></button>
-      {% if view.cookies.set %}
-      <button type="submit" class="dx-btn-ghost-sm cx-clear" formaction="{{ url_for('comics_daily_media.clear_cookies') }}" formnovalidate><i class="ph ph-x" aria-hidden="true"></i><span>Clear</span></button>
-      {% endif %}
-    </div>
-  </form>
+  </details>
 {% endcall %}
 
 {% set repeater_row_extra = strip_extra %}
@@ -235,7 +245,10 @@
   .cx-add { display: flex; align-items: center; gap: 8px; flex: 1 1 340px; min-width: 0; }
   .cx-add input { flex: 1 1 auto; min-width: 0; }
   form[data-dirty] [data-comics-action] { opacity: 0.6; }
-  .cx-cookie-status { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 13px; color: var(--t-fg-soft); }
+  .cx-cookie-status { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 16px; align-items: start; margin: 0; font-size: 13px; color: var(--t-fg-soft); }
+  .cx-cookie-status dt { padding-top: 3px; font-family: var(--t-font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--t-muted); }
+  .cx-cookie-status dd { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 0; }
+  .cx-paste { margin-top: 14px; }
   #cx-cookies { font-family: var(--t-font-mono); font-size: 12.5px; }
   .cx-cookie-actions { display: flex; gap: 8px; margin-top: 10px; }
   .cx-clear:hover { color: var(--t-danger); }

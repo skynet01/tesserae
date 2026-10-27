@@ -2005,6 +2005,22 @@ form[data-dirty] .dx-inline-save { display: none; }
 .dx-section-body > .dx-toggle-row + .dx-toggle-row {
   border-top: 1px solid var(--dx-border-faint, #f1f0eb);
 }
+/* Settings that share a ``row`` (_server_section.html): side by side,
+   ruled like one field, stacking on a narrow screen. */
+.dx-section-body > .dx-field-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  column-gap: 16px;
+  align-items: end;
+}
+.dx-section-body .dx-field-row > .field + .field { border-top: 0; }
+.dx-section-body > .field + .dx-field-row,
+.dx-section-body > .dx-toggle-row + .dx-field-row,
+.dx-section-body > .dx-field-row + .field,
+.dx-section-body > .dx-field-row + .dx-toggle-row,
+.dx-section-body > .dx-field-row + .dx-field-row {
+  border-top: 1px solid var(--dx-border-faint, #f1f0eb);
+}
 .dx-section-body .field label {
   font-size: 12.5px;
   font-weight: 600;

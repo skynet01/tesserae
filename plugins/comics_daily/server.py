@@ -1851,6 +1851,39 @@ def source_status(
     }
 
 
+def session_view(store: Any, tz: Any, today: str) -> dict[str, Any]:
+    """The GoComics session the built-in browser check keeps (COOKIE_FILE)
+    for the Comics page: whether a shield cookie is saved, and when the
+    session was last updated (written after each GoComics fetch). Never the
+    cookies."""
+    path = store.root / COOKIE_FILE
+    jar = MozillaCookieJar()
+    try:
+        jar.load(str(path), ignore_discard=True, ignore_expires=True)
+        updated = path.stat().st_mtime
+    except (OSError, LoadError):
+        jar, updated = MozillaCookieJar(), None
+    shields = [c for c in jar if c.name.startswith(bunny_shield.COOKIE_PREFIX)]
+    if not shields:
+        return {
+            "set": False,
+            "chip": "None yet",
+            "tone": "",
+            "line": "The next GoComics fetch passes the browser check and saves a session.",
+        }
+    line = f"Session cookie saved, last updated {_when(updated, tz, today)}"
+    expires = max(bunny_shield.cookie_expiry(c) for c in shields)
+    expired = not bunny_shield.has_session(shields)
+    if expired:
+        line += f", expired {_when(expires, tz, today)}. The next fetch sets up a new one."
+    elif expires:
+        line += f", expires {_when(expires, tz, today)}."
+    else:
+        line += ". GoComics keeps it until it asks for the check again."
+    chip, tone = ("Expired", "warn") if expired else ("Saved", "ok")
+    return {"set": True, "chip": chip, "tone": tone, "line": line}
+
+
 def cookie_view(store: Any, tz: Any, today: str) -> dict[str, Any]:
     """The pasted GoComics cookies' state for the Comics page: whether any
     are set, a chip and a status line. Never the cookies."""
@@ -1859,7 +1892,7 @@ def cookie_view(store: Any, tz: Any, today: str) -> dict[str, Any]:
             "set": False,
             "chip": "Not set",
             "tone": "",
-            "line": ("GoComics strips are fetched with the built-in browser check."),
+            "line": "None pasted. Only needed when the browser check is blocked.",
         }
     status = store.cookie_status()
     count = int(status.get("count") or 0)
@@ -2017,6 +2050,7 @@ def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
         "lede": " ".join(lede),
         "screens": screens_view(config, farside, preview),
         "cookies": cookie_view(store, tz, today),
+        "session": session_view(store, tz, today),
         "running": bool(busy),
         "farside": farside,
         "preview": preview,
