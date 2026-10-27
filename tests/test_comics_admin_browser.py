@@ -112,3 +112,40 @@ def test_comics_admin_fits_and_imports_the_typed_url(
     garfield = next(r for r in rows if r["slug"] == "garfield")
     assert garfield["mode"] == "upload"
     assert garfield["image_url"] == "https://pictures.example.org/garfield.png"
+
+
+def test_discard_brings_rows_back_with_their_extras(live: tuple[str, Flask]) -> None:
+    """Discard restores the rows as served: each strip's upload tools and
+    status, and Dilbert still can't be removed."""
+    from playwright.sync_api import sync_playwright
+
+    base, _ = live
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        page.goto(f"{base}/plugins/comics_daily/", wait_until="networkidle")
+        card = page.locator("#plugin-comics_daily")
+        card.locator("summary.dx-section-head").click()
+        rows = card.locator("[data-repeater-row]")
+        slugs = lambda: [  # noqa: E731
+            rows.nth(i).locator('[data-repeater-key="slug"]').input_value()
+            for i in range(rows.count())
+        ]
+        served = slugs()
+        rows.nth(1).locator("[data-repeater-open]").click()
+        rows.nth(1).locator("[data-repeater-up]").click()  # Garfield above Dilbert
+        rows.nth(2).locator("[data-repeater-open]").click()
+        rows.nth(2).locator("[data-repeater-remove]").click()
+        assert slugs() != served
+        card.locator(".dx-save-bar-discard").click()
+        page.wait_for_timeout(100)
+        assert slugs() == served
+        dilbert = rows.first
+        assert dilbert.get_attribute("data-repeater-fixed") is not None
+        assert dilbert.locator("[data-repeater-remove]").get_attribute("aria-disabled") == "true"
+        assert rows.nth(1).locator('input[type="file"][form="cx-upload-garfield"]').count() == 1
+        assert rows.nth(1).locator(".cx-row-status").count() == 1
+        # And the restored rows still work.
+        rows.nth(1).locator("[data-repeater-open]").click()
+        assert rows.nth(1).locator('[data-repeater-key="image_url"]').is_visible()
+        browser.close()

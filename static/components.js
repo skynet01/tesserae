@@ -1019,6 +1019,9 @@
       const rowLabel = box.dataset.repeaterRowLabel || "Row";
       const fieldId = box.dataset.repeaterId || "repeater";
       const served = storage.value;
+      const servedRows = Array.from(list.children)
+        .filter((el) => el.matches("[data-repeater-row]"))
+        .map((row) => row.cloneNode(true));
       let serial = 0;
 
       const rows = () =>
@@ -1135,20 +1138,13 @@
         return row;
       }
 
-      function rebuild(json) {
-        let data = [];
-        try {
-          const parsed = JSON.parse(json || "[]");
-          if (Array.isArray(parsed)) data = parsed;
-        } catch {
-          data = [];
-        }
-        list.replaceChildren();
-        data.forEach((item) => {
-          const row = newRow(item && typeof item === "object" ? item : null);
-          if (row) list.appendChild(row);
-        });
-        storage.value = json || "[]";
+      // Discard puts back the rows the page was served with: copies of their
+      // own markup, taken before any edit, so what the server drew into a
+      // row (a status, an upload button, a row that can't be removed) comes
+      // back with it. Rows rebuilt from the empty template would lose it.
+      function restoreServed() {
+        list.replaceChildren(...servedRows.map((row) => row.cloneNode(true)));
+        storage.value = served;
         refresh();
       }
 
@@ -1229,7 +1225,7 @@
       const form = storage.form;
       if (form) {
         form.addEventListener("submit", () => serialise(false));
-        form.addEventListener("reset", () => setTimeout(() => rebuild(served), 0));
+        form.addEventListener("reset", () => setTimeout(restoreServed, 0));
       }
       refresh();
     });
