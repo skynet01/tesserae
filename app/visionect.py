@@ -49,6 +49,7 @@ import math
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -139,6 +140,8 @@ PARAM_FLASH_SAVE = 53
 PARAM_WIFI_SSID = 65
 READ_PARAMS = (PARAM_HEARTBEAT, PARAM_SLEEP_DISABLE, PARAM_WIFI_SSID)
 HEARTBEAT_MAX_MINUTES = 24 * 60
+# Lines kept per frame of what went each way, for the device page.
+EXCHANGE_LOG_LINES = 60
 # How long a picture waits for the frame to answer a settings packet.
 PARAM_WAIT_S = 10.0
 PARAM_NAMES = {
@@ -268,6 +271,41 @@ def status_summary(status: Any) -> dict[str, Any]:
     return out
 
 
+def status_line(status: Any) -> str:
+    """A status packet as one exchange-log line."""
+    st = status_summary(status)
+    parts = [f"status ({getattr(status, 'connect_reason_name', '') or '?'})"]
+    if "battery_pct" in st:
+        parts.append(f"battery {st['battery_pct']}%")
+    if "rssi" in st:
+        parts.append(f"{st['rssi']} dBm")
+    crc = getattr(status, "display_state_crc", None)
+    if crc is not None:
+        parts.append(f"shows CRC {crc}")
+    if "next_status_min" in st:
+        parts.append(f"next in {st['next_status_min']} min")
+    return ", ".join(parts)
+
+
+def params_line(packet: Any) -> str:
+    """A settings answer as one exchange-log line."""
+    names = {**PARAM_NAMES, PARAM_WIFI_SSID: "Wi-Fi"}
+    parts = []
+    for item in getattr(packet, "items", ()):
+        pid, control = int(item.id), int(item.control)
+        name = names.get(pid, f"TCLV {pid}")
+        if control in (PARAM_READ_ERROR, PARAM_WRITE_ERROR):
+            parts.append(f"{name}: {'read' if control == PARAM_READ_ERROR else 'write'} refused")
+        elif pid == PARAM_WIFI_SSID:
+            ssid = item.value.split(b"\0")[0].decode("ascii", "replace")
+            parts.append(f"{name} {ssid}")
+        elif item.value:
+            parts.append(f"{name} {int.from_bytes(item.value, 'little')}")
+        else:
+            parts.append(f"{name} ok")
+    return "settings: " + (", ".join(parts) or "empty")
+
+
 def artifact_path(renders_dir: Path, latest: dict[str, Any]) -> Path | None:
     """The renderer artifact a ``latest_render_for`` entry points at, kept
     inside ``renders_dir`` whatever the entry says."""
@@ -386,6 +424,11 @@ class _Sign:
     params_written: tuple[tuple[int, int], ...] = ()
     param_error: str = ""
     force_refresh: bool = False  # Full refresh asked from the device page
+    # What went to and came from the frame, newest last: (wall time,
+    # "out" / "in" / "note", text). Kept across its connections.
+    exchanges: deque[tuple[float, str, str]] = field(
+        default_factory=lambda: deque(maxlen=EXCHANGE_LOG_LINES)
+    )
     action: dict[str, Any] | None = None  # the last action sent ({kind, at}), for the device page
 
 
@@ -788,6 +831,8 @@ class VisionectService:
 
     def _disconnected(self, sign: _Sign) -> None:
         """Forget the sign's connection; nothing is in flight on a dead one."""
+        if sign.conn is not None:
+            self._note(sign, "note", "connection closed")
         sign.conn = sign.writer = None
         sign.inflight = None
         sign.probe_at = 0.0
@@ -905,6 +950,7 @@ class VisionectService:
         if inflight is not None and now >= inflight.deadline:
             sign.inflight = None
             what = "picture" if inflight.kind == "image" else "sleep command"
+            self._note(sign, "note", f"no answer to the {what}; dropping the connection")
             sign.last_error = (
                 f"The frame never confirmed the {what}, so Tesserae dropped the connection; "
                 "it re-dials and gets the latest state."
@@ -1080,6 +1126,17 @@ class VisionectService:
                 resend_stamp=resend,
             )
             sign.inflight = inflight
+            self._note(
+                sign,
+                "out",
+                f"picture {sign.frame_digest[:12]}"
+                + (" (full repaint)" if resending else "")
+                + (
+                    f", {len(sign.frame.rectangles)} rectangles"
+                    if hasattr(sign.frame, "rectangles")
+                    else ""
+                ),
+            )
             self._publish(sign)  # "sending" while the write is under way
             logger.info(
                 "visionect %s: sending frame %s to sign %s%s",
@@ -1138,6 +1195,7 @@ class VisionectService:
             minutes=minutes,
         )
         sign.inflight = inflight
+        self._note(sign, "out", f"sleep {minutes} min (quiet hours)")
         logger.info("visionect: quiet hours, sign %s sleeps for %d min", sign.uuid, minutes)
         await self._send(sign, inflight, SLEEP_ACK_TIMEOUT_S)
 
@@ -1212,6 +1270,11 @@ class VisionectService:
             stats.bytes_out += len(data)
         return True
 
+    @staticmethod
+    def _note(sign: _Sign, way: str, text: str) -> None:
+        """One line of the frame's exchange log ("out", "in" or "note")."""
+        sign.exchanges.append((time.time(), way, text))
+
     # -- the sign's own settings and actions ---------------------------------
 
     async def _sync_params(self, sign: _Sign, device: Device) -> bool:
@@ -1228,6 +1291,7 @@ class VisionectService:
             except Exception:
                 logger.debug("visionect: reading %s's settings failed", sign.uuid, exc_info=True)
                 return False
+            self._note(sign, "out", "read settings")
             self._await_params(sign)
             await self._write(conn, writer)
             return True
@@ -1251,6 +1315,13 @@ class VisionectService:
             device.id,
             sign.uuid,
             ", ".join(f"{PARAM_NAMES.get(pid, pid)}={v}" for pid, v in change),
+        )
+        self._note(
+            sign,
+            "out",
+            "write "
+            + ", ".join(f"{PARAM_NAMES.get(pid, pid)} = {v}" for pid, v in change)
+            + ", save to flash, read back",
         )
         self._await_params(sign)
         await self._write(conn, writer)
@@ -1317,6 +1388,7 @@ class VisionectService:
                 logger.warning("visionect: %s for sign %s failed", action, uuid, exc_info=True)
                 return
             self._spawn(self._write(sign.conn, sign.writer))
+            self._note(sign, "out", "reboot" if action == "reboot" else "status request")
             logger.info("visionect: %s sent to sign %s", action, uuid)
         sign.action = {"kind": action, "at": time.time()}
         self._publish(sign)
@@ -1379,6 +1451,7 @@ class VisionectService:
             return ""  # a superseded or refused connection: not the sign's
         now = time.monotonic()
         if isinstance(event, StatusReceived):
+            self._note(sign, "in", status_line(event.status))
             sign.heard_at = now
             sign.probe_at = 0.0
             sign.status = event.status
@@ -1390,6 +1463,7 @@ class VisionectService:
             self._publish(sign)
             return uuid
         if isinstance(event, ParamsReceived):
+            self._note(sign, "in", params_line(event.params))
             sign.heard_at = now
             self._params_received(sign, event.params)
             self._publish(sign)
@@ -1401,6 +1475,8 @@ class VisionectService:
             and inflight.packet_id == getattr(event, "packet_id", None)
         )
         if isinstance(event, Acked):
+            if answered and inflight is not None:
+                self._note(sign, "in", f"ack: {'picture' if inflight.kind == 'image' else 'sleep'}")
             sign.heard_at = now
             if answered and inflight is not None:
                 sign.inflight = None
@@ -1424,6 +1500,11 @@ class VisionectService:
                     sign.asleep_until = time.time() + inflight.minutes * 60
             return uuid
         if isinstance(event, Nacked):
+            if answered and inflight is not None:
+                what = "picture" if inflight.kind == "image" else "sleep"
+                self._note(
+                    sign, "in", f"refused the {what}{' (charging)' if event.charging else ''}"
+                )
             sign.heard_at = now
             if answered and inflight is not None:
                 sign.inflight = None
@@ -1505,6 +1586,9 @@ class VisionectService:
         sign.asleep_until = 0.0
         sign.connected_at = time.time()
         sign.connect_reason = str(getattr(status, "connect_reason_name", "") or "")
+        self._note(
+            sign, "in", f"connected from {remote or '?'} ({sign.connect_reason or 'no reason'})"
+        )
         # Read the sign's settings afresh on every connection (a reboot or a
         # USB console may have changed them); a new connection may write again.
         sign.params, sign.params_asked, sign.params_wait_until = {}, False, 0.0
@@ -1559,6 +1643,7 @@ class VisionectService:
         try:
             sign.conn.request_status()
             sign.writer.write(sign.conn.drain())
+            self._note(sign, "out", "status request (is it still there?)")
         except Exception:
             logger.debug("visionect: status request to %s failed", sign.uuid, exc_info=True)
             return
@@ -1664,6 +1749,7 @@ class VisionectService:
             "wifi": sign.params.get(PARAM_WIFI_SSID),
             "param_error": sign.param_error,
             "action": dict(sign.action) if sign.action else None,
+            "exchanges": list(sign.exchanges),
         }
         with self._snapshot_lock:
             self._snapshot[sign.uuid] = view

@@ -2130,3 +2130,33 @@ def test_settings_are_read_only_with_the_picture_shown_and_hold_the_next_picture
             sign.close()
     finally:
         h.svc.stop()
+
+
+def test_the_exchange_log_records_what_went_each_way(tmp_path: Path) -> None:
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        h.render("frame-a")
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.images()) == 1)
+            sign.ack(sign.images()[0].id)
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            _answer(sign, {29: _u32(30), 52: _u32(0), 65: b"home-wifi"})
+
+            def lines() -> list[str]:
+                view = h.svc.sign_view(UUID) or {}
+                return [f"{way} {text}" for _at, way, text in view.get("exchanges") or []]
+
+            assert _wait(lambda: any("Wi-Fi home-wifi" in line for line in lines()))
+            log = lines()
+            assert log[0].startswith("in connected from 127.0.0.1")
+            assert any(line.startswith("in status (") for line in log)
+            assert any(line.startswith("out picture frame-a") for line in log)
+            assert "in ack: picture" in log and "out read settings" in log
+            assert any("check-in interval 30" in line for line in log)
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()

@@ -190,7 +190,19 @@
         {% endif %}
         {% endif %}
 
-        {% if section.status.parsed %}
+        {% if section.visionect_setup and section.visionect_setup.sign %}
+        {#- A Visionect frame's report is all shown above; what helps instead
+            is what went each way between Tesserae and the frame. -#}
+        <details class="dx-advanced-diag">
+          <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Frame log</span></summary>
+          {% if section.visionect_setup.sign.log %}
+          <pre class="dx-code dx-log-view dx-log-view--wrap" data-log-tail>{{ section.visionect_setup.sign.log | join('\n') }}</pre>
+          <p class="field-help">→ Tesserae to the frame, ← the frame to Tesserae; the last {{ section.visionect_setup.sign.log | length }} since Tesserae started.</p>
+          {% else %}
+          <p class="field-help">Nothing yet: the frame hasn't connected since Tesserae started.</p>
+          {% endif %}
+        </details>
+        {% elif section.status.parsed %}
         <details class="dx-advanced-diag">
           <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Advanced diagnostics</span></summary>
           <dl class="status-fields">

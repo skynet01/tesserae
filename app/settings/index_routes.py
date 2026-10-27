@@ -1999,8 +1999,17 @@ def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
             action["kind"]
         ]
         note = f"{what} asked {clock(action.get('at'))}."
+    arrows = {"out": "→", "in": "←"}
+    log = []
+    for at, way, text in view.get("exchanges") or []:
+        try:
+            when = datetime.fromtimestamp(float(at), tz=tz).strftime("%b %d %H:%M:%S")
+        except (TypeError, ValueError, OverflowError, OSError):
+            when = "?"
+        log.append(f"{when}  {arrows.get(way, '·')}  {text}")
     return {
         "rows": rows,
+        "log": log,
         "connected": bool(view.get("connected")),
         "note": note,
         "error": str(view.get("param_error") or ""),
