@@ -79,7 +79,7 @@ def settings_update(section_kind: str) -> Response:
         try:
             values = values_from_form(fields)
         except RepeaterValueError as exc:
-            flash(f"{renderer.name} settings not saved. {err}", "error")
+            flash(f"{renderer.name} settings not saved. {exc}", "error")
             return redirect_to_section(section_kind)
         store.update_for_namespace("renderers", rid, values, fields)
         # Per-renderer Enabled toggle lives outside the manifest, so it's
