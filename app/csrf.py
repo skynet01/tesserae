@@ -19,13 +19,11 @@ logger = logging.getLogger(__name__)
 
 _UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
-# These blueprints authenticate independently of browser sessions (tokens,
-# pairing codes or the MCP direct-loopback gate). Only cookie-free calls
-# bypass provenance checks. Never exempt /api/* by path: some API routes
+# These blueprints authenticate independently of browser sessions (tokens or
+# pairing codes). Only cookie-free calls bypass provenance checks.
+# Never exempt /api/* by path: some API routes
 # are admin/session actions, including REST device pairing-code issuance.
-_COOKIE_FREE_BLUEPRINTS = frozenset(
-    {"mcp_api", "webhook", "companion_api", "trmnl_api", "bloomin8_api"}
-)
+_COOKIE_FREE_BLUEPRINTS = frozenset({"webhook", "companion_api", "trmnl_api", "bloomin8_api"})
 _COOKIE_FREE_ENDPOINTS = frozenset(
     {
         "rest_api.post_tap",
@@ -63,11 +61,19 @@ def install_protection(app: Flask) -> None:
         if request.method not in _UNSAFE_METHODS:
             return None
         cookie_name = app.config["SESSION_COOKIE_NAME"]
-        if cookie_name not in request.cookies and (
-            request.blueprint in _COOKIE_FREE_BLUEPRINTS
-            or request.endpoint in _COOKIE_FREE_ENDPOINTS
-        ):
-            return None
+        if cookie_name not in request.cookies:
+            if (
+                request.blueprint in _COOKIE_FREE_BLUEPRINTS
+                or request.endpoint in _COOKIE_FREE_ENDPOINTS
+            ):
+                return None
+            if request.blueprint == "mcp_api":
+                # Loopback identifies the connection, not the initiating page.
+                # Only an explicit valid credential exempts browser provenance.
+                from app.mcp_api import token_is_authorised
+
+                if token_is_authorised():
+                    return None
 
         fetch_site = request.headers.get("Sec-Fetch-Site")
         if fetch_site is not None:

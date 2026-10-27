@@ -23,6 +23,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   before origin validation and external link generation.
 - Dashboard and canvas creation requires POST. Navigating to their old GET
   creation URLs opens the existing POST form without creating records.
+- Token-free loopback MCP requests reject cross-origin browser mutations;
+  native header-less bridges keep working, and an explicit valid MCP token
+  permits independently authenticated cross-origin clients.
 
 ## [0.480.1], 2026-10-26
 

@@ -351,7 +351,7 @@ def test_rejections_are_logged_once_per_route_without_request_secrets(app, caplo
 @pytest.mark.parametrize(
     "path,body,headers,status",
     [
-        ("/api/mcp/pages", {}, {}, 200),  # Direct loopback MCP auth.
+        ("/api/mcp/pages", {}, {}, 403),  # Token-free loopback still checks browser provenance.
         (
             "/api/mcp/pages",
             {},
@@ -395,3 +395,68 @@ def test_device_registration_heartbeat_frame_and_ota_report_without_cookie(app) 
     )
     assert response.status_code == 200
     assert client.get("/api/v1/device/csrf-panel/frame", headers=headers).status_code == 204
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"Origin": "http://localhost:9999"},
+        {"Sec-Fetch-Site": "same-site"},
+        {"Sec-Fetch-Site": "cross-site"},
+        {"Referer": "http://localhost:9999/attack"},
+    ],
+)
+@pytest.mark.parametrize("content_type", ["text/plain", "application/x-www-form-urlencoded"])
+def test_token_free_loopback_mcp_rejects_browser_csrf(gated_app, headers, content_type) -> None:
+    auth.set_password(gated_app.config["SETTINGS_STORE"], "test-password")
+    before = gated_app.config["PAGE_STORE"].list()
+    response = gated_app.test_client().post(
+        "/api/mcp/pages", headers=headers, content_type=content_type, data="name=attacker"
+    )
+    assert response.status_code == 403
+    assert gated_app.config["PAGE_STORE"].list() == before
+
+
+@pytest.mark.parametrize("token_header", ["Authorization", "X-Tesserae-Token"])
+@pytest.mark.parametrize("peer", ["127.0.0.1", "203.0.113.9"])
+def test_explicit_mcp_token_allows_cross_origin_clients(gated_app, token_header, peer) -> None:
+    gated_app.config["SETTINGS_STORE"].patch_section("app", {"mcp_token_secret": "mcp-test"})
+    credential = "Bearer mcp-test" if token_header == "Authorization" else "mcp-test"
+    before = len(gated_app.config["PAGE_STORE"].list())
+    response = gated_app.test_client().post(
+        "/api/mcp/pages",
+        headers={
+            token_header: credential,
+            "Origin": "http://elsewhere.test",
+            "Sec-Fetch-Site": "cross-site",
+        },
+        environ_overrides={"REMOTE_ADDR": peer},
+        json={"name": "Token client"},
+    )
+    assert response.status_code == 200
+    assert len(gated_app.config["PAGE_STORE"].list()) == before + 1
+
+
+@pytest.mark.parametrize(
+    "token_headers", [{"Authorization": "Bearer wrong"}, {"X-Tesserae-Token": "wrong"}]
+)
+def test_invalid_token_cannot_exempt_loopback_mcp(gated_app, token_headers) -> None:
+    gated_app.config["SETTINGS_STORE"].patch_section("app", {"mcp_token_secret": "mcp-test"})
+    before = gated_app.config["PAGE_STORE"].list()
+    response = gated_app.test_client().post(
+        "/api/mcp/pages",
+        headers={**token_headers, "Origin": "http://localhost:9999"},
+        json={},
+    )
+    assert response.status_code == 403
+    assert gated_app.config["PAGE_STORE"].list() == before
+
+
+@pytest.mark.parametrize("user_agent", ["Claude MCP bridge", "Codex MCP bridge"])
+def test_native_token_free_mcp_bridges_without_origin_still_work(gated_app, user_agent) -> None:
+    auth.set_password(gated_app.config["SETTINGS_STORE"], "test-password")
+    response = gated_app.test_client().post(
+        "/api/mcp/pages", headers={"User-Agent": user_agent}, json={"name": "Native client"}
+    )
+    assert response.status_code == 200
+    assert gated_app.config["PAGE_STORE"].get(response.json["id"]).name == "Native client"

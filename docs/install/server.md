@@ -67,8 +67,13 @@ For compatibility, requests with all three provenance headers missing are
 allowed. Their provenance cannot be checked; when a session cookie is present,
 only its SameSite protection remains. Without Fetch Metadata, an explicit `Origin: null`
 or malformed origin is refused. Explicit API exemptions let cookie-free device,
-companion, webhook and MCP requests continue through their independent
-authentication. Session-only API actions, such as issuing a device pairing
+companion and webhook requests continue through their independent
+authentication. MCP requests are exempt only with an explicit valid token
+(`Authorization: Bearer` or `X-Tesserae-Token`). Token-free loopback MCP calls
+still check browser provenance, so a page on another localhost port cannot
+create or edit dashboards. Native Claude/Codex MCP bridges that send no Origin
+or Fetch Metadata keep their existing loopback access.
+Session-only API actions, such as issuing a device pairing
 code, are protected. Device-authenticated reads and OTA downloads are unchanged.
 Dashboard creation is POST-only. The legacy `/pages/new` and empty
 `/pages/canvas/` GET routes open the existing creation form; the latter
