@@ -129,6 +129,12 @@
   }
   :root[data-ui="paper"] .topnav .nav-dropdown-link { padding: 8px 10px; font-size: 13px; color: var(--t-fg); }
   :root[data-ui="paper"] .topnav .nav-dropdown-link:hover { background: var(--p-hover); color: var(--t-fg); }
+  /* The page you are on, inside its open dropdown. */
+  :root[data-ui="paper"] .topnav .nav-dropdown-link.is-active {
+    background: var(--p-selected);
+    color: var(--t-fg);
+    font-weight: 600;
+  }
 
   /* Everything after the nav (update badge, new devices, batteries,
      opt-in, restart, theme) collects at the sidebar foot. */
@@ -197,7 +203,7 @@
    canvas editor's 64px rail: the logo and one 44px square per item, the
    labels gone (a tooltip names each item, see _base.html), dropdowns as
    flyouts to the right. Everything that measures from the sidebar
-   (the page's left padding, the Settings column) follows the token. */
+   (the page's left padding) follows the token. */
 .sidebar-toggle,
 .rail-tip { display: none; }
 @media (min-width: 901px) {
@@ -205,8 +211,7 @@
   /* Only while the toggle is moving it (the script sets the class for the
      length of the slide), so a page load never animates the sidebar in. */
   :root[data-ui="paper"].sidebar-sliding body.admin,
-  :root[data-ui="paper"].sidebar-sliding .topbar,
-  :root[data-ui="paper"].sidebar-sliding .settings-nav {
+  :root[data-ui="paper"].sidebar-sliding .topbar {
     transition: padding-left 200ms var(--p-ease), width 200ms var(--p-ease), left 200ms var(--p-ease);
   }
 
@@ -359,8 +364,7 @@
 }
 @media (min-width: 901px) and (prefers-reduced-motion: reduce) {
   :root[data-ui="paper"].sidebar-sliding body.admin,
-  :root[data-ui="paper"].sidebar-sliding .topbar,
-  :root[data-ui="paper"].sidebar-sliding .settings-nav { transition: none; }
+  :root[data-ui="paper"].sidebar-sliding .topbar { transition: none; }
 }
 
 /* ----- Shell: phones and small tablets ------------------------------- */
@@ -604,80 +608,14 @@
 /* Flashes read as ink notes rather than coloured cards. */
 :root[data-ui="paper"] .flash { border-radius: var(--t-radius); }
 
-/* ----- Settings: a second sidebar ---------------------------------- */
-/* The settings tab strip (settings_tabs macro, every settings page)
-   becomes a full-height column beside the main sidebar on wide screens,
-   as in the mockups: a mono "Settings" label, then one quiet row per
-   area, the active one shaded (no accent bar). Narrower screens
-   keep the horizontal strip. */
-@media (min-width: 1100px) {
-  :root[data-ui="paper"] { --p-subnav-w: 220px; }
-  :root[data-ui="paper"] body.admin:has(.settings-nav) {
-    padding-left: calc(var(--p-sidebar-w) + var(--p-subnav-w));
-  }
-  :root[data-ui="paper"] .settings-nav {
-    position: fixed;
-    top: 0;
-    bottom: 0;
-    left: var(--p-sidebar-w);
-    width: var(--p-subnav-w);
-    box-sizing: border-box;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 32px 12px 24px;
-    border-bottom: 0;
-    box-shadow: none;
-    border-right: 1px solid var(--t-border);
-    background: var(--p-subnav);
-    overflow-x: hidden;
-    overflow-y: auto;
-    z-index: 5;
-  }
-  :root[data-ui="paper"] .settings-nav::before {
-    content: "Settings";
-    display: block;
-    padding: 0 12px 14px;
-    font-family: var(--t-font-mono);
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: var(--t-fg-soft);
-  }
-  :root[data-ui="paper"] .settings-nav .tab {
-    display: flex;
-    height: 36px;
-    padding: 0 12px;
-    margin: 0;
-    border: 0;
-    border-radius: 0;
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--t-fg);
-    transition: background-color 180ms ease-out;
-  }
-  :root[data-ui="paper"] .settings-nav .tab .ph { display: none; }
-  :root[data-ui="paper"] .settings-nav .tab:hover { background: var(--p-hover); color: var(--t-fg); }
-  :root[data-ui="paper"] .settings-nav .tab.is-active {
-    background: var(--p-selected);
-    color: var(--t-fg);
-    font-weight: 600;
-  }
-  /* The page's entry slide (Motion, below) transforms <main>, and a
-     transformed ancestor is the containing block for fixed descendants:
-     for its 360ms the column would sit inside the page content, then
-     jump to the viewport's left edge when the transform cleared. So
-     here the slide moves <main>'s children instead, the column
-     excepted, and <main> itself stays put. :where() keeps the rule at
-     zero specificity so a child with its own entrance (flashes, the
-     save bar) keeps it. */
-  :root[data-ui="paper"] body.admin:has(.settings-nav) main.page { animation: none; }
-  :where(:root[data-ui="paper"] body.admin:has(.settings-nav) main.page > :not(.settings-nav)) {
-    animation: paper-enter 360ms var(--p-ease) backwards;
-  }
-}
-@media (min-width: 1100px) and (prefers-reduced-motion: reduce) {
-  :where(:root[data-ui="paper"] body.admin:has(.settings-nav) main.page > :not(.settings-nav)) { animation: none; }
+/* ----- Settings: in the sidebar ------------------------------------ */
+/* The settings areas are a dropdown in the main sidebar (_base.html,
+   _settings_nav.html), open on a settings page with the current area
+   shaded, like Widgets. So on screens that show the sidebar the settings
+   tab strip (settings_tabs macro) is not drawn; a phone, whose sidebar is
+   a drawer, keeps it as a quick switch. */
+@media (min-width: 901px) {
+  :root[data-ui="paper"] .settings-nav { display: none; }
 }
 
 /* ----- Raised sheets --------------------------------------------- */

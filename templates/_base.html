@@ -5,6 +5,7 @@
 {% from "_ui_switch.html" import ui_switch with context %}
 {% import "_server_mark.html" as server_mark %}
 {% import "_brand_mark.html" as brand_mark %}
+{% from "_settings_nav.html" import settings_nav_items, settings_nav_current with context %}
 {% set _si = server_identity if server_identity is defined else None %}
 {% set _paper = app_settings is defined and app_settings.get('ui_design') != 'classic' %}
 <html lang="en"{% if _paper %} data-ui="paper"{% endif %}{{ server_mark.html_attr(_si) }}>
@@ -216,22 +217,27 @@
          class="{% if request.blueprint == 'stats' %}is-active{% endif %}">
          <i class="ph ph-chart-bar" aria-hidden="true"></i><span>Stats</span>
       </a>
-      <details class="nav-dropdown {% if request.blueprint == 'plugins' or request.path.startswith('/plugins/') %}is-active{% endif %}">
+      {% set _widgets_here = request.blueprint in ('plugins', 'marketplace') or request.path.startswith('/plugins/') %}
+      {#- Paper's sidebar opens the dropdown that holds the current page,
+          its row shaded; folded to the rail it stays a flyout, closed
+          (sidebar-rail.js). -#}
+      <details class="nav-dropdown {% if _widgets_here %}is-active{% endif %}"{% if _paper and _widgets_here %} open{% endif %}>
         <summary>
           <i class="ph ph-puzzle-piece" aria-hidden="true"></i><span>Widgets</span>
           <i class="ph ph-caret-down caret-soft" aria-hidden="true"></i>
         </summary>
         <div class="nav-dropdown-panel">
-          <a class="nav-dropdown-link" href="{{ url_for('plugins.plugins_index') }}">
+          <a class="nav-dropdown-link{% if request.endpoint == 'plugins.plugins_index' %} is-active{% endif %}" href="{{ url_for('plugins.plugins_index') }}"{% if request.endpoint == 'plugins.plugins_index' %} aria-current="page"{% endif %}>
             <i class="ph ph-list-bullets" aria-hidden="true"></i>Installed widgets
           </a>
-          <a class="nav-dropdown-link" href="{{ url_for('marketplace.browse') }}">
+          <a class="nav-dropdown-link{% if request.blueprint == 'marketplace' %} is-active{% endif %}" href="{{ url_for('marketplace.browse') }}"{% if request.blueprint == 'marketplace' %} aria-current="page"{% endif %}>
             <i class="ph ph-storefront" aria-hidden="true"></i>Browse catalog
           </a>
           {% if nav_admin_plugins %}
           <div class="nav-dropdown-sep">Admin pages</div>
           {% for p in nav_admin_plugins %}
-          <a class="nav-dropdown-link" href="{{ request.script_root }}/plugins/{{ p.id }}/">
+          {% set _here_admin = request.path.startswith('/plugins/' ~ p.id ~ '/') %}
+          <a class="nav-dropdown-link{% if _here_admin %} is-active{% endif %}" href="{{ request.script_root }}/plugins/{{ p.id }}/"{% if _here_admin %} aria-current="page"{% endif %}>
             <i class="ph ph-{{ p.manifest.get('icon', 'ph-puzzle-piece').removeprefix('ph-') }}" aria-hidden="true"></i>{{ p.admin_title }}
           </a>
           {% endfor %}
@@ -276,10 +282,29 @@
          ``settings_area`` routes, so an endpoint list silently left the nav
          with nothing highlighted on those pages, and a new one would keep
          reintroducing it. #}
+      {% set _settings_here = (request.blueprint == 'auth' and request.path.startswith('/settings')) or request.blueprint in ('events', 'themes') %}
+      {% if _paper %}
+      {#- Paper: the settings areas are a dropdown here, like Widgets, in
+          place of the classic tab strip's second sidebar. -#}
+      <details class="nav-dropdown {% if _settings_here %}is-active{% endif %}"{% if _settings_here %} open{% endif %}>
+        <summary>
+          <i class="ph ph-gear-six" aria-hidden="true"></i><span>Settings</span>
+          <i class="ph ph-caret-down caret-soft" aria-hidden="true"></i>
+        </summary>
+        <div class="nav-dropdown-panel">
+          {% for slug, label, ic, href in settings_nav_items %}
+          <a class="nav-dropdown-link{% if slug == settings_nav_current %} is-active{% endif %}" href="{{ href }}"{% if slug == settings_nav_current %} aria-current="page"{% endif %}>
+            <i class="ph ph-{{ ic }}" aria-hidden="true"></i>{{ label }}
+          </a>
+          {% endfor %}
+        </div>
+      </details>
+      {% else %}
       <a href="{{ url_for('auth.settings') }}"
-         class="{% if (request.blueprint == 'auth' and request.path.startswith('/settings')) or request.blueprint in ('events', 'themes') %}is-active{% endif %}">
+         class="{% if _settings_here %}is-active{% endif %}">
          <i class="ph ph-gear-six" aria-hidden="true"></i><span>Settings</span>
       </a>
+      {% endif %}
       {% if update_status is defined and update_status.available %}
       {# Update-available badge. Shown only when the background version check
          (app/version_check) found a newer release; links to the Settings
