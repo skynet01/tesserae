@@ -29,6 +29,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - `TESSERAE_TRUSTED_PROXIES` adds reverse-proxy CIDRs outside the private
   defaults, including public IPv6 and CGNAT/VPN addresses, independently of
   client authorisation through Trusted networks.
+- Malformed or non-ASCII MCP credentials are rejected without a server error
+  in authentication and browser-provenance checks on either token header.
 
 ## [0.480.1], 2026-10-26
 

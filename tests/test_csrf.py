@@ -438,7 +438,13 @@ def test_explicit_mcp_token_allows_cross_origin_clients(gated_app, token_header,
 
 
 @pytest.mark.parametrize(
-    "token_headers", [{"Authorization": "Bearer wrong"}, {"X-Tesserae-Token": "wrong"}]
+    "token_headers",
+    [
+        {"Authorization": "Bearer wrong"},
+        {"X-Tesserae-Token": "wrong"},
+        {"Authorization": "Bearer café"},
+        {"X-Tesserae-Token": "café"},
+    ],
 )
 def test_invalid_token_cannot_exempt_loopback_mcp(gated_app, token_headers) -> None:
     gated_app.config["SETTINGS_STORE"].patch_section("app", {"mcp_token_secret": "mcp-test"})

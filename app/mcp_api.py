@@ -199,7 +199,14 @@ def token_is_authorised() -> bool:
     """
     stored = mcp_token(_settings())
     presented = _presented_token(request)
-    return bool(stored and presented and secrets.compare_digest(presented, stored))
+    # compare_digest accepts only ASCII strings, including a hand-edited key.
+    return bool(
+        stored
+        and presented
+        and stored.isascii()
+        and presented.isascii()
+        and secrets.compare_digest(presented, stored)
+    )
 
 
 def _authorised() -> bool:
