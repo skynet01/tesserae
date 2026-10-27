@@ -1966,3 +1966,29 @@ def test_the_composer_gives_each_grid_cell_its_placement(app: Any) -> None:
         finally:
             composer._fetch_plugin_data = original  # type: ignore[assignment]
     assert sorted(seen) == ["p9/a@dev1", "p9/b@dev1"]
+
+
+def test_an_all_manual_setup_still_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No fetch worker runs when every strip is a manual picture, so renders
+    clean up too (at most hourly): a removed strip's picture still goes."""
+    monkeypatch.setattr(srv, "_today", lambda: TODAY)
+    monkeypatch.setattr(srv, "_enqueue", lambda *a, **k: pytest.fail("nothing to fetch"))
+    store = images.Store(tmp_path)
+    kept = _keep_picture(store, "manual:garfield", age=3 * 3600)
+    orphan = _keep_picture(store, "manual:peanuts", (61, 20), age=3 * 3600)
+    settings = {
+        "far_side": False,
+        "strips": [{"slug": "garfield", "mode": "upload"}],
+    }
+    ctx = {"data_dir": str(tmp_path)}
+    srv.fetch({}, settings, ctx=ctx)  # forgets peanuts' record; its picture is now unused
+    assert "manual:peanuts" not in store.sources()
+    later = time.time() + images.CLEANUP_EVERY_S + images.PRUNE_GRACE_S + 60
+    monkeypatch.setattr(srv.time, "time", lambda: later)
+    srv.fetch({}, settings, ctx=ctx)
+    assert (store.image_dir / kept).exists()
+    assert not (store.image_dir / orphan).exists()
+    # Not again within the hour.
+    assert store.prune_if_due({"manual:garfield"}, later + 60) is None

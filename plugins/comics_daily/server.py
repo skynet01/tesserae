@@ -1493,6 +1493,11 @@ def fetch(
         if due
         else None
     )
+    if run is None:
+        # No worker to clean up after itself (all manual, all up to date):
+        # clean up here, at most hourly.
+        with contextlib.suppress(Exception):
+            store.prune_if_due(wanted_keys(config), now)
     if run is not None and not any(_pictures(records.get(s.key) or {}, store) for s in wanted):
         # Nothing to show yet: give a quick source the chance to land in this
         # render rather than painting "fetching" and waiting for the repaint.
@@ -2127,6 +2132,8 @@ def blueprint() -> Blueprint:
             repeater_layout="list",
         )
         store = images.Store(Path(plugin.data_dir))
+        with contextlib.suppress(Exception):
+            store.prune_if_due(wanted_keys(config_from_settings(settings)))
         return render_template(
             "comics_daily/index.html",
             section=section,

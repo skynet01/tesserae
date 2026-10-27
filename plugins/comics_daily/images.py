@@ -46,6 +46,9 @@ COOKIE_STATUS_FILE = "gocomics-cookie-status.json"
 ROTATION_FILE = "turns.json"
 # When each unused picture was first seen unused (app.media_lifecycle).
 RETIRED_FILE = "retired.json"
+# When the cleanup last ran outside a fetch, and how often it may.
+CLEANUP_FILE = "cleanup.json"
+CLEANUP_EVERY_S = 3600
 IMAGE_DIR = "images"
 # The admin page's log keeps this many lines.
 LOG_LINES = 150
@@ -442,6 +445,25 @@ class Store:
                 ledger=self.root / RETIRED_FILE,
                 still_unused=lambda name: name not in self._referenced(self.sources()),
             )
+
+    def prune_if_due(
+        self, wanted: set[str] | None, now: float | None = None, every: float = CLEANUP_EVERY_S
+    ) -> list[str] | None:
+        """Run :meth:`prune` if it hasn't run for ``every`` seconds; None when
+        not due. Renders and the admin page call this, so a widget whose
+        strips are all manual (no fetch worker ever runs) still cleans up."""
+        now = time.time() if now is None else now
+        path = self.root / CLEANUP_FILE
+        try:
+            last = float(json.loads(path.read_text(encoding="utf-8")).get("at") or 0)
+        except (OSError, ValueError, AttributeError, TypeError):
+            last = 0.0
+        if 0 <= now - last < every:
+            return None
+        with _LOCK:
+            self.root.mkdir(parents=True, exist_ok=True)
+            _write_atomic(path, json.dumps({"at": now}).encode("utf-8"))
+        return self.prune(now=now, wanted=wanted)
 
     @staticmethod
     def _referenced(sources: dict[str, dict[str, Any]]) -> set[str]:
