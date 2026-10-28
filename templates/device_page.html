@@ -426,7 +426,8 @@
             {{ text_input(section.id ~ '-qh-end', 'quiet_hours_end', 'End',
                 value=section.quiet_hours.get('end', ''), placeholder='HH:MM', type='time', form=_combined_form_id) }}
           </div>
-          <div data-dep-target>
+          {#- The two weekday pickers side by side when there's room. -#}
+          <div class="dx-field-grid dx-qh-days" data-dep-target>
             {{ days_field(section.id ~ '-qh-days', 'quiet_hours_days', 'Window applies on',
                 value=section.quiet_hours.get('days', ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']),
                 help='Weekdays the start/end window is in force, each judged by its own clock: on a ticked day an overnight window covers that morning up to End and that evening from Start.',
@@ -435,17 +436,29 @@
                 value=section.quiet_hours.get('all_day', []),
                 help='Weekdays that are quiet from midnight to midnight regardless of the window.',
                 form=_combined_form_id) }}
-            {{ switch(section.id ~ '-qh-sleep', 'quiet_hours_sleep', 'Sleep through quiet hours',
-                checked=section.quiet_hours.get('sleep', False),
-                help='Sleep until the window ends instead of waking on the usual interval inside it. A manual push during the window is not seen until it ends.',
-                form=_combined_form_id) }}
-            {% if section.quiet_hours_touch %}
-            {{ switch(section.id ~ '-qh-touch-off', 'quiet_hours_touch_off', 'Touch off during quiet hours',
-                checked=section.quiet_hours.get('touch_off', False),
-                help='Switch the touchscreen off inside the window so the touch controller sleeps with the panel. A tap does nothing until the window ends; the buttons still wake it.',
-                form=_combined_form_id) }}
-            {% endif %}
           </div>
+          {#- Toggle rows like the override above: what it does, in words, beside its switch. -#}
+          {% set qh_toggles = [(section.id ~ '-qh-sleep', 'quiet_hours_sleep', 'Sleep through quiet hours',
+                'The display sleeps until the window ends instead of waking on its usual interval inside it. Saves power; a picture sent during the window shows when it ends.',
+                section.quiet_hours.get('sleep', False))] %}
+          {% if section.quiet_hours_touch %}
+          {% set qh_toggles = qh_toggles + [(section.id ~ '-qh-touch-off', 'quiet_hours_touch_off', 'Touch off during quiet hours',
+                'The touchscreen sleeps with the panel, so a tap does nothing until the window ends; the buttons still wake it.',
+                section.quiet_hours.get('touch_off', False))] %}
+          {% endif %}
+          {% for toggle_id, toggle_name, toggle_label, toggle_desc, toggle_on in qh_toggles %}
+          <div class="dx-toggle-row" data-dep-target>
+            <div class="dx-toggle-row-text">
+              <label class="dx-toggle-row-label" for="{{ toggle_id }}">{{ toggle_label }}</label>
+              <p class="dx-toggle-row-desc">{{ toggle_desc }}</p>
+            </div>
+            <label class="dx-toggle-switch" for="{{ toggle_id }}">
+              <input id="{{ toggle_id }}" type="checkbox" name="{{ toggle_name }}"
+                     form="{{ _combined_form_id }}" {% if toggle_on %}checked{% endif %}>
+              <span class="dx-toggle-track" aria-hidden="true"><span class="dx-toggle-knob"></span></span>
+            </label>
+          </div>
+          {% endfor %}
         </div>
         {% endif %}
       </div>
