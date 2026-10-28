@@ -61,6 +61,9 @@ How a render works:
   paper per shown frame": a warm-ahead, its send and the follow-ups show one
   paper. The accepted cost: two separate sends inside the hold repeat a paper,
   and a warm-ahead that leads its send by more than the hold moves on early.
+  An automation that wants the next paper now (a button on Home Assistant)
+  touches ``ADVANCE_FILE`` before it pushes: the next real render skips the
+  hold once (see ``advance_requested``).
 * The papers are a list of rows (code, in-rotation switch, CSS) kept in the
   widget's own ``config.json`` and edited on its admin page, as the todo
   widget keeps its lists; the widget declares no manifest settings. The
@@ -242,6 +245,13 @@ MIN_IMAGE_EDGE_PX = 300
 MAX_TRIM_PCT = 25.0
 # One paper per shown frame, approximately; see the module docstring.
 ROTATION_HOLD_S = 4 * 60
+# "Advance now": an outside automation (Node-RED on Home Assistant) touches this
+# file just before it pushes the dashboard. The next real render then skips the
+# hold once and shows the next paper. The file is never read for its content,
+# only its mtime, so any write counts. A request older than ADVANCE_TTL_S is
+# ignored, so one that nothing consumed can't surprise a later render.
+ADVANCE_FILE = Path(os.environ.get("TESSERAE_NEWS_ADVANCE_FILE", "/share/tesserae/news_advance"))
+ADVANCE_TTL_S = 5 * 60
 # A page stays this long after its last use before pruning may delete it.
 PRUNE_GRACE_S = 60 * 60
 
@@ -1362,17 +1372,35 @@ def _codes(raw: Any) -> list[str] | None:
     return [code for code in raw if isinstance(code, str)][:MAX_PAPERS]
 
 
-def plan(enabled: list[str], state: dict[str, Any], now: float) -> tuple[list[str], str | None]:
+def advance_requested(state: dict[str, Any], now: float) -> float | None:
+    """The mtime of an unconsumed "advance now" request, else None. Consumed
+    means ``state["advance_seen"]`` has caught up with the file's mtime."""
+    try:
+        stamp = ADVANCE_FILE.stat().st_mtime
+    except OSError:
+        return None
+    seen = state.get("advance_seen")
+    if isinstance(seen, (int, float)) and stamp <= seen:
+        return None
+    if not 0 <= now - stamp < ADVANCE_TTL_S:
+        return None
+    return stamp
+
+
+def plan(
+    enabled: list[str], state: dict[str, Any], now: float, *, advance: bool = False
+) -> tuple[list[str], str | None]:
     """The codes this render tries, in order, and the paper being held, if any.
     Inside ``ROTATION_HOLD_S`` of the last move the current paper comes first;
-    after it, the next one does. The caller skips a paper with no page, so one
-    dead code doesn't stall the rotation."""
+    after it, the next one does. ``advance`` (an "advance now" request) ends the
+    hold early. The caller skips a paper with no page, so one dead code doesn't
+    stall the rotation."""
     current = state.get("current")
     current = current if isinstance(current, str) else None
     since = state.get("since")
     order = rotation(enabled, current, _codes(state.get("order")))
     held = isinstance(since, (int, float)) and 0 <= now - since < ROTATION_HOLD_S
-    if current in enabled and held:
+    if current in enabled and held and not advance:
         return [current, *order[:-1]], current
     return order, None
 
@@ -1912,7 +1940,14 @@ def _select(
         return None
     try:
         state = _read_json(state_path)
-        order, held = (candidates, None) if pinned else plan(candidates, state, now)
+        # A real render (not a preview, not a pinned cell) takes an "advance now"
+        # request; it is marked consumed below once a page is actually chosen.
+        advance = None if pinned or preview else advance_requested(state, now)
+        order, held = (
+            (candidates, None)
+            if pinned
+            else plan(candidates, state, now, advance=advance is not None)
+        )
         chosen: tuple[str, Page] | None = None
         for code in order:
             page = newest_page(pages, code, today)
@@ -1925,6 +1960,9 @@ def _select(
         if chosen and not pinned and not preview and chosen[0] != held:
             state["current"], state["since"] = chosen[0], now
             state["order"] = list(candidates)  # where to resume if the list changes
+            dirty = True
+        if chosen and advance is not None:
+            state["advance_seen"] = advance
             dirty = True
         # Which papers renders still ask for, for the cleanup; written at
         # most hourly per paper so a render rarely writes for it.
