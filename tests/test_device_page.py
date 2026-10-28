@@ -347,3 +347,35 @@ def test_phone_telemetry_fills_existing_columns_without_changing_heartbeat(
     report["battery"] = {"percent": 0, "observed_at": "2026-01-02T03:04:07Z"}
     app.config["DEVICE_FACTS"].record_mode_observation(dev, report)
     assert "0%" in client.get("/settings/devices").get_data(as_text=True)
+
+
+def _thumb(app: Flask, panel: dict[str, int] | None, *, has_render: bool = True) -> str:
+    section = {
+        "overview": {"has_render": has_render},
+        "preview_url": "/preview/lounge.png",
+        "device_name": "Lounge",
+        "panel": panel,
+    }
+    with app.test_request_context("/"):
+        return app.jinja_env.from_string(
+            '{% from "_device_parts.html" import render_thumb with context %}'
+            '{{ render_thumb(section, "dx-thumb--quick") }}'
+        ).render(section=section)
+
+
+def test_the_thumbnail_keeps_the_screens_shape(app: Flask) -> None:
+    """A portrait screen's latest render used to sit in a fixed 4:3 box and
+    be cropped to its middle. The box now takes the panel's aspect ratio."""
+    portrait = _thumb(app, {"w": 1440, "h": 2560})
+    assert 'style="--thumb-ar: 1440 / 2560"' in portrait
+    assert "dx-thumb--portrait" in portrait
+    landscape = _thumb(app, {"w": 800, "h": 480})
+    assert 'style="--thumb-ar: 800 / 480"' in landscape
+    assert "dx-thumb--portrait" not in landscape
+
+
+def test_the_thumbnail_falls_back_to_the_fixed_box_without_a_panel_or_render(
+    app: Flask,
+) -> None:
+    assert "--thumb-ar" not in _thumb(app, None)
+    assert "--thumb-ar" not in _thumb(app, {"w": 1440, "h": 2560}, has_render=False)
