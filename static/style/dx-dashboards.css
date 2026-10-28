@@ -323,6 +323,10 @@
   place-items: center;
 }
 .dx-dashquick-preview.is-empty { aspect-ratio: 5 / 3; }
+/* With the dashboard's size known the box keeps its shape at a fixed height
+   (taller for a portrait dashboard) instead of a 260 px square-ish box. */
+.dx-dashquick-preview[style*="aspect-ratio"] { width: auto; height: 200px; min-height: 0; max-height: none; max-width: 420px; }
+.dx-dashquick-preview.is-portrait[style*="aspect-ratio"] { height: 260px; }
 .dx-dashquick-preview img {
   position: absolute;
   inset: 0;
@@ -427,6 +431,8 @@
   .dx-dc-updates { display: none; }
   .dx-dashtable .dx-dashquick-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dx-dashquick-preview { width: 220px; max-height: 220px; }
+  .dx-dashquick-preview[style*="aspect-ratio"] { width: auto; height: 180px; max-height: none; }
+  .dx-dashquick-preview.is-portrait[style*="aspect-ratio"] { height: 220px; }
 }
 @container dashtable (max-width: 760px) {
   .dx-dashtable-head,
@@ -440,6 +446,8 @@
   .dx-dc-pushed { display: none; }
   .dx-dashtable .dx-dashquick { flex-direction: column; gap: 14px; }
   .dx-dashquick-preview { width: 100%; max-width: 360px; max-height: 240px; }
+  .dx-dashquick-preview[style*="aspect-ratio"] { width: auto; height: 200px; max-height: none; max-width: 100%; }
+  .dx-dashquick-preview.is-portrait[style*="aspect-ratio"] { height: 240px; }
 }
 
 /* Phone: two lines per row (name, then panel · size · last pushed · state). */

@@ -6,6 +6,15 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The latest-render thumbnail on the Devices list and the device page keeps
+  the screen's shape. A portrait screen's picture was cropped to its middle
+  inside a fixed 4:3 box; the box now follows the panel's aspect ratio (taller
+  for portrait, wider for landscape) and the whole picture fits.
+- The opened row on the Dashboards list does the same for its preview: it keeps
+  the dashboard's own shape instead of a 260 px box.
+
 ## [0.489.0], 2026-10-29
 
 ### Added
