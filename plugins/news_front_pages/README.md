@@ -18,6 +18,12 @@ render, on a Tesserae panel.
 - **Sharp pages, from the PDF.** Each page is drawn from the paper's own PDF
   at the panel's width, so body text stays readable on a big panel (see
   [How pages are drawn](#how-pages-are-drawn)).
+- **Text blackness.** A widget-wide setting on the admin page (Off, Medium,
+  Strong; Medium by default, `text_blackness` in `config.json`) for a
+  16-grey panel: a levels curve that pulls only the darkest tones (the text)
+  to solid black and leaves midtones, highlights and the white paper, so
+  photos stay as they are. Medium sends 0-64 to black and rejoins the page at
+  120; Strong sends 0-80 to black and rejoins at 140.
 - **Pages download in the background**, so a render never waits on the
   network. A paper that isn't out yet shows its last good page, up to 30
   days old, and the worker tries again with a backoff.
@@ -57,8 +63,8 @@ only each paper's newest PDF is kept.
 
 ## Settings
 
-No API key and no Settings > Widgets entries. The paper list and the
-"On smaller screens" choice are kept in the widget's own `config.json` in its
+No API key and no Settings > Widgets entries. The paper list, the
+"On smaller screens" choice and the "Text blackness" choice are kept in the widget's own `config.json` in its
 data folder, edited on the admin page.
 
 | Cell option | Notes |

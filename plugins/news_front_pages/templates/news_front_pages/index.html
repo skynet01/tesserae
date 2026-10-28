@@ -156,6 +156,16 @@
     <p class="field-help">A big portrait screen shows the page full width from the top. A smaller or landscape screen can't show the whole page at a readable size: by default it shows the top of the page, the masthead and the main headlines, at a size you can read; or choose the whole page, smaller.</p>
   </div>
 
+  <div class="field nx-fit">
+    <label for="nx-text-blackness">Text blackness</label>
+    <select id="nx-text-blackness" name="text_blackness">
+      <option value="off"{% if text_blackness == 'off' %} selected{% endif %}>Off: the page as printed</option>
+      <option value="medium"{% if text_blackness == 'medium' %} selected{% endif %}>Medium</option>
+      <option value="strong"{% if text_blackness == 'strong' %} selected{% endif %}>Strong</option>
+    </select>
+    <p class="field-help">A newspaper's small text is dark grey, and a screen with only 16 greys paints it faded. This pulls the darkest tones (the text, and the deepest shadows in photos) to solid black. Midtones, highlights and the white paper are left as they are. Strong reaches a little further up than Medium.</p>
+  </div>
+
   <div class="nx-save">
     <button type="reset" class="dx-btn-ghost-sm" data-nx-discard>Discard changes</button>
     <button type="submit" name="op" value="save" class="dx-btn-primary" data-nx-save>

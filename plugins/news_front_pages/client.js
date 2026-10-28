@@ -13,6 +13,12 @@
 // canvas is fully drawn (or the JPEG is in its place), and the canvas stays
 // hidden until then, so a screenshot never catches half a page.
 //
+// "Text blackness" (``data.text_blackness``: off, medium or strong) is a levels
+// curve applied to the page's pixels once it is drawn, before the render is
+// declared complete: the PDF's canvas gets it inside the same time budget, and
+// the JPEG is drawn onto a canvas first (the plain <img> stays as the fallback).
+// It only pulls the darkest tones to black; see blacknessTable.
+//
 // ``css`` is the paper's own CSS from the widget's settings, already cut
 // down by the server to a short list of safe declarations
 // (sanitize_css in server.py). It goes on this paper's page (the <canvas>
@@ -76,6 +82,104 @@ export function pageFit(w, h, ratio, fit) {
   return w < READABLE_PX ? "zoom" : "full";
 }
 
+// ----- text blackness --------------------------------------------------------
+
+// The panel paints only 16 greys, and a newspaper's text is dark grey (the
+// anti-aliased peaks of small type sit around 50-70 of 255), so it lands on
+// the third or fourth grey and looks faded. "Text blackness" is a levels curve
+// that pulls only the darkest tones to black: values at or below ``black``
+// become 0, a smooth ramp rises to ``knee``, where it rejoins the identity
+// line, and everything above the knee is untouched, so photos' midtones and
+// highlights and the white paper come through as they were. "off" (or
+// anything unknown) leaves the page alone.
+export const TEXT_BLACKNESS = {
+  medium: { black: 64, knee: 120 },
+  strong: { black: 80, knee: 140 },
+};
+
+// The 256-entry lookup table for a blackness choice, or null for no change.
+// Between ``black`` and ``knee`` it is a cubic Hermite ramp: 0 at the black
+// point with no slope, ``knee`` at the knee with slope 1 (so it meets the
+// identity line smoothly, with no visible edge), rising all the way.
+export function blacknessTable(level) {
+  const curve = Object.hasOwn(TEXT_BLACKNESS, level) ? TEXT_BLACKNESS[level] : null;
+  if (!curve) return null;
+  const { black, knee } = curve;
+  const table = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) {
+    if (v <= black) table[v] = 0;
+    else if (v >= knee) table[v] = v;
+    else {
+      const t = (v - black) / (knee - black);
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const out = (3 * t2 - 2 * t3) * knee + (t3 - t2) * (knee - black);
+      table[v] = Math.max(0, Math.min(v, Math.round(out)));
+    }
+  }
+  return table;
+}
+
+// Put ``table`` through the brightness of every pixel of ``canvas``: a pixel's
+// luma (0.30 R + 0.59 G + 0.11 B) is looked up, and the pixel's red, green and
+// blue are scaled by the same factor, so a grey goes where the table says, a
+// colour keeps its hue, and any pixel whose luma is at or above the knee is not
+// touched at all (a per-channel table would shift the colours of bright pixels
+// that have one dark channel, such as skin tones). Done in strips so a big
+// canvas doesn't need a second copy of itself in memory.
+export function applyTable(canvas, table) {
+  if (!table || !canvas.width || !canvas.height) return;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("no 2d canvas");
+  const strip = Math.max(1, Math.floor(4_000_000 / canvas.width));
+  for (let y = 0; y < canvas.height; y += strip) {
+    const rows = Math.min(strip, canvas.height - y);
+    const image = ctx.getImageData(0, y, canvas.width, rows);
+    const px = image.data;
+    for (let i = 0; i < px.length; i += 4) {
+      const luma = (77 * px[i] + 150 * px[i + 1] + 29 * px[i + 2]) >> 8;
+      const to = table[luma];
+      if (to === luma) continue;
+      if (to === 0) {
+        px[i] = px[i + 1] = px[i + 2] = 0;
+      } else {
+        const k = to / luma;
+        px[i] = Math.round(px[i] * k);
+        px[i + 1] = Math.round(px[i + 1] * k);
+        px[i + 2] = Math.round(px[i + 2] * k);
+      }
+    }
+    ctx.putImageData(image, 0, y);
+  }
+}
+
+// How long the JPEG gets to load before it is shown as it is.
+const JPEG_LOAD_MS = 10000;
+
+// The JPEG at ``url`` drawn onto a new canvas of its own size with ``table``
+// applied, or rejects (the caller then shows the plain <img>).
+async function blackenedJpeg(url, table) {
+  const img = new Image();
+  img.src = url;
+  let timer = null;
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("the JPEG was slow to load")), JPEG_LOAD_MS);
+  });
+  try {
+    await Promise.race([img.decode(), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx || !canvas.width || !canvas.height) throw new Error("the JPEG has no size");
+  ctx.drawImage(img, 0, 0);
+  applyTable(canvas, table);
+  return canvas;
+}
+
 // ----- the PDF, drawn with PDF.js --------------------------------------------
 
 // The whole PDF path (loading PDF.js, the file, and drawing page one) gets
@@ -131,9 +235,10 @@ function urlPrefix() {
 
 // Draw page one of the PDF at ``url`` onto ``canvas`` (already in the cell,
 // hidden, styled as the page), sized to the canvas's laid-out width. Resolves
-// with how long it took (ms) once the drawing is complete; rejects when the
-// PDF can't be had or drawn, or after ``budgetMs``, having stopped the work.
-export async function drawPdf(canvas, url, budgetMs = PDF_BUDGET_MS) {
+// with how long it took (ms) once the drawing is complete (``table``, a
+// blacknessTable, applied to its pixels included); rejects when the PDF can't
+// be had or drawn, or after ``budgetMs``, having stopped the work.
+export async function drawPdf(canvas, url, budgetMs = PDF_BUDGET_MS, table = null) {
   const started = performance.now();
   const abort = new AbortController();
   let loading = null;
@@ -181,6 +286,7 @@ export async function drawPdf(canvas, url, budgetMs = PDF_BUDGET_MS) {
       background: "#ffffff",
     });
     await drawing.promise;
+    applyTable(canvas, table);
   })();
   work.catch(() => {}); // settled by the race below; this only keeps a late failure quiet
   try {
@@ -268,6 +374,7 @@ export default async function render(shadow, ctx) {
   const box = shadow.querySelector(".w");
   if (!box) return;
   const style = paperCss(data);
+  const table = blacknessTable(data.text_blackness);
 
   if (typeof data.pdf_url === "string" && data.pdf_url.startsWith("/")) {
     const canvas = document.createElement("canvas");
@@ -282,7 +389,7 @@ export default async function render(shadow, ctx) {
     canvas.style.visibility = "hidden"; // until the drawing is complete
     box.append(canvas);
     try {
-      const ms = await drawPdf(canvas, urlPrefix() + data.pdf_url);
+      const ms = await drawPdf(canvas, urlPrefix() + data.pdf_url, PDF_BUDGET_MS, table);
       canvas.dataset.drawnMs = String(ms);
       canvas.style.visibility = "";
       snapToPixels(canvas);
@@ -290,6 +397,21 @@ export default async function render(shadow, ctx) {
     } catch (err) {
       console.warn(`news_front_pages: drew the JPEG, the PDF failed (${err?.message || err})`);
       canvas.remove();
+    }
+  }
+
+  if (table) {
+    try {
+      const canvas = await blackenedJpeg(data.url, table);
+      canvas.className = "page";
+      canvas.setAttribute("role", "img");
+      canvas.setAttribute("aria-label", alt);
+      canvas.style.cssText = style;
+      box.append(canvas);
+      snapToPixels(canvas);
+      return;
+    } catch (err) {
+      console.warn(`news_front_pages: showed the JPEG as it is, blackening it failed (${err?.message || err})`);
     }
   }
 
