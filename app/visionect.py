@@ -194,11 +194,26 @@ def discovery_id(uuid: str) -> str:
     return DISCOVERY_PREFIX + hashlib.blake2s(uuid.encode("ascii"), digest_size=10).hexdigest()
 
 
-def status_heartbeat(fields: dict[str, Any], *, uuid: str, connect_reason: str) -> dict[str, Any]:
+def status_heartbeat(
+    fields: dict[str, Any],
+    *,
+    uuid: str,
+    connect_reason: str,
+    interval_min: int | None = None,
+    stays_awake: bool = False,
+    sleep_until: float | None = None,
+) -> dict[str, Any]:
     """Map a decoded status packet onto Tesserae's heartbeat keys.
 
     ``SignalStrength`` is already negated by pyvisionect; ``DeviceUptime`` is in
-    minutes; ``Firmware`` is a ``{major, minor, ...}`` dict."""
+    minutes; ``Firmware`` is a ``{major, minor, ...}`` dict.
+
+    The next-wake estimate rides along as the keys telemetry already reads:
+    ``sleep_until`` when Tesserae has just told the sign to sleep until then,
+    else ``next_sleep_s`` from the sign's own check-in interval (``interval_min``,
+    TCLV 29; the status packet's ``NextStatus`` when that hasn't been read yet).
+    A sign that stays awake gets ``stays_awake`` and no estimate: it has no
+    wake to predict."""
     out: dict[str, Any] = {"uuid": uuid, "connect_reason": connect_reason}
 
     def _int(name: str) -> int | None:
@@ -229,6 +244,14 @@ def status_heartbeat(fields: dict[str, Any], *, uuid: str, connect_reason: str) 
         ]
         if parts:
             out["fw_version"] = ".".join(parts)
+    if stays_awake:
+        out["stays_awake"] = True
+    elif sleep_until is not None:
+        out["sleep_until"] = sleep_until
+    else:
+        minutes = interval_min if interval_min else _int("NextStatus")
+        if minutes is not None and 1 <= minutes <= HEARTBEAT_MAX_MINUTES:
+            out["next_sleep_s"] = minutes * 60
     return out
 
 
@@ -417,6 +440,12 @@ class _Sign:
     repaint_until: float = 0.0  # monotonic; a size change is repainting
     conformed: bool = False  # panel conformance tried this run
     asleep_until: float = 0.0
+    # The sign's check-in interval (minutes) and sleep-mode switch as last read.
+    # Unlike ``params`` they outlive the connection, so the status that opens
+    # the next connection (before its settings are read again) is already
+    # recorded with the sign's own cadence.
+    known_interval_min: int | None = None
+    known_sleep_disabled: bool | None = None
     remote: str = ""  # the connection's peer address
     pending_status: tuple[Any, Any] | None = None  # (device, StatusPacket) to record
     status_task: asyncio.Task[None] | None = None  # records pending_status, latest wins
@@ -1375,6 +1404,10 @@ class VisionectService:
                 sign.params[pid] = item.value.split(b"\0")[0].decode("ascii", "replace")
             else:
                 sign.params[pid] = int.from_bytes(item.value, "little")
+                if pid == PARAM_HEARTBEAT:
+                    sign.known_interval_min = sign.params[pid]
+                elif pid == PARAM_SLEEP_DISABLE:
+                    sign.known_sleep_disabled = bool(sign.params[pid])
 
     def request_action(self, device_id: str, action: str) -> str | None:
         """Ask the device's sign, from a request thread, to report its status
@@ -1520,6 +1553,7 @@ class VisionectService:
                     logger.info("visionect: sign %s acked frame %s", uuid, inflight.digest[:12])
                 else:
                     sign.asleep_until = time.time() + inflight.minutes * 60
+                    self._spawn(self._note_sleep(sign, inflight.minutes))
             return uuid
         if isinstance(event, Nacked):
             if answered and inflight is not None:
@@ -1734,20 +1768,46 @@ class VisionectService:
         while sign.pending_status is not None:
             device, status = sign.pending_status
             sign.pending_status = None
-            await self._record_status(device, sign.uuid, status)
+            await self._record_status(device, sign, status)
 
-    async def _record_status(self, device: Device, uuid: str, status: Any) -> None:
+    async def _record_status(self, device: Device, sign: _Sign, status: Any) -> None:
         ctx = self._ctx
         if ctx is None:
             return
         heartbeat = status_heartbeat(
-            status.fields(), uuid=uuid, connect_reason=str(status.connect_reason_name)
+            status.fields(),
+            uuid=sign.uuid,
+            connect_reason=str(status.connect_reason_name),
+            interval_min=sign.known_interval_min,
+            stays_awake=sign.known_sleep_disabled is True,
+            sleep_until=sign.asleep_until if sign.asleep_until > time.time() else None,
         )
         loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, _record_heartbeat, ctx.app, device, heartbeat)
         except Exception:
             logger.exception("visionect: recording status for %s failed", device.id)
+
+    async def _note_sleep(self, sign: _Sign, minutes: int) -> None:
+        """The sign acked a quiet-hours sleep: its next wake is the end of
+        that sleep, not a check-in interval from now. The status that opened
+        the connection recorded the interval estimate; let it land first so
+        this one is not overwritten by it."""
+        ctx = self._ctx
+        device = self._device_for_uuid(sign.uuid)
+        if ctx is None or device is None:
+            return
+        task = sign.status_task
+        if task is not None and not task.done():
+            await asyncio.wait({task})
+        wake_at = sign.asleep_until
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None, _note_sleep_wake, ctx.app, device.id, wake_at, minutes * 60
+            )
+        except Exception:
+            logger.exception("visionect: recording %s's sleep failed", device.id)
 
     # -- UI snapshot (read from request threads) ---------------------------
 
@@ -2016,6 +2076,13 @@ def _record_heartbeat(app: Flask, device: Device, heartbeat: dict[str, Any]) -> 
             event_log=events,
             event_target=f"visionect://{device.id}/status",
         )
+
+
+def _note_sleep_wake(app: Flask, device_id: str, wake_at: float, interval_s: int) -> None:
+    """Tell telemetry the server put the sign to sleep until ``wake_at``."""
+    telemetry = app.config.get("DEVICE_TELEMETRY")
+    if telemetry is not None:
+        telemetry.note_server_directive(device_id, wake_at=wake_at, interval_s=interval_s)
 
 
 # -- wiring ---------------------------------------------------------------

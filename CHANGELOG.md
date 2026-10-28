@@ -39,6 +39,11 @@ All notable changes to Tesserae are recorded here. Format loosely follows
     the sign is doing, with Report in, Full refresh and Reboot buttons. Battery,
     signal, temperature and firmware reach the device card and Home Assistant.
     The sign's check-in interval and sleep mode are shown but not changed.
+  - **Next wake:** the device page estimates when the sign will check in next:
+    its last check-in plus its own check-in interval, or the end of a
+    quiet-hours sleep Tesserae just ordered. Sleep cycle, last offset and the
+    smart sync confidence follow from real check-ins. A sign set to stay awake
+    has no estimate.
   - **Port and address:** the listener runs while a Visionect device exists. It
     binds the web server's address (`TESSERAE_BIND_HOST`), and
     `TESSERAE_VISIONECT_PORT` moves it off 11113. The protocol has no

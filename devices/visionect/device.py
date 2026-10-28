@@ -47,6 +47,14 @@ def parse_status(payload: bytes) -> dict[str, Any]:
         value = decoded.get(key)
         if isinstance(value, int | float) and not isinstance(value, bool):
             out[key] = value
+    # The next-wake estimate (app.visionect.status_heartbeat): an absolute time
+    # or seconds of sleep for telemetry, and the stays-awake flag.
+    for key in ("next_sleep_s", "sleep_until"):
+        value = decoded.get(key)
+        if isinstance(value, int | float) and not isinstance(value, bool) and value > 0:
+            out[key] = value
+    if decoded.get("stays_awake") is True:
+        out["stays_awake"] = True
     for key in ("fw_version", "uuid", "connect_reason"):
         value = decoded.get(key)
         if isinstance(value, str) and value:

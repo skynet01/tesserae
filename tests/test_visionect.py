@@ -37,6 +37,9 @@ from pyvisionect.wire import (
 
 from app import device_service, visionect, visionect_listener
 from app.discovery import DiscoveryCache
+from app.state.device_telemetry import TelemetryStore
+from app.state.event_log import EventLog
+from devices.visionect import device as visionect_device
 
 UUID = "36002000-1247-3830-3933-303600000000"
 # What the live 32" sign reported: DisplayType 0xC205012C (falls back to the
@@ -211,6 +214,10 @@ class FakeDevice:
     def panel(self) -> dict[str, Any]:
         return dict(self.manifest.get("panel") or {})
 
+    @staticmethod
+    def parse_status(payload: bytes) -> dict[str, Any]:
+        return visionect_device.parse_status(payload)
+
 
 SIGN_PANEL = {"w": 1440, "h": 2560, "orientation": "portrait", "native_w": 1440, "native_h": 2560}
 
@@ -322,6 +329,139 @@ def test_status_heartbeat_maps_the_sign_fields() -> None:
     assert beat["uptime_s"] == 164 * 60
     assert beat["fw_version"].startswith("6.17")
     assert beat["uuid"] == UUID
+
+
+def _beat(tags: list[tuple[int, int]] | None = None, **kwargs: Any) -> dict[str, Any]:
+    fields = StatusPacket(records=tags or STATUS_TAGS, sentinel=0).fields()
+    return visionect.status_heartbeat(fields, uuid=UUID, connect_reason="heartbeat", **kwargs)
+
+
+def test_status_heartbeat_estimates_the_next_wake_from_the_signs_cadence() -> None:
+    # The sign's own announcement (NextStatus, 30 min) until its settings are read.
+    assert _beat()["next_sleep_s"] == 1800
+    # Its check-in interval (TCLV 29) wins once known.
+    assert _beat(interval_min=45)["next_sleep_s"] == 2700
+    # A sleep Tesserae just ordered is an absolute time and outranks both.
+    beat = _beat(interval_min=45, sleep_until=1_900_000_000.0)
+    assert beat["sleep_until"] == 1_900_000_000.0 and "next_sleep_s" not in beat
+    # No cadence known at all: no estimate rather than a guess.
+    assert "next_sleep_s" not in _beat([(t, v) for t, v in STATUS_TAGS if t != 27])
+    # A sign that stays awake has no wake to predict.
+    awake = _beat(stays_awake=True, interval_min=30)
+    assert awake["stays_awake"] is True and "next_sleep_s" not in awake
+
+
+def test_the_device_kind_passes_the_estimate_through() -> None:
+    beat = _beat(interval_min=30)
+    parsed = visionect_device.parse_status(json.dumps(beat).encode())
+    assert parsed["next_sleep_s"] == 1800
+    parsed = visionect_device.parse_status(
+        json.dumps({"next_sleep_s": -5, "sleep_until": "soon", "stays_awake": 1}).encode()
+    )
+    assert parsed == {}  # junk and negatives are dropped, not trusted
+
+
+def _app_with_telemetry(tmp_path: Path) -> Flask:
+    app = Flask(__name__)
+    app.config["SETTINGS_STORE"] = FakeSettings({"devices": {}})
+    app.config["DEVICE_STATUS"] = {}
+    app.config["EVENT_LOG"] = EventLog(tmp_path / "events.json")
+    app.config["DEVICE_TELEMETRY"] = TelemetryStore(tmp_path / "telemetry.json")
+    return app
+
+
+def _check_in(app: Flask, device: FakeDevice, at: float, monkeypatch, **kwargs: Any) -> None:
+    monkeypatch.setattr("app.transport_wiring.time.time", lambda: at)
+    visionect._record_heartbeat(app, device, _beat(**kwargs))
+
+
+def test_a_frame_checking_in_every_30_minutes_gets_a_next_wake_and_earns_trust(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app_with_telemetry(tmp_path)
+    device = FakeDevice("lobby", "visionect", SIGN_PANEL, tmp_path / "lobby.json")
+    telemetry = app.config["DEVICE_TELEMETRY"]
+    t0 = 1_900_000_000.0
+    _check_in(app, device, t0, monkeypatch, interval_min=30)
+    entry = telemetry.get("lobby")
+    assert entry.last_heartbeat_at == t0
+    assert entry.predicted_next_wake_at == t0 + 1800  # Next wake
+    assert entry.last_sleep_interval_s == 1800  # Sleep cycle
+    assert entry.last_wake_offset_s is None  # nothing to compare the first check-in with
+    assert entry.prediction_source == "firmware" and not entry.always_on
+    # A few seconds of drift per cycle is on time; the prediction moves forward each time.
+    at = t0
+    for drift in (6, -4, 9):
+        at += 1800 + drift
+        _check_in(app, device, at, monkeypatch, interval_min=30)
+    entry = telemetry.get("lobby")
+    assert entry.last_wake_offset_s == 9  # Last offset
+    assert entry.consecutive_on_time_wakes == 3 and entry.is_trusted
+    assert entry.predicted_next_wake_at == at + 1800
+
+
+def test_a_late_frame_resets_trust_and_the_estimate_moves_forward(
+    tmp_path: Path, monkeypatch
+) -> None:
+    app = _app_with_telemetry(tmp_path)
+    device = FakeDevice("lobby", "visionect", SIGN_PANEL, tmp_path / "lobby.json")
+    t0 = 1_900_000_000.0
+    _check_in(app, device, t0, monkeypatch, interval_min=30)
+    _check_in(app, device, t0 + 1800, monkeypatch, interval_min=30)
+    late = t0 + 3600 + 600  # ten minutes late
+    _check_in(app, device, late, monkeypatch, interval_min=30)
+    entry = app.config["DEVICE_TELEMETRY"].get("lobby")
+    assert entry.last_wake_offset_s == 600
+    assert entry.consecutive_on_time_wakes == 0
+    assert entry.predicted_next_wake_at == late + 1800
+
+
+def test_a_frame_that_stays_awake_has_no_next_wake(tmp_path: Path, monkeypatch) -> None:
+    app = _app_with_telemetry(tmp_path)
+    device = FakeDevice("lobby", "visionect", SIGN_PANEL, tmp_path / "lobby.json")
+    # Even a configured sleep interval is no basis for a wake that never comes.
+    app.config["SETTINGS_STORE"].sections["devices"]["lobby"] = {"sleep_interval_s": 600}
+    _check_in(app, device, 1_900_000_000.0, monkeypatch, stays_awake=True)
+    entry = app.config["DEVICE_TELEMETRY"].get("lobby")
+    assert entry.predicted_next_wake_at is None and entry.always_on
+
+
+def test_a_sleep_through_quiet_window_sets_the_next_wake_to_its_end(
+    tmp_path: Path, monkeypatch
+) -> None:
+    h = Harness(tmp_path, uuid=UUID, app_settings=_window_around_now(sleep=True))
+    h.app.config["DEVICE_STATUS"] = {}
+    h.app.config["EVENT_LOG"] = EventLog(tmp_path / "events.json")
+    telemetry = TelemetryStore(tmp_path / "telemetry.json")
+    h.app.config["DEVICE_TELEMETRY"] = telemetry
+    try:
+        assert h.svc.start()  # no render: straight to the sleep step
+        sign = FakeSign(h.svc.port)
+        try:
+            before = time.time()
+            sign.status()
+            assert sign.wait_for(lambda s: len(s.commands()) == 1)
+            assert _wait(lambda: telemetry.get("lobby") is not None)
+            sign.ack(sign.commands()[0].id)
+            assert _wait(
+                lambda: (
+                    (
+                        telemetry.get("lobby") or SimpleNamespace(prediction_source="")
+                    ).prediction_source
+                    == "server"
+                )
+            )
+            entry = telemetry.get("lobby")
+            assert entry is not None and entry.predicted_next_wake_at is not None
+            # About an hour: the window ends an hour from now (plus the margin).
+            wait_s = entry.predicted_next_wake_at - before
+            assert 3500 < wait_s < 3600 + 60 * (visionect.SLEEP_MARGIN_MINUTES + 2)
+            assert entry.last_sleep_interval_s is not None
+            assert abs(entry.last_sleep_interval_s - wait_s) < 30
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
 
 
 def test_configured_port_env_then_setting_then_default(monkeypatch) -> None:
