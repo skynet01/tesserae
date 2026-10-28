@@ -24,6 +24,18 @@ render, on a Tesserae panel.
   to solid black and leaves midtones, highlights and the white paper, so
   photos stay as they are. Medium sends 0-64 to black and rejoins the page at
   120; Strong sends 0-80 to black and rejoins at 140.
+- **Text sharpness.** A widget-wide setting on the admin page (Off, Light,
+  Medium, Strong; Light by default, `text_sharpness` in `config.json`),
+  right under Text blackness: an unsharp mask on the page before the
+  blackness curve, so small print isn't soft on a 16-grey panel. Light is a
+  Gaussian radius of 1.0 px at 120 %, Medium 1.2 px at 200 %, Strong 1.5 px at
+  300 %. Flat areas and the white paper are left exactly as they are.
+- **Clean white edges.** A widget-wide setting on the admin page (Off,
+  Medium, Strong; Medium by default, `clean_white` in `config.json`), under
+  Text sharpness: the paper around small print comes out pale grey rather than
+  white, which looks muddy on 16 greys. A white-point curve snaps near-white
+  tones to pure white and leaves everything darker as it was. Medium ramps up
+  from 170 and reaches white at 225; Strong from 150, white at 200.
 - **Pages download in the background**, so a render never waits on the
   network. A paper that isn't out yet shows its last good page, up to 30
   days old, and the worker tries again with a backoff.
@@ -64,7 +76,7 @@ only each paper's newest PDF is kept.
 ## Settings
 
 No API key and no Settings > Widgets entries. The paper list, the
-"On smaller screens" choice and the "Text blackness" choice are kept in the widget's own `config.json` in its
+"On smaller screens" choice, the "Text blackness" choice and the "Text sharpness" choice and the "Clean white edges" choice are kept in the widget's own `config.json` in its
 data folder, edited on the admin page.
 
 | Cell option | Notes |

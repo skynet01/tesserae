@@ -166,6 +166,27 @@
     <p class="field-help">A newspaper's small text is dark grey, and a screen with only 16 greys paints it faded. This pulls the darkest tones (the text, and the deepest shadows in photos) to solid black. Midtones, highlights and the white paper are left as they are. Strong reaches a little further up than Medium.</p>
   </div>
 
+  <div class="field nx-fit">
+    <label for="nx-text-sharpness">Text sharpness</label>
+    <select id="nx-text-sharpness" name="text_sharpness">
+      <option value="off"{% if text_sharpness == 'off' %} selected{% endif %}>Off: the page as drawn</option>
+      <option value="light"{% if text_sharpness == 'light' %} selected{% endif %}>Light</option>
+      <option value="medium"{% if text_sharpness == 'medium' %} selected{% endif %}>Medium</option>
+      <option value="strong"{% if text_sharpness == 'strong' %} selected{% endif %}>Strong</option>
+    </select>
+    <p class="field-help">Small newspaper print looks soft on a screen with only 16 greys. This sharpens the edges of the text (an unsharp mask) before the blackness is applied. Flat areas and the white paper are left exactly as they are. Strong is crisper than Light, but can leave a faint light rim around very dark shapes.</p>
+  </div>
+
+  <div class="field nx-fit">
+    <label for="nx-clean-white">Clean white edges</label>
+    <select id="nx-clean-white" name="clean_white">
+      <option value="off"{% if clean_white == 'off' %} selected{% endif %}>Off: the page as drawn</option>
+      <option value="medium"{% if clean_white == 'medium' %} selected{% endif %}>Medium</option>
+      <option value="strong"{% if clean_white == 'strong' %} selected{% endif %}>Strong</option>
+    </select>
+    <p class="field-help">Around every letter the paper is a pale grey, not white, and on a screen with only 16 greys that looks muddy. This snaps those near-white tones to pure white. Only the lightest tones change; darker tones, and photos' midtones, are left as they are. Strong reaches a little further down than Medium.</p>
+  </div>
+
   <div class="nx-save">
     <button type="reset" class="dx-btn-ghost-sm" data-nx-discard>Discard changes</button>
     <button type="submit" name="op" value="save" class="dx-btn-primary" data-nx-save>

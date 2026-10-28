@@ -19,6 +19,14 @@
 // the JPEG is drawn onto a canvas first (the plain <img> stays as the fallback).
 // It only pulls the darkest tones to black; see blacknessTable.
 //
+// "Text sharpness" (``data.text_sharpness``: off, light, medium or strong) is an
+// unsharp mask run first, on the same pixels and at the same two points
+// (draw, sharpen, blackness curve, done); see sharpenCanvas.
+//
+// "Clean white edges" (``data.clean_white``: off, medium or strong) is a
+// white-point curve that snaps the pale grey around the letters to pure white;
+// it shares one lookup pass with the blackness curve (see whiteTable).
+//
 // ``css`` is the paper's own CSS from the widget's settings, already cut
 // down by the server to a short list of safe declarations
 // (sanitize_css in server.py). It goes on this paper's page (the <canvas>
@@ -82,6 +90,113 @@ export function pageFit(w, h, ratio, fit) {
   return w < READABLE_PX ? "zoom" : "full";
 }
 
+// ----- text sharpness --------------------------------------------------------
+
+// Small print comes out soft on the panel, so the page gets an unsharp mask:
+// ``out = src + amount * (src - blur(src))`` where ``blur`` is a Gaussian of
+// standard deviation ``sigma`` pixels. Same numbers as PIL's UnsharpMask
+// (radius = sigma, percent / 100 = amount): light is radius 1.0 and 120 %,
+// medium 1.2 and 200 %, strong 1.5 and 300 %. "off" (or anything unknown)
+// leaves the page alone.
+export const TEXT_SHARPNESS = {
+  light: { sigma: 1.0, amount: 1.2 },
+  medium: { sigma: 1.2, amount: 2.0 },
+  strong: { sigma: 1.5, amount: 3.0 },
+};
+// A pixel whose brightness is within this of its blur is left alone, so the
+// flat white paper stays exactly white and flat areas (and JPEG noise) aren't
+// stirred up.
+export const SHARPEN_THRESHOLD = 2;
+
+export function sharpness(level) {
+  return Object.hasOwn(TEXT_SHARPNESS, level) ? TEXT_SHARPNESS[level] : null;
+}
+
+// A normalised Gaussian kernel, 2 * ceil(3 sigma) + 1 taps.
+export function gaussianKernel(sigma) {
+  const radius = Math.max(1, Math.ceil(3 * sigma));
+  const kernel = new Float32Array(2 * radius + 1);
+  let sum = 0;
+  for (let i = -radius; i <= radius; i++) {
+    const v = Math.exp(-(i * i) / (2 * sigma * sigma));
+    kernel[i + radius] = v;
+    sum += v;
+  }
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= sum;
+  return kernel;
+}
+
+// Unsharp-mask ``canvas`` in place with ``params`` ({sigma, amount}, from
+// sharpness()). The mask works on each pixel's luma (0.30 R + 0.59 G + 0.11 B):
+// the luma plane is blurred with a separable Gaussian (a horizontal pass into
+// a float plane, then a vertical pass row by row), and the difference between
+// the luma and its blur, times ``amount``, is added to red, green and blue
+// alike, then clamped to 0-255. Greys come out exactly as a per-channel mask
+// would give them; colours keep their hue, with no colour fringes. Typed arrays
+// throughout and nothing allocated per pixel: one image read, two float planes
+// and a row buffer for the whole canvas.
+export function sharpenCanvas(canvas, params) {
+  if (!params || !canvas.width || !canvas.height) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("no 2d canvas");
+  const image = ctx.getImageData(0, 0, w, h);
+  const px = image.data;
+  const kernel = gaussianKernel(params.sigma);
+  const radius = (kernel.length - 1) >> 1;
+  const amount = params.amount;
+
+  const luma = new Float32Array(w * h);
+  for (let i = 0, p = 0; i < luma.length; i++, p += 4) {
+    luma[i] = 0.30 * px[p] + 0.59 * px[p + 1] + 0.11 * px[p + 2];
+  }
+
+  // Horizontal pass, edges clamped.
+  const across = new Float32Array(w * h);
+  const inner = w - radius;
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      if (x >= radius && x < inner) {
+        const from = row + x - radius;
+        for (let j = 0; j < kernel.length; j++) sum += kernel[j] * luma[from + j];
+      } else {
+        for (let j = 0; j < kernel.length; j++) {
+          const xx = Math.min(w - 1, Math.max(0, x + j - radius));
+          sum += kernel[j] * luma[row + xx];
+        }
+      }
+      across[row + x] = sum;
+    }
+  }
+
+  // Vertical pass, a row at a time (edges clamped), then the mask.
+  const blur = new Float32Array(w);
+  for (let y = 0; y < h; y++) {
+    blur.fill(0);
+    for (let j = 0; j < kernel.length; j++) {
+      const yy = Math.min(h - 1, Math.max(0, y + j - radius));
+      const k = kernel[j];
+      const row = yy * w;
+      for (let x = 0; x < w; x++) blur[x] += k * across[row + x];
+    }
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      const diff = luma[row + x] - blur[x];
+      if (diff < SHARPEN_THRESHOLD && diff > -SHARPEN_THRESHOLD) continue;
+      const delta = amount * diff;
+      const p = (row + x) * 4;
+      // px is a Uint8ClampedArray: the sum is clamped to 0-255 and rounded.
+      px[p] += delta;
+      px[p + 1] += delta;
+      px[p + 2] += delta;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+}
+
 // ----- text blackness --------------------------------------------------------
 
 // The panel paints only 16 greys, and a newspaper's text is dark grey (the
@@ -117,6 +232,50 @@ export function blacknessTable(level) {
       table[v] = Math.max(0, Math.min(v, Math.round(out)));
     }
   }
+  return table;
+}
+
+// ----- clean white edges ------------------------------------------------------
+
+// Antialiasing leaves the paper right beside a letter pale grey, and on 16
+// greys that reads as mud. "Clean white edges" is a white-point curve, the
+// mirror of the blackness one: values at or above ``white`` become 255, a
+// smooth ramp rises from ``start``, where it leaves the identity line, and
+// everything below ``start`` is untouched, so photos' midtones and shadows
+// come through as they were. Only pixels brighter than ``start`` change.
+export const CLEAN_WHITE = {
+  medium: { start: 170, white: 225 },
+  strong: { start: 150, white: 200 },
+};
+
+// The 256-entry table for a clean-white choice, or null for no change. Between
+// ``start`` and ``white`` it is a cubic Hermite ramp: ``start`` at the start
+// with slope 1 (it leaves the identity line smoothly), 255 at ``white`` with no
+// slope, rising all the way.
+export function whiteTable(level) {
+  const curve = Object.hasOwn(CLEAN_WHITE, level) ? CLEAN_WHITE[level] : null;
+  if (!curve) return null;
+  const { start, white } = curve;
+  const table = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) {
+    if (v <= start) table[v] = v;
+    else if (v >= white) table[v] = 255;
+    else {
+      const t = (v - start) / (white - start);
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const out = (2 * t3 - 3 * t2 + 1) * start + (t3 - 2 * t2 + t) * (white - start) + (3 * t2 - 2 * t3) * 255;
+      table[v] = Math.max(v, Math.min(255, Math.round(out)));
+    }
+  }
+  return table;
+}
+
+// One table for two: ``first`` then ``second`` (either may be null).
+export function chainTables(first, second) {
+  if (!first || !second) return first || second || null;
+  const table = new Uint8Array(256);
+  for (let v = 0; v < 256; v++) table[v] = second[first[v]];
   return table;
 }
 
@@ -156,9 +315,10 @@ export function applyTable(canvas, table) {
 // How long the JPEG gets to load before it is shown as it is.
 const JPEG_LOAD_MS = 10000;
 
-// The JPEG at ``url`` drawn onto a new canvas of its own size with ``table``
-// applied, or rejects (the caller then shows the plain <img>).
-async function blackenedJpeg(url, table) {
+// The JPEG at ``url`` drawn onto a new canvas of its own size, sharpened
+// (``sharpen``, from sharpness()) and then put through ``table``, or rejects
+// (the caller then shows the plain <img>).
+async function processedJpeg(url, table, sharpen) {
   const img = new Image();
   img.src = url;
   let timer = null;
@@ -176,6 +336,7 @@ async function blackenedJpeg(url, table) {
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx || !canvas.width || !canvas.height) throw new Error("the JPEG has no size");
   ctx.drawImage(img, 0, 0);
+  sharpenCanvas(canvas, sharpen);
   applyTable(canvas, table);
   return canvas;
 }
@@ -235,10 +396,11 @@ function urlPrefix() {
 
 // Draw page one of the PDF at ``url`` onto ``canvas`` (already in the cell,
 // hidden, styled as the page), sized to the canvas's laid-out width. Resolves
-// with how long it took (ms) once the drawing is complete (``table``, a
-// blacknessTable, applied to its pixels included); rejects when the PDF can't
+// with how long it took (ms) once the drawing is complete (``sharpen``, from
+// sharpness(), then ``table``, a blacknessTable, applied to its pixels
+// included); rejects when the PDF can't
 // be had or drawn, or after ``budgetMs``, having stopped the work.
-export async function drawPdf(canvas, url, budgetMs = PDF_BUDGET_MS, table = null) {
+export async function drawPdf(canvas, url, budgetMs = PDF_BUDGET_MS, table = null, sharpen = null) {
   const started = performance.now();
   const abort = new AbortController();
   let loading = null;
@@ -286,6 +448,7 @@ export async function drawPdf(canvas, url, budgetMs = PDF_BUDGET_MS, table = nul
       background: "#ffffff",
     });
     await drawing.promise;
+    sharpenCanvas(canvas, sharpen);
     applyTable(canvas, table);
   })();
   work.catch(() => {}); // settled by the race below; this only keeps a late failure quiet
@@ -374,7 +537,10 @@ export default async function render(shadow, ctx) {
   const box = shadow.querySelector(".w");
   if (!box) return;
   const style = paperCss(data);
-  const table = blacknessTable(data.text_blackness);
+  // The blackness curve and the white-point curve act on opposite ends of the
+  // tones, so one pass through both tables is the same as two.
+  const table = chainTables(blacknessTable(data.text_blackness), whiteTable(data.clean_white));
+  const sharpen = sharpness(data.text_sharpness);
 
   if (typeof data.pdf_url === "string" && data.pdf_url.startsWith("/")) {
     const canvas = document.createElement("canvas");
@@ -389,7 +555,7 @@ export default async function render(shadow, ctx) {
     canvas.style.visibility = "hidden"; // until the drawing is complete
     box.append(canvas);
     try {
-      const ms = await drawPdf(canvas, urlPrefix() + data.pdf_url, PDF_BUDGET_MS, table);
+      const ms = await drawPdf(canvas, urlPrefix() + data.pdf_url, PDF_BUDGET_MS, table, sharpen);
       canvas.dataset.drawnMs = String(ms);
       canvas.style.visibility = "";
       snapToPixels(canvas);
@@ -400,9 +566,9 @@ export default async function render(shadow, ctx) {
     }
   }
 
-  if (table) {
+  if (table || sharpen) {
     try {
-      const canvas = await blackenedJpeg(data.url, table);
+      const canvas = await processedJpeg(data.url, table, sharpen);
       canvas.className = "page";
       canvas.setAttribute("role", "img");
       canvas.setAttribute("aria-label", alt);
@@ -411,7 +577,7 @@ export default async function render(shadow, ctx) {
       snapToPixels(canvas);
       return;
     } catch (err) {
-      console.warn(`news_front_pages: showed the JPEG as it is, blackening it failed (${err?.message || err})`);
+      console.warn(`news_front_pages: showed the JPEG as it is, sharpening or blackening it failed (${err?.message || err})`);
     }
   }
 
