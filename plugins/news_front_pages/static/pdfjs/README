@@ -1,0 +1,36 @@
+PDF.js, vendored
+================
+
+Mozilla's PDF.js, which client.js uses to draw a paper's PDF in the panel's
+browser. Apache License 2.0, see LICENSE in this folder.
+
+Version:  6.4.299 (the modern ES module build, not the legacy one)
+Source:   https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-6.4.299.tgz
+          (the pdfjs-dist package Mozilla publishes from
+          https://github.com/mozilla/pdf.js, tag v6.4.299)
+Integrity: sha512-AVl138zALtfaAPvADulE0PZThbYzCBS79nL4pOSL/6Sm/4AH5A21BD9VHt97OlCuzJuCpmeZtAtkinisF4Vb1g==
+
+Files, copied unchanged from the package:
+
+  pdf.min.mjs, pdf.worker.min.mjs   from build/
+  LICENSE                           the package's Apache-2.0 licence
+  wasm/jbig2.wasm                   JBIG2 images (black-and-white scans), used
+                                    by several US papers; without it they draw
+                                    as blank boxes
+  wasm/openjpeg.wasm                JPEG 2000 images
+  wasm/qcms_bg.wasm, iccs/          colour management for the CMYK pages most
+                                    papers send (CGATS001Compat-v2-micro.icc)
+  cmaps/Adobe-*-UCS2.bcmap          the four CJK CMaps PDF.js needs to load a
+                                    Chinese, Japanese or Korean CID font (the
+                                    Taipei Times, for one); the other 165
+                                    CMaps in the package are left out
+  wasm/LICENSE_*, iccs/LICENSE,     the licences that come with those files
+  cmaps/LICENSE                     (BSD, MIT, CC0)
+
+Left out: the standard font files (standard_fonts/, for PDFs that don't embed
+their fonts: none of the 54 papers checked needed them), the other CMaps, the
+non-wasm fallbacks and the scripting engine, the viewer, and the source maps.
+
+To update: download the new pdfjs-dist tarball, check its integrity against
+`npm view pdfjs-dist@<version> dist.integrity`, copy the same files over, and
+change the version above.
