@@ -8,6 +8,13 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
+- The status dot on the Devices list (and the dashboards' device chips) follows
+  a sleeping device's own cycle. It went red 5 minutes after a heartbeat, so a
+  battery e-paper frame that wakes every 30 minutes read as stale for most of
+  each cycle. When the device's sleep cycle is known the dot stays green until
+  a little past one cycle, amber for a couple more, and red after that. Devices
+  with no known cycle, and always-on ones, keep the old bands.
+
 - The latest-render thumbnail on the Devices list and the device page keeps
   the screen's shape. A portrait screen's picture was cropped to its middle
   inside a fixed 4:3 box; the box now follows the panel's aspect ratio (taller

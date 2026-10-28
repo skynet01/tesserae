@@ -43,6 +43,34 @@ from app.transport import MqttTransport
 STATUS_FRESH_S: int = 90
 STATUS_WARN_S: int = 5 * 60
 
+
+def health_for_age(device_id: str, age: float) -> str:
+    """ok / warn / stale for a heartbeat ``age`` seconds old.
+
+    The fixed bands above suit a device that reports every minute or so. A
+    device that sleeps between check-ins (a battery e-paper frame waking every
+    30 minutes) is "stale" for most of each cycle by those bands, so its dot
+    stayed red while nothing was wrong. When telemetry knows the device's
+    sleep cycle the bands stretch to it: fresh until a little past one cycle,
+    warn until a couple of cycles, stale after that."""
+    fresh, warn = float(STATUS_FRESH_S), float(STATUS_WARN_S)
+    try:
+        telemetry = current_app.config.get("DEVICE_TELEMETRY")
+        entry = telemetry.get(device_id) if telemetry is not None else None
+        cycle = getattr(entry, "last_sleep_interval_s", None)
+        if entry is not None and not getattr(entry, "always_on", False) and cycle:
+            cycle_s = float(cycle)
+            fresh = max(fresh, cycle_s * 1.25 + 60)
+            warn = max(warn, cycle_s * 2.5 + 60)
+    except Exception:
+        pass
+    if age <= fresh:
+        return "ok"
+    if age <= warn:
+        return "warn"
+    return "stale"
+
+
 # Blueprint name is "auth" for backward compatibility, 71+ templates
 # reference url_for("auth.xxx"). Renaming would be a mass rename across
 # every settings / onboarding / devices template; the split keeps the
