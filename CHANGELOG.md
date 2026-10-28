@@ -19,6 +19,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   the screen's shape. A portrait screen's picture was cropped to its middle
   inside a fixed 4:3 box; the box now follows the panel's aspect ratio (taller
   for portrait, wider for landscape) and the whole picture fits.
+- The opened row on the Dashboards list does the same for its preview: it keeps
+  the dashboard's own shape instead of a 260 px box.
 
 - The Paper design's Settings dropdown marks the page you are on again when
   Tesserae runs behind a URL prefix, such as Home Assistant's sidebar panel or

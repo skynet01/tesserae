@@ -379,3 +379,20 @@ def test_the_thumbnail_falls_back_to_the_fixed_box_without_a_panel_or_render(
 ) -> None:
     assert "--thumb-ar" not in _thumb(app, None)
     assert "--thumb-ar" not in _thumb(app, {"w": 1440, "h": 2560}, has_render=False)
+
+
+def test_an_opened_dashboard_preview_keeps_the_dashboards_shape(app: Flask) -> None:
+    """The Dashboards list's opened row used to fix the preview at 260 px wide,
+    so a portrait dashboard sat in a squarish box. The box now carries the
+    dashboard's own aspect ratio, and a portrait one is marked for a taller
+    box."""
+    client = app.test_client()
+    _sign_in(client)
+    for name, w, h in (("Tall", 1440, 2560), ("Wide", 800, 480)):
+        resp = client.post("/api/mcp/pages", json={"name": name, "w": w, "h": h})
+        assert resp.status_code == 200
+    body = client.get("/pages").get_data(as_text=True)
+    previews = re.findall(r'<div class="dx-dashquick-preview([^"]*)"\s+style="([^"]*)"', body)
+    by_ratio = {style: cls for cls, style in previews}
+    assert "is-portrait" in by_ratio["aspect-ratio: 1440 / 2560"]
+    assert "is-portrait" not in by_ratio["aspect-ratio: 800 / 480"]
