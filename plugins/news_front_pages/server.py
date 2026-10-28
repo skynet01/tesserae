@@ -74,8 +74,9 @@ How a render works:
 
 Layout under ``data_dir``::
 
-    config.json                   the papers, the small-screens choice and the text
-                                  blackness, as the admin page saves them
+    config.json                   the papers, the small-screens choice, the text
+                                  blackness, the text sharpness and the white
+                                  clean-up, as the admin page saves them
     pages/<CODE>_<YYYYMMDD>.jpg   one validated page per paper and edition (the
                                   PDF drawn at panel width, or the JPEG)
     pages/<CODE>_<YYYYMMDD>.pdf   that edition's PDF, beside a JPEG page, for
@@ -429,8 +430,8 @@ def parse_papers(value: Any) -> list[Paper]:
 
 # ----- the widget's own config ------------------------------------------------
 #
-# The paper list, the small-screens choice and the text blackness live in
-# ``config.json`` in the widget's data dir, written by its admin page; the
+# The paper list, the small-screens choice, the text blackness and the text
+# sharpness live in ``config.json`` in the widget's data dir, written by its admin page; the
 # manifest declares no settings (Settings > Widgets has nothing for it).
 
 CONFIG_FILE = "config.json"
@@ -439,6 +440,14 @@ SMALL_SCREENS = ("top", "whole")
 # newspaper's text) to black, for a 16-grey panel. Off leaves the page alone.
 TEXT_BLACKNESS = ("off", "medium", "strong")
 DEFAULT_TEXT_BLACKNESS = "medium"
+# "Text sharpness": how strong an unsharp mask client.js runs over the page
+# before the blackness curve, so small print isn't soft. Off leaves it alone.
+TEXT_SHARPNESS = ("off", "light", "medium", "strong")
+DEFAULT_TEXT_SHARPNESS = "light"
+# "Clean white edges": how far client.js snaps the near-white pixels beside the
+# letters (the pale grey halo that antialiasing leaves) to pure white.
+CLEAN_WHITE = ("off", "medium", "strong")
+DEFAULT_CLEAN_WHITE = "medium"
 
 # Guards config.json: every read-modify-write.
 _CONFIG_LOCK: threading.Lock = _shared("config_lock", threading.Lock)
@@ -465,10 +474,14 @@ def _config(data: Mapping[str, Any]) -> dict[str, Any]:
     """A config with every key, from what was read (defaults for the rest)."""
     fit = data.get("small_screens")
     blackness = data.get("text_blackness")
+    sharpness = data.get("text_sharpness")
+    clean = data.get("clean_white")
     return {
         "papers": config_rows(data.get("papers", DEFAULT_PAPERS)),
         "small_screens": fit if fit in SMALL_SCREENS else "top",
         "text_blackness": blackness if blackness in TEXT_BLACKNESS else DEFAULT_TEXT_BLACKNESS,
+        "text_sharpness": sharpness if sharpness in TEXT_SHARPNESS else DEFAULT_TEXT_SHARPNESS,
+        "clean_white": clean if clean in CLEAN_WHITE else DEFAULT_CLEAN_WHITE,
     }
 
 
@@ -2084,6 +2097,10 @@ def fetch(
         "fit": config["small_screens"],
         # How far client.js pulls the page's dark tones to black.
         "text_blackness": config["text_blackness"],
+        # How strongly client.js sharpens the page before that.
+        "text_sharpness": config["text_sharpness"],
+        # How far client.js snaps near-white pixels to pure white.
+        "clean_white": config["clean_white"],
     }
     if page.pdf is not None and page.width < SHARP_MIN_WIDTH_PX:
         # client.js draws this with PDF.js at the cell's own width, and falls
@@ -2469,6 +2486,8 @@ class Posted:
     new: dict[str, Any]  # the add-a-paper fields
     small_screens: str
     text_blackness: str
+    text_sharpness: str
+    clean_white: str
     opened: set[int]  # rows the page had open (its script says; none without)
 
 
@@ -2491,11 +2510,15 @@ def _posted(form: Mapping[str, Any]) -> Posted | None:
     opened = getlist("open") if getlist is not None else []
     fit = form.get("small_screens")
     blackness = form.get("text_blackness")
+    sharpness = form.get("text_sharpness")
+    clean = form.get("clean_white")
     return Posted(
         rows=[row(f"row-{index}") for index in range(total)],
         new=row("new"),
         small_screens=fit if fit in SMALL_SCREENS else "top",
         text_blackness=blackness if blackness in TEXT_BLACKNESS else DEFAULT_TEXT_BLACKNESS,
+        text_sharpness=sharpness if sharpness in TEXT_SHARPNESS else DEFAULT_TEXT_SHARPNESS,
+        clean_white=clean if clean in CLEAN_WHITE else DEFAULT_CLEAN_WHITE,
         opened={int(v) for v in opened if str(v).isdigit() and int(v) < total},
     )
 
@@ -2541,6 +2564,8 @@ def _unsaved(posted: Posted, saved: Mapping[str, Any]) -> bool:
         _comparable(posted.rows) != _comparable(saved["papers"])
         or posted.small_screens != saved["small_screens"]
         or posted.text_blackness != saved["text_blackness"]
+        or posted.text_sharpness != saved["text_sharpness"]
+        or posted.clean_white != saved["clean_white"]
         or bool(posted.new["code"].strip())
     )
 
@@ -2598,6 +2623,8 @@ def _render_page(
     rows: list[dict[str, Any]],
     small_screens: str,
     text_blackness: str,
+    text_sharpness: str,
+    clean_white: str,
     new: Mapping[str, Any] | None = None,
     errors: Mapping[int, Mapping[str, str]] | None = None,
     new_errors: Mapping[str, str] | None = None,
@@ -2630,6 +2657,8 @@ def _render_page(
         max_papers=MAX_PAPERS,
         small_screens=small_screens,
         text_blackness=text_blackness,
+        text_sharpness=text_sharpness,
+        clean_white=clean_white,
         view=view,
         recheck_min=RECHECK_S // 60,
     )
@@ -2705,6 +2734,8 @@ def blueprint() -> Blueprint:
             rows=config["papers"],
             small_screens=config["small_screens"],
             text_blackness=config["text_blackness"],
+            text_sharpness=config["text_sharpness"],
+            clean_white=config["clean_white"],
             opened=opened,
         )
 
@@ -2741,6 +2772,8 @@ def blueprint() -> Blueprint:
                 rows=rows,
                 small_screens=posted.small_screens,
                 text_blackness=posted.text_blackness,
+                text_sharpness=posted.text_sharpness,
+                clean_white=posted.clean_white,
                 new=posted.new,
                 errors=errors,
                 new_errors=new_errors,
@@ -2756,6 +2789,8 @@ def blueprint() -> Blueprint:
                     "papers": cleaned,
                     "small_screens": posted.small_screens,
                     "text_blackness": posted.text_blackness,
+                    "text_sharpness": posted.text_sharpness,
+                    "clean_white": posted.clean_white,
                 },
             )
         except OSError as err:
@@ -2766,6 +2801,8 @@ def blueprint() -> Blueprint:
                 rows=rows,
                 small_screens=posted.small_screens,
                 text_blackness=posted.text_blackness,
+                text_sharpness=posted.text_sharpness,
+                clean_white=posted.clean_white,
                 new=posted.new,
                 opened=opened,
                 status=500,
@@ -2822,6 +2859,8 @@ def blueprint() -> Blueprint:
             rows=posted.rows,
             small_screens=posted.small_screens,
             text_blackness=posted.text_blackness,
+            text_sharpness=posted.text_sharpness,
+            clean_white=posted.clean_white,
             new=posted.new,
             opened=opened,
             verified={key: result},
