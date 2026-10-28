@@ -6,6 +6,13 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The Paper design's Settings dropdown marks the page you are on again when
+  Tesserae runs behind a URL prefix, such as Home Assistant's sidebar panel or
+  a reverse proxy's mount point. The links carried the prefix and the current
+  path didn't, so nothing matched and no item was highlighted.
+
 ### Added
 
 - Visionect e-paper signs, driven directly with no Visionect Software Suite.
