@@ -14,6 +14,12 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   for portrait, wider for landscape) and the whole picture fits.
 - The opened row on the Dashboards list does the same for its preview: it keeps
   the dashboard's own shape instead of a 260 px box.
+- The status dot on the Devices list (and the dashboards' device chips) follows
+  a sleeping device's own cycle. It went red 5 minutes after a heartbeat, so a
+  battery e-paper frame that wakes every 30 minutes read as stale for most of
+  each cycle. When the device's sleep cycle is known the dot stays green until
+  a little past one cycle, amber for a couple more, and red after that. Devices
+  with no known cycle, and always-on ones, keep the old bands.
 
 ## [0.489.0], 2026-10-29
 
