@@ -116,6 +116,10 @@ _BIND = re.compile(r"^Bind to (?!both)")
 def _save(page: Any) -> None:
     page.locator("#deck-form").evaluate("f => f.requestSubmit()")
     page.wait_for_url(re.compile(r".*/decks(\?|#|$).*"))
+    # The Lineups page is still fetching thumbnails; closing the browser
+    # mid-response leaves werkzeug's file handle open (ResourceWarning).
+    # (Not "networkidle": the page holds an event stream open.)
+    page.wait_for_function("() => [...document.images].every(i => i.complete)")
 
 
 def test_adding_a_dashboard_from_another_display_asks_first(real: tuple[str, Flask]) -> None:
