@@ -1018,14 +1018,28 @@ def test_paper_live_row_has_an_accent_edge(live: str) -> None:
 
 
 @pytest.fixture
-def real(tmp_path: Path) -> Iterator[tuple[str, Flask]]:
+def real(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[str, Flask]]:
     """The real /decks page and JSON endpoints (app/deck_routes.py) over a
     registered display with a few lineups."""
+    import datetime as dt
+
     from werkzeug.serving import make_server
 
+    import app.deck_routes as deck_routes
     from app.main import REPO_ROOT
     from app.state.deck_model import Deck, DeckPage
     from app.state.page_store import Page
+
+    class _Midday(dt.datetime):
+        # The view folds lineups that are not running or due later today, and
+        # lazy thumbnails inside a folded row never load. Pin the page's wall
+        # clock to a weekday midday, between the two windows below, so these
+        # tests do not depend on the hour they run.
+        @classmethod
+        def now(cls, tz: dt.tzinfo | None = None) -> dt.datetime:
+            return cls(2026, 10, 28, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(deck_routes, "datetime", _Midday)
 
     app: Flask = create_app(
         testing=False,
