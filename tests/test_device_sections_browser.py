@@ -221,8 +221,14 @@ def test_a_hash_link_opens_the_section_that_holds_it(
     assert _expanded(pg, section)
     # And it was scrolled into view (a short page bottoms out before the
     # target reaches the top), not left where the collapsed layout put it.
-    top = pg.evaluate(f"() => document.getElementById('{anchor}').getBoundingClientRect().top")
-    assert 0 <= top < 880, top
+    # The jump is a smooth scroll: wait for it to land rather than reading
+    # the position mid-flight.
+    pg.wait_for_function(
+        "id => { const t = document.getElementById(id).getBoundingClientRect().top;"
+        " return t >= 0 && t < 880; }",
+        arg=anchor,
+        timeout=5000,
+    )
     # Sections the link has nothing to do with stay collapsed.
     others = [s for s in SECTIONS if s != section]
     assert all(_collapsed(pg, s) for s in others)
