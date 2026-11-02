@@ -4452,7 +4452,11 @@ a.dx-qtile--link:focus-visible { outline: 2px solid var(--t-accent); outline-off
 /* Power: the battery history chart, then one tile holding the reading
    and its display offsets. */
 .dx-power-chart { margin-bottom: var(--t-space-4, 16px); }
-.dx-power-chart .dx-subgroup-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dx-section-head:has(.dx-section-actions) .dx-section-titleblock { flex: 1 1 auto; }
+.dx-section-head > .dx-section-actions { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 8px; margin-left: auto; align-self: center; }
+.dx-section-link { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--dx-faint); text-decoration: none; }
+.dx-section-link:hover { color: var(--t-fg); }
+.dx-section-link:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; border-radius: 3px; }
 .dx-qtile.dx-power-tile {
   display: flex;
   flex-direction: row;
@@ -4464,10 +4468,18 @@ a.dx-qtile--link:focus-visible { outline: 2px solid var(--t-accent); outline-off
 }
 /* With history the reading is one tile in the chart's stat grid (3 across). */
 .dx-power-chart .dx-battery-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.dx-stat-tile.dx-power-tile { display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 16px; max-width: none; }
+.dx-stat-tile.dx-power-tile { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; max-width: none; }
 @media (max-width: 720px) { .dx-power-chart .dx-battery-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .dx-power-reading { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; text-align: left; }
-.dx-power-offsets { display: flex; flex-direction: column; gap: 6px; }
+/* Display offset: a quiet line; Edit (the <summary>) reveals the fields. */
+.dx-power-offsets > summary { list-style: none; display: inline-flex; align-items: baseline; gap: 8px; cursor: pointer; font-size: 12px; color: var(--dx-faint); }
+.dx-power-offsets > summary::-webkit-details-marker { display: none; }
+.dx-power-offsets[data-set] .dx-power-offset-now { color: var(--t-fg-soft, var(--t-fg)); }
+.dx-power-offset-edit { color: var(--t-accent); text-decoration: underline; text-decoration-color: color-mix(in oklab, currentColor 40%, transparent); text-underline-offset: 2px; }
+.dx-power-offsets[open] .dx-power-offset-edit { display: none; }
+.dx-power-offsets > summary:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; border-radius: 3px; }
+.dx-power-offsets[open] > summary { margin-bottom: 8px; }
+.dx-power-offset-help { margin: 6px 0 0; font-size: 11.5px; color: var(--dx-faint); max-width: 34ch; }
 /* ``.field`` gives the offset inputs the app's standard input look. */
 .field.dx-power-offset-fields { display: flex; gap: 8px; }
 .field.dx-power-offset-fields > .dx-power-offset { display: inline-flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 6px; margin: 0; font-weight: 400; }

@@ -27,6 +27,8 @@
     <h3 class="dx-section-title">{{ title }}</h3>
     <p class="dx-section-desc">{{ desc }}</p>
   </div>
+  {#- Called with {% call %}: the caller's actions sit at the header's end. -#}
+  {% if caller is defined %}<div class="dx-section-actions">{{ caller() }}</div>{% endif %}
   <button type="button" class="dx-sec-toggle" data-devsec-toggle aria-expanded="true" aria-controls="{{ id }}-body">
     <i class="ph ph-caret-down" aria-hidden="true"></i>
     <span class="sr-only">Collapse {{ title }}</span>

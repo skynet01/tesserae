@@ -649,7 +649,13 @@
     {# ---------------- POWER ---------------- #}
     {% if section.battery_offset_endpoint %}
     <section class="dx-section-card dx-devsec" id="power" data-devsec>
-      {{ devsec_head('power', 'battery-charging', 'Power', 'Battery as reported, with display offsets.') }}
+      {% if section.battery_card %}
+      {% call devsec_head('power', 'battery-charging', 'Power', 'Battery level and every wake-up, with its cause.') %}
+        <a class="dx-section-link" href="{{ url_for('device_battery.index') }}"><span>All batteries</span><i class="ph ph-arrow-up-right" aria-hidden="true"></i></a>
+      {% endcall %}
+      {% else %}
+      {{ devsec_head('power', 'battery-charging', 'Power', 'Battery as reported.') }}
+      {% endif %}
       <div class="dx-section-body" id="power-body">
         {%- macro _battery_reading(tile_class) -%}
         <div class="{{ tile_class }} dx-power-tile">
@@ -658,8 +664,14 @@
             <span class="dx-stat-value{% if section.overview.battery.muted %} is-muted{% endif %}{% if section.overview.battery.low %} is-warn{% endif %}">{{ section.overview.battery.value }}</span>
             <span class="dx-stat-sub">{{ section.overview.battery.sub }}</span>
           </div>
-          <div class="dx-power-offsets">
-            <span class="dx-stat-label">Display offset{{ info_pop('Adjust the displayed battery to match a voltmeter reading. The mV offset is added to the device-reported voltage (±2000 mV); the % offset is added to the displayed percent on top of that (±100). Raw values stay in the history store unchanged; only the displayed numbers (here, on the battery page and on Home Assistant sensors) shift. Both zero means no override.') }}</span>
+          {%- set _mv = section.battery_offset.get('mv', 0) or 0 -%}
+          {%- set _pct = section.battery_offset.get('pct', 0) or 0 -%}
+          {#- The display offset is rarely touched: a quiet line, and Edit reveals the fields. -#}
+          <details class="dx-power-offsets"{% if _mv or _pct %} data-set{% endif %}>
+            <summary>
+              <span class="dx-power-offset-now">Offset {% if _mv or _pct %}{{ '%+d' % _mv }} mV, {{ '%+d' % _pct }} %{% else %}none{% endif %}</span>
+              <span class="dx-power-offset-edit">Edit</span>
+            </summary>
             <div class="field dx-power-offset-fields">
               <label class="dx-power-offset" for="{{ section.id }}-bo-mv">
                 <input type="number" id="{{ section.id }}-bo-mv" name="battery_offset_mv"
@@ -674,18 +686,12 @@
                 <span class="dx-power-unit">%</span>
               </label>
             </div>
-          </div>
+            <p class="dx-power-offset-help">Match a voltmeter: mV is added to the reported voltage, % on top of that. Only displayed numbers change.</p>
+          </details>
         </div>
         {%- endmacro %}
         {% if section.battery_card %}
-        <div class="dx-subgroup dx-power-chart" id="battery-history" data-devsub>
-          <div class="dx-subgroup-head">
-            <div class="dx-subgroup-titles">
-              <h4 class="device-subhead dx-subgroup-title">Battery history</h4>
-              <p class="dx-subgroup-desc">The last 7 days, with each wake-up and why it happened.</p>
-            </div>
-            <a class="dx-btn is-sm" href="{{ url_for('device_battery.index') }}"><i class="ph ph-arrow-square-out" aria-hidden="true"></i><span>All batteries</span></a>
-          </div>
+        <div class="dx-power-chart" id="battery-history">
           {{ battery_chart(section.battery_card) }}
           {#- Battery (with its display offsets) joins the stat tiles' grid. -#}
           {% call battery_stat_tiles(section.battery_card) %}{{ _battery_reading('dx-stat-tile') }}{% endcall %}
@@ -916,6 +922,7 @@
               <p class="field-help" style="margin: 8px 0 4px;">Raw instance manifest (secrets masked):</p>
               <pre class="code-snippet dx-debug-json"><code>{{ section.debug_info.raw_manifest_json }}</code></pre>
             </div>
+            <p class="dx-power-offset-help">Match a voltmeter: mV is added to the reported voltage, % on top of that. Only displayed numbers change.</p>
           </details>
           {% endif %}
         </div>
