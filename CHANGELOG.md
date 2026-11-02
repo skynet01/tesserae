@@ -8,36 +8,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
-- Device batteries: the chart marks each wake-up with a dot on the line, and
-  the dot says why the device woke. Tesserae combines the device's own reason
-  (Visionect `connect_reason`, a REST client's `wake_reason` / `reset_reason`,
-  an abnormal-reset report) with what it pushed to that display just before,
-  from the event log. A reconnect, reboot, power on, brownout or crash wins;
-  otherwise a push takes the credit (Home Assistant, a button or touch, a manual
-  push, a lineup or schedule by name, a webhook), and a Visionect "by server
-  request" connection takes the cause of the push that asked for it. A wake with
-  nothing pushed is a scheduled check-in, and one that picked up a push made
-  while the display slept says so ("Scheduled check-in, picked up Lineup update:
-  Morning"). Each cause has its own dot shape and colour, with a key under the
-  chart showing only the causes present. Hovering a dot, or stepping to it with
-  the arrow keys once the chart has focus, shows the time, the charge, the cause
-  and the raw device reason. Every battery sample is a check-in (the steady
-  heartbeat is not in the event log); two event-log queries cover the whole page
-  and a chart draws at most 120 dots. The chart, dots, key and stat tiles are a
-  reusable component (`templates/_battery_chart.html`, `static/battery-chart.js`,
-  built by `app.battery_chart.build_battery_chart`) so the device page can embed
-  the same card for one device.
-- Device batteries: a "Wakes / day" tile for every device, Visionect included
-  (it is a measurement, not a prediction), with a breakdown by cause such as "34
-  check-ins, 6 lineup, 2 HA, 1 reconnect/restart". It counts every wake over the
-  time the device has been reporting inside the selected window.
-- Device batteries: spans with no readings are drawn as such. When two samples
-  are further apart than 2.5 times the device's usual interval (and at least 20
-  minutes), the line breaks, a muted dashed connector joins the real readings
-  either side across a hatched band, and hovering the band says "Asleep
-  23:02-09:33 (quiet hours), no readings" when it overlaps the device's quiet
-  hours, otherwise "No readings 14:10-16:40 (offline)". Nothing is interpolated,
-  so the drain estimate still fits only real readings.
+- Device batteries: dots on the chart show each wake-up and why it happened (lineup, Home Assistant, button, manual push, Wi-Fi reconnect or scheduled check-in).
+- Device batteries: a Wakes / day tile with a breakdown by cause.
+- Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.
 - Lineups redesign, part 1 of 3: a view model for the Lineups page and the
   endpoints the new page edits through. `GET /decks/view.json` describes every
   display (what is on screen, what is queued and when a sleeping frame picks it
@@ -105,23 +78,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Changed
 
-- The device page (Settings > Devices > a display) is tidier: the eleven
-  sections are now six, in the sub-nav as Overview, Display, Schedule,
-  Controls (only on devices with buttons or touch), Power and
-  Troubleshooting, with Remove staying at the bottom as the danger zone.
-  Display holds Identity, Panel and Rendering; Schedule holds Timing (wake
-  interval, synchronized wake, quiet hours) and Lineups; Troubleshooting
-  holds Connection (with the firmware and OTA chips), Logs and Diagnostics.
-  Every control is still there, grouped under small sub-headings. The old
-  anchors (`#identity`, `#rendering`, `#timing`, `#lineups`, `#connection`,
-  `#logs`) still jump to the right place, and saving a field still returns you
-  to the part you edited. Each section collapses from its header or chevron
-  button, and the choice is remembered per section in the browser; a jump or
-  a `#link` into a collapsed section opens it. The Showing, Battery,
-  Firmware and Next update tiles are now links to the settings behind them,
-  from the device page and from the Devices quick panel. Power's battery
-  offsets sit inside the battery tile, with their explanation behind its info
-  icon.
+- Device page: six collapsible sections instead of eleven, the top tiles jump to their section, and the battery offsets sit inside the Power tile.
 
 - Lineups redesign, part 2 of 3: the Lineups page is rebuilt on the view model
   from part 1. Each display gets a header that says what is on screen (the
@@ -170,28 +127,11 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
-- A Visionect sign that sleeps through quiet hours no longer shows as holding
-  a picture it has not received. The Lineups header and step thumbnails, the
-  device page and the Settings > Devices row took the newest render as "on the
-  glass" for every display except a pull (REST) one, so lineup frames pushed
-  at 06:00 while the frame slept all looked delivered, with no Queued notice,
-  until it woke at 09:30. A sign now reports what it holds: each picture it
-  ACKs is recorded as served (kept in `latest_renders.json`, so a restart
-  remembers it), and the pages show that picture with the newer one Queued and
-  the sign's next wake as the pickup time, then switch when it ACKs. A sign
-  that has not ACKed anything the server remembers keeps the old reading. The
-  Companion API's `has_pending_render`, `current_frame_at` and the default
-  `/preview` follow the same record for a sign.
+- Visionect: a sleeping frame shows the picture it actually holds, with newer ones marked Queued until it wakes.
 
-- Device batteries: the chart hover tooltip is readable in the dark theme. It
-  used the foreground colour as its background with white text, which is a
-  light box with white text on a dark page; it now uses the raised surface,
-  border and text tokens, so it reads in light and dark, Classic and Paper,
-  and follows the theme switch without a reload.
-- Device batteries: a Visionect frame no longer shows drain rate, reaches 20%,
-  reaches 0% or charging estimates, or the "need 8 samples" hint. The chart,
-  percentage, sample count and Clear battery history stay.
-- History: a 12-hour time (`10:15:06 AM`) no longer runs under the row's thumbnail; the time column fits it.
+- Device batteries: the chart tooltip is readable in the dark theme.
+- Device batteries: Visionect frames no longer show drain predictions.
+- History: 12-hour times no longer overlap the thumbnail.
 
 - A lineup step that lands a pre-rendered frame now shows up everywhere the
   newest push is read. Home Assistant's Next and Previous, a physical button,
