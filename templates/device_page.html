@@ -678,26 +678,31 @@
           {{ battery_stat_tiles(section.battery_card) }}
         </div>
         {% endif %}
-        <div class="dx-power-grid">
-          <div class="dx-qtile">
+        {#- One tile: the reading, and the display offsets that adjust it. -#}
+        <div class="dx-qtile dx-power-tile">
+          <div class="dx-power-reading">
             <span class="dx-qtile-label">Battery</span>
             <span class="dx-qtile-value{% if section.overview.battery.muted %} is-muted{% endif %}{% if section.overview.battery.low %} is-warn{% endif %}">{{ section.overview.battery.value }}</span>
             <span class="dx-qtile-sub">{{ section.overview.battery.sub }}</span>
           </div>
-          {{ number_input(section.id ~ '-bo-mv', 'battery_offset_mv', 'mV offset',
-              value=section.battery_offset.get('mv', 0), min=-2000, max=2000, step=10,
-              help='Added to the device-reported voltage (mV) before display. Positive bumps up, negative bumps down. Range ±2000 mV.',
-              form=_combined_form_id) }}
-          {{ number_input(section.id ~ '-bo-pct', 'battery_offset_pct', '% offset',
-              value=section.battery_offset.get('pct', 0), min=-100, max=100, step=1,
-              help='Added to the displayed percent on top of the mV-derived bump. Range ±100.',
-              form=_combined_form_id) }}
+          <div class="dx-power-offsets">
+            <span class="dx-qtile-label">Display offset{{ info_pop('Adjust the displayed battery to match a voltmeter reading. The mV offset is added to the device-reported voltage (±2000 mV); the % offset is added to the displayed percent on top of that (±100). Raw values stay in the history store unchanged; only the displayed numbers (here, on the battery page and on Home Assistant sensors) shift. Both zero means no override.') }}</span>
+            <div class="dx-power-offset-fields">
+              <label class="dx-power-offset" for="{{ section.id }}-bo-mv">
+                <input type="number" id="{{ section.id }}-bo-mv" name="battery_offset_mv"
+                       value="{{ section.battery_offset.get('mv', 0) }}" min="-2000" max="2000" step="10"
+                       form="{{ _combined_form_id }}" aria-label="Voltage offset (mV)">
+                <span class="dx-power-unit">mV</span>
+              </label>
+              <label class="dx-power-offset" for="{{ section.id }}-bo-pct">
+                <input type="number" id="{{ section.id }}-bo-pct" name="battery_offset_pct"
+                       value="{{ section.battery_offset.get('pct', 0) }}" min="-100" max="100" step="1"
+                       form="{{ _combined_form_id }}" aria-label="Percent offset">
+                <span class="dx-power-unit">%</span>
+              </label>
+            </div>
+          </div>
         </div>
-        <p class="field-help" style="margin-top: 10px;">
-          Adjust the displayed battery to match a voltmeter reading. Raw values stay in the
-          history store unchanged; only the displayed numbers (here, on the battery page and
-          on Home Assistant sensors) shift. Both zero means no override.
-        </p>
       </div>
     </section>
     {% endif %}
