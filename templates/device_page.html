@@ -665,29 +665,16 @@
     <section class="dx-section-card dx-devsec" id="power" data-devsec>
       {{ devsec_head('power', 'battery-charging', 'Power', 'Battery as reported, with display offsets.') }}
       <div class="dx-section-body" id="power-body">
-        {% if section.battery_card %}
-        <div class="dx-subgroup dx-power-chart" id="battery-history" data-devsub>
-          <div class="dx-subgroup-head">
-            <div class="dx-subgroup-titles">
-              <h4 class="device-subhead dx-subgroup-title">Battery history</h4>
-              <p class="dx-subgroup-desc">The last 7 days, with each wake-up and why it happened.</p>
-            </div>
-            <a class="dx-btn is-sm" href="{{ url_for('device_battery.index') }}"><i class="ph ph-arrow-square-out" aria-hidden="true"></i><span>All batteries</span></a>
-          </div>
-          {{ battery_chart(section.battery_card) }}
-          {{ battery_stat_tiles(section.battery_card) }}
-        </div>
-        {% endif %}
-        {#- One tile: the reading, and the display offsets that adjust it. -#}
-        <div class="dx-qtile dx-power-tile">
+        {%- macro _battery_reading(tile_class) -%}
+        <div class="{{ tile_class }} dx-power-tile">
           <div class="dx-power-reading">
-            <span class="dx-qtile-label">Battery</span>
-            <span class="dx-qtile-value{% if section.overview.battery.muted %} is-muted{% endif %}{% if section.overview.battery.low %} is-warn{% endif %}">{{ section.overview.battery.value }}</span>
-            <span class="dx-qtile-sub">{{ section.overview.battery.sub }}</span>
+            <span class="dx-stat-label">Battery</span>
+            <span class="dx-stat-value{% if section.overview.battery.muted %} is-muted{% endif %}{% if section.overview.battery.low %} is-warn{% endif %}">{{ section.overview.battery.value }}</span>
+            <span class="dx-stat-sub">{{ section.overview.battery.sub }}</span>
           </div>
           <div class="dx-power-offsets">
-            <span class="dx-qtile-label">Display offset{{ info_pop('Adjust the displayed battery to match a voltmeter reading. The mV offset is added to the device-reported voltage (±2000 mV); the % offset is added to the displayed percent on top of that (±100). Raw values stay in the history store unchanged; only the displayed numbers (here, on the battery page and on Home Assistant sensors) shift. Both zero means no override.') }}</span>
-            <div class="dx-power-offset-fields">
+            <span class="dx-stat-label">Display offset{{ info_pop('Adjust the displayed battery to match a voltmeter reading. The mV offset is added to the device-reported voltage (±2000 mV); the % offset is added to the displayed percent on top of that (±100). Raw values stay in the history store unchanged; only the displayed numbers (here, on the battery page and on Home Assistant sensors) shift. Both zero means no override.') }}</span>
+            <div class="field dx-power-offset-fields">
               <label class="dx-power-offset" for="{{ section.id }}-bo-mv">
                 <input type="number" id="{{ section.id }}-bo-mv" name="battery_offset_mv"
                        value="{{ section.battery_offset.get('mv', 0) }}" min="-2000" max="2000" step="10"
@@ -703,6 +690,24 @@
             </div>
           </div>
         </div>
+        {%- endmacro %}
+        {% if section.battery_card %}
+        <div class="dx-subgroup dx-power-chart" id="battery-history" data-devsub>
+          <div class="dx-subgroup-head">
+            <div class="dx-subgroup-titles">
+              <h4 class="device-subhead dx-subgroup-title">Battery history</h4>
+              <p class="dx-subgroup-desc">The last 7 days, with each wake-up and why it happened.</p>
+            </div>
+            <a class="dx-btn is-sm" href="{{ url_for('device_battery.index') }}"><i class="ph ph-arrow-square-out" aria-hidden="true"></i><span>All batteries</span></a>
+          </div>
+          {{ battery_chart(section.battery_card) }}
+          {#- Battery (with its display offsets) joins the stat tiles' grid. -#}
+          {% call battery_stat_tiles(section.battery_card) %}{{ _battery_reading('dx-stat-tile') }}{% endcall %}
+        </div>
+        {% else %}
+        {#- No history yet: the reading and offsets on their own. -#}
+        {{ _battery_reading('dx-qtile') }}
+        {% endif %}
       </div>
     </section>
     {% endif %}

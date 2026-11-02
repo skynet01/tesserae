@@ -4440,11 +4440,16 @@ a.dx-qtile--link:focus-visible { outline: 2px solid var(--t-accent); outline-off
   gap: 12px 24px;
   max-width: 560px;
 }
+/* With history the reading is one tile in the chart's stat grid (3 across). */
+.dx-power-chart .dx-battery-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.dx-stat-tile.dx-power-tile { display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 16px; max-width: none; }
+@media (max-width: 720px) { .dx-power-chart .dx-battery-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .dx-power-reading { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; text-align: left; }
 .dx-power-offsets { display: flex; flex-direction: column; gap: 6px; }
-.dx-power-offset-fields { display: flex; gap: 8px; }
-.dx-power-offset { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
-.dx-power-offset input[type="number"] { width: 84px; padding: 6px 8px; font-size: 13px; }
+/* ``.field`` gives the offset inputs the app's standard input look. */
+.field.dx-power-offset-fields { display: flex; gap: 8px; }
+.field.dx-power-offset-fields > .dx-power-offset { display: inline-flex; flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 6px; margin: 0; font-weight: 400; }
+.field.dx-power-offset-fields input[type="number"] { width: 84px; }
 .dx-power-unit { font-size: 12px; color: var(--dx-faint); font-family: var(--t-font-mono); }
 
 /* Connection: header tags (.tg) + wider dl. */
