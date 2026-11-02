@@ -189,6 +189,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Device batteries: a Visionect frame no longer shows drain rate, reaches 20%,
   reaches 0% or charging estimates, or the "need 8 samples" hint. The chart,
   percentage, sample count and Clear battery history stay.
+- History: a 12-hour time (`10:15:06 AM`) no longer runs under the row's thumbnail; the time column fits it.
+
 - A lineup step that lands a pre-rendered frame now shows up everywhere the
   newest push is read. Home Assistant's Next and Previous, a physical button,
   a tap, the companion API, the Lineups page's step and a home return could
