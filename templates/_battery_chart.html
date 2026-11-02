@@ -39,7 +39,9 @@ Macros:
                              in this window."
   battery_stat_tiles(card)   the tile grid: Samples and Wakes / day for every
                              device, predictions only where they apply (+ the
-                             not-enough-samples hint).
+                             not-enough-samples hint). Use it as a
+                             {% call %} block to append the caller's tiles to
+                             the same grid (the device page adds Battery).
 
 The component styles live in static/style/dx-battery.css. Dots, bands and the
 tooltip read the theme tokens off <html>, so it needs no per-page colours. The
@@ -182,6 +184,8 @@ static/battery-chart.js (STYLES) and in dx-battery.css (.dx-wake-key).
   </div>
   {% endif %}
   {% endif %}
+  {#- Called with {% call %}: the caller's tile(s) join the same grid. -#}
+  {% if caller is defined %}{{ caller() }}{% endif %}
 </div>
 
 {% if card.predictions_apply and not prediction %}
