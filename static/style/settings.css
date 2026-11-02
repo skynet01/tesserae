@@ -4275,6 +4275,28 @@ select.dx-input:hover {
   align-items: start;
 }
 .dx-devsec .dx-field-grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* Fields fill as many columns as fit (3-4 on a wide page, then 2, then 1)
+   so none sits alone at half width. */
+.dx-devsec .dx-field-grid--auto { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.dx-devsec .dx-field-grid--panel { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+/* Phones: the four numbers pair up (width/height, underscan/rotation) and
+   the action takes its own row. */
+@media (max-width: 600px) {
+  .dx-devsec .dx-field-grid--panel { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dx-devsec .dx-field-grid--panel .dx-field-action { grid-column: 1 / -1; }
+}
+/* A small action that belongs with the fields beside it: a label row (with
+   its info popover) and a button the same height as an input. */
+.dx-devsec .dx-field-action { display: flex; flex-direction: column; align-items: stretch; }
+.dx-devsec .dx-field-action-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--dx-ink-soft, #56564f);
+}
+:root[data-theme="dark"] .dx-devsec .dx-field-action-label { color: var(--t-fg-soft); }
+.dx-devsec .dx-field-action .dx-btn { justify-content: center; min-height: 39px; white-space: nowrap; }
 .dx-devsec .dx-section-body .field label { margin-bottom: 6px; }
 .dx-devsec .dx-section-body .field input:not([type="range"]):not([type="checkbox"]),
 .dx-devsec .dx-section-body .field select,
@@ -4527,7 +4549,7 @@ a.dx-qtile--link:focus-visible { outline: 2px solid var(--t-accent); outline-off
   .dx-subnav::-webkit-scrollbar { display: none; }
   .dx-subnav-link { flex: none; padding: 7px 12px; border-radius: var(--t-radius-sm); border: 1px solid var(--t-border); font-size: 13px; }
   .dx-subnav-link.is-active { border-color: transparent; }
-  .dx-devsec .dx-field-grid,
+  .dx-devsec .dx-field-grid:where(:not(.dx-field-grid--auto)),
   .dx-devsec .dx-field-grid--3,
   .dx-power-grid { grid-template-columns: 1fr; }
 }
