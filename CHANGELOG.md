@@ -89,7 +89,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   button, and the choice is remembered per section in the browser; a jump or
   a `#link` into a collapsed section opens it. The Showing, Battery,
   Firmware and Next update tiles are now links to the settings behind them,
-  from the device page and from the Devices quick panel.
+  from the device page and from the Devices quick panel. Power's battery
+  offsets sit inside the battery tile, with their explanation behind its info
+  icon.
 
 - Lineups redesign, part 2 of 3: the Lineups page is rebuilt on the view model
   from part 1. Each display gets a header that says what is on screen (the
