@@ -29,6 +29,7 @@
 
 {% block title %}{{ _name }}: Devices, Tesserae{% endblock %}
 {% block page_class %}dx-devpage{% endblock %}
+{% from "_battery_chart.html" import battery_chart, battery_stat_tiles, battery_chart_assets %}
 {% block main %}
 <header class="page-head">
   <h1><i class="ph ph-gear-six"></i> Settings</h1>
@@ -664,8 +665,19 @@
     <section class="dx-section-card dx-devsec" id="power" data-devsec>
       {{ devsec_head('power', 'battery-charging', 'Power', 'Battery as reported, with display offsets.') }}
       <div class="dx-section-body" id="power-body">
-        {# BATTERY CHART goes here: include the chart partial between this
-           comment and the tile + offsets grid below. #}
+        {% if section.battery_card %}
+        <div class="dx-subgroup dx-power-chart" id="battery-history" data-devsub>
+          <div class="dx-subgroup-head">
+            <div class="dx-subgroup-titles">
+              <h4 class="device-subhead dx-subgroup-title">Battery history</h4>
+              <p class="dx-subgroup-desc">The last 7 days, with each wake-up and why it happened.</p>
+            </div>
+            <a class="dx-btn is-sm" href="{{ url_for('device_battery.index') }}"><i class="ph ph-arrow-square-out" aria-hidden="true"></i><span>All batteries</span></a>
+          </div>
+          {{ battery_chart(section.battery_card) }}
+          {{ battery_stat_tiles(section.battery_card) }}
+        </div>
+        {% endif %}
         <div class="dx-power-grid">
           <div class="dx-qtile">
             <span class="dx-qtile-label">Battery</span>
@@ -975,4 +987,5 @@
 
 {% include '_token_reveal_modal.html' %}
 <script src="{{ url_for('static', filename='render-sync.js') }}"></script>
+{% if section.battery_card %}{{ battery_chart_assets() }}{% endif %}
 {% endblock %}

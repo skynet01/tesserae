@@ -4428,6 +4428,8 @@ a.dx-qtile--link:focus-visible { outline: 2px solid var(--t-accent); outline-off
 .dx-band-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 
 /* Power: tile + two offsets. */
+.dx-power-chart { margin-bottom: var(--t-space-4, 16px); }
+.dx-power-chart .dx-subgroup-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .dx-power-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

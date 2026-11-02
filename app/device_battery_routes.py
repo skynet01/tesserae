@@ -170,6 +170,36 @@ def index() -> str:
     )
 
 
+def device_card(device_id: str, *, window_days: int = 7) -> dict[str, Any] | None:
+    """The battery chart card for ONE device, as the Batteries page builds it,
+    for the device page's Power section. ``None`` when the device has no
+    battery history and no current reading (nothing to draw)."""
+    store = _history()
+    registry = _registry()
+    device = registry.get(device_id) if registry is not None else None
+    if store is None or device is None:
+        return None
+    current = _current_battery_per_device().get(device_id)
+    if current is None and device_id not in set(store.device_ids()):
+        return None
+    mv_off, pct_off = get_offset(device.manifest)
+    events = load_wake_events(
+        current_app.config.get("EVENT_LOG"), [device_id], window_days=window_days
+    )
+    return build_battery_chart(
+        device_id,
+        history=store,
+        window_days=window_days,
+        name=device.display_name,
+        device=device,
+        current=current,
+        mv_offset=mv_off,
+        pct_offset=pct_off,
+        events=events.get(device_id, WakeEvents()),
+        **app_chart_options(current_app.config, device),
+    )
+
+
 @bp.get("/<device_id>/series.json")
 def series_json(device_id: str) -> Any:
     """JSON dump of the offset-adjusted points for one device, for
