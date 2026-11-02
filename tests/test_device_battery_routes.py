@@ -499,7 +499,7 @@ def test_cards_embed_wake_dots_with_reasons(app: Flask) -> None:
     )
     body = client.get("/devices/battery?window=7").get_data(as_text=True)
     assert "data-wakes=" in body
-    assert "Server request" in body
+    assert "by server request" in body  # the raw reason rides along
     assert "Scheduled check-in" in body
     # Component wiring: shared script, keyboard-focusable canvas.
     assert "battery-chart.js" in body
