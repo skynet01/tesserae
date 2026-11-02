@@ -378,3 +378,135 @@ def test_a_gap_outside_quiet_hours_reads_as_offline(served: tuple[str, Flask]) -
         body = page.evaluate(_TIP_TEXT_JS)["body"][0]
         browser.close()
     assert body.startswith("No readings ") and body.endswith("(offline)")
+
+
+ATTIC = "article[data-lf-text$=' attic_esp']"
+BUSY = "article[data-lf-text$=' busy_esp']"
+
+
+def _state(page: Any, card: str) -> dict[str, Any]:
+    """A card's chart window, wakes, samples tile and pressed range."""
+    return page.evaluate(
+        """(card) => {
+          const root = document.querySelector(card);
+          const canvas = root.querySelector('canvas.battery-chart');
+          const chart = Chart.getChart(canvas);
+          const tile = (label) => [...root.querySelectorAll('.dx-stat-tile')]
+            .find((t) => t.querySelector('.dx-stat-label').textContent.trim() === label);
+          const pressed = [...root.querySelectorAll('.dx-battery-range button')]
+            .filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.textContent);
+          return { hours: Number(canvas.dataset.windowHours), series: JSON.parse(canvas.dataset.series).length,
+                   samples: Number(tile('Samples').querySelector('.dx-stat-value').textContent),
+                   pressed, xmin: chart.scales.x.min, xmax: chart.scales.x.max,
+                   resetHidden: root.querySelector('[data-battery-zoom-reset]').hidden,
+                   resetShown: getComputedStyle(root.querySelector('[data-battery-zoom-reset]')).display !== 'none' };
+        }""",
+        card,
+    )
+
+
+def test_each_chart_has_its_own_range_that_survives_a_reload(served: tuple[str, Flask]) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, app = served
+    with sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
+        _open(page, base, app, ui="classic", theme="light")  # page default: 1 day
+        before = _state(page, ATTIC)
+        busy_before = _state(page, BUSY)
+        assert before["hours"] == 24 and before["pressed"] == ["24h"]
+
+        # 12h: only this card changes, without a reload, tiles included.
+        page.click(f"{ATTIC} .dx-battery-range button[data-hours='12']")
+        page.wait_for_function(
+            "(c) => document.querySelector(c + ' canvas').dataset.windowHours === '12'", arg=ATTIC
+        )
+        after = _state(page, ATTIC)
+        assert after["pressed"] == ["12h"]
+        assert 0 < after["series"] < before["series"] and after["samples"] == after["series"]
+        assert _state(page, BUSY) == busy_before
+        if os.environ.get("BATTERY_SHOTS"):
+            page.screenshot(path=str(Path(os.environ["BATTERY_SHOTS"]) / "batteries-12h.png"))
+        assert after["xmax"] - after["xmin"] <= 12 * 3600 * 1000 + 1
+
+        # The choice is remembered per device: a reload opens this card on 12h.
+        page.reload()
+        page.wait_for_function(
+            "(c) => document.querySelector(c + ' canvas').dataset.windowHours === '12'", arg=ATTIC
+        )
+        assert _state(page, ATTIC)["pressed"] == ["12h"]
+        assert _state(page, BUSY)["hours"] == 24
+
+        # And it switches back, key and tiles following.
+        page.click(f"{ATTIC} .dx-battery-range button[data-hours='168']")
+        page.wait_for_function(
+            "(c) => document.querySelector(c + ' canvas').dataset.windowHours === '168'", arg=ATTIC
+        )
+        assert _state(page, ATTIC)["pressed"] == ["7d"]
+        browser.close()
+
+
+def test_dragging_across_a_chart_zooms_and_reset_undoes_it(served: tuple[str, Flask]) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, app = served
+    with sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
+        _open(page, base, app, ui="paper", theme="dark")
+        whole = _state(page, ATTIC)
+        assert whole["resetHidden"] is True and whole["resetShown"] is False  # truly not displayed
+        box = page.evaluate(
+            """(card) => { const c = document.querySelector(card + ' canvas');
+              const a = Chart.getChart(c).chartArea; const r = c.getBoundingClientRect();
+              return { x0: r.left + a.left + (a.right - a.left) * 0.3,
+                       x1: r.left + a.left + (a.right - a.left) * 0.6,
+                       y: r.top + (a.top + a.bottom) / 2 }; }""",
+            ATTIC,
+        )
+        page.mouse.move(box["x0"], box["y"])
+        page.mouse.down()
+        page.mouse.move((box["x0"] + box["x1"]) / 2, box["y"], steps=4)
+        page.mouse.move(box["x1"], box["y"], steps=4)
+        page.mouse.up()
+        zoomed = _state(page, ATTIC)
+        assert zoomed["resetHidden"] is False and zoomed["resetShown"] is True
+        if os.environ.get("BATTERY_SHOTS"):
+            page.screenshot(path=str(Path(os.environ["BATTERY_SHOTS"]) / "batteries-zoomed.png"))
+        assert (zoomed["xmax"] - zoomed["xmin"]) < 0.4 * (whole["xmax"] - whole["xmin"])
+        # Dots outside the zoomed span are not drawn.
+        shown = page.evaluate(
+            "(c) => Chart.getChart(document.querySelector(c + ' canvas')).data.datasets[1].data.length",
+            ATTIC,
+        )
+        assert shown < whole["series"]
+        page.click(f"{ATTIC} [data-battery-zoom-reset]")
+        reset = _state(page, ATTIC)
+        assert reset["resetHidden"] is True and reset["xmin"] == whole["xmin"]
+        browser.close()
+
+
+def test_clear_history_is_a_small_quiet_link_in_the_cards_top_right(
+    served: tuple[str, Flask],
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, app = served
+    with sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
+        _open(page, base, app, ui="classic", theme="light")
+        geo = page.evaluate(
+            """(card) => { const root = document.querySelector(card);
+              const link = root.querySelector('.dx-battery-clear button').getBoundingClientRect();
+              const r = root.getBoundingClientRect();
+              const chart = root.querySelector('.dx-battery-chartbox').getBoundingClientRect();
+              return { right: r.right - link.right, top: link.top - r.top,
+                       chartTop: chart.top - r.top, w: link.width, h: link.height }; }""",
+            ATTIC,
+        )
+        browser.close()
+    assert geo["top"] < geo["chartTop"]  # in the header, above the chart
+    assert geo["right"] < 40  # against the right edge
+    assert geo["h"] < 24 and geo["w"] < 160  # text-sized, not a big button

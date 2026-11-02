@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 from flask import Flask
@@ -504,3 +505,74 @@ def test_cards_embed_wake_dots_with_reasons(app: Flask) -> None:
     # Component wiring: shared script, keyboard-focusable canvas.
     assert "battery-chart.js" in body
     assert 'tabindex="0"' in body
+
+
+def _seeded(app: Flask, device_id: str = "attic", kind: str = "esp32_client") -> Any:
+    """A signed-in client, and ``device_id`` registered with a day of samples."""
+    client = app.test_client()
+    _sign_in(client)
+    _add(client, device_id, kind)
+    store: BatteryHistory = app.config["BATTERY_HISTORY"]
+    now = time.time()
+    for i in range(48):  # a sample every 30 minutes for a day
+        store.record(device_id, pct=90 - i // 4, timestamp=now - (48 - i) * 1800)
+    return client
+
+
+def test_card_json_returns_the_builder_shape_for_the_asked_range(app: Flask) -> None:
+    client = _seeded(app)
+    day = client.get("/devices/battery/attic/card.json?hours=24").get_json()
+    half = client.get("/devices/battery/attic/card.json?hours=12").get_json()
+    for key in (
+        "series",
+        "wakes",
+        "gaps",
+        "legend",
+        "wake_stats",
+        "prediction",
+        "samples",
+        "predictions_apply",
+        "window_hours",
+        "window_label",
+        "ranges",
+        "tiles_html",
+        "hint_html",
+        "legend_html",
+    ):
+        assert key in day, key
+    assert day["window_hours"] == 24 and half["window_hours"] == 12
+    assert half["window_label"] == "12 hours"
+    assert 0 < half["samples"] < day["samples"] == len(day["series"])
+    assert [r["label"] for r in half["ranges"] if r["pressed"]] == ["12h"]
+    # The swapped-in HTML is the macros' own, for this range.
+    assert "data-battery-tile" in half["tiles_html"] and "Wakes / day" in half["tiles_html"]
+    assert f'<div class="dx-stat-value">{half["samples"]}</div>' in half["tiles_html"]
+    assert "dx-wake-legend" in half["legend_html"]
+
+
+def test_card_json_clamps_the_range_and_404s_unknown_devices(app: Flask) -> None:
+    client = _seeded(app)
+    assert (
+        client.get("/devices/battery/attic/card.json?hours=99999").get_json()["window_hours"]
+        == 90 * 24
+    )
+    assert client.get("/devices/battery/attic/card.json?hours=0").get_json()["window_hours"] == 1
+    assert (
+        client.get("/devices/battery/attic/card.json?hours=junk").get_json()["window_hours"] == 168
+    )
+    assert client.get("/devices/battery/nobody/card.json").status_code == 404
+
+
+def test_card_json_for_a_visionect_frame_has_no_prediction(app: Flask) -> None:
+    client = _seeded(app, "hall_frame", "visionect_place_and_play_32")
+    card = client.get("/devices/battery/hall_frame/card.json?hours=24").get_json()
+    assert card["predictions_apply"] is False and card["prediction"] is None
+    assert "Drain rate" not in card["tiles_html"] and "Wakes / day" in card["tiles_html"]
+
+
+def test_clear_history_link_is_in_the_card_header_and_keeps_its_confirm(app: Flask) -> None:
+    client = _seeded(app)
+    body = client.get("/devices/battery").get_data(as_text=True)
+    head = body[body.index('class="dx-battery-head"') : body.index("dx-battery-chartbox")]
+    assert "Clear battery history" in head and "return confirm(" in head
+    assert 'action="/devices/battery/attic/clear"' in head

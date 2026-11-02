@@ -30,11 +30,13 @@ from flask import (
 )
 
 from app.battery_chart import (
+    MAX_WINDOW_HOURS,
     WakeEvents,
     app_chart_options,
     build_battery_chart,
     load_wake_events,
     prediction_dict,
+    render_card_parts,
 )
 from app.battery_offset import apply_to_mv, apply_to_pct, get_offset
 from app.device_loader import DeviceRegistry
@@ -168,6 +170,58 @@ def index() -> str:
         window_options=(1, 3, 7, 14, 30, 90),
         now_ms=int(time.time() * 1000),
     )
+
+
+def device_card(
+    device_id: str, *, window_days: float | None = None, window_hours: float | None = None
+) -> dict[str, Any] | None:
+    """The battery chart card for ONE device, as the Batteries page builds it,
+    for the device page's Power section and the per-chart range endpoint.
+    The window is ``window_hours`` when given, else ``window_days`` (default 7).
+    ``None`` when the device is not registered or has no battery history and no
+    current reading (nothing to draw)."""
+    store = _history()
+    registry = _registry()
+    device = registry.get(device_id) if registry is not None else None
+    if store is None or device is None:
+        return None
+    current = _current_battery_per_device().get(device_id)
+    if current is None and device_id not in set(store.device_ids()):
+        return None
+    mv_off, pct_off = get_offset(device.manifest)
+    hours = window_hours if window_hours is not None else (window_days or WINDOW_DAYS_DEFAULT) * 24
+    events = load_wake_events(current_app.config.get("EVENT_LOG"), [device_id], window_hours=hours)
+    return build_battery_chart(
+        device_id,
+        history=store,
+        window_hours=hours,
+        name=device.display_name,
+        device=device,
+        current=current,
+        mv_offset=mv_off,
+        pct_offset=pct_off,
+        events=events.get(device_id, WakeEvents()),
+        **app_chart_options(current_app.config, device),
+    )
+
+
+@bp.get("/<device_id>/card.json")
+def card_json(device_id: str) -> Any:
+    """One device's chart card for a window of ``?hours=`` (1 to 2160, default
+    168), in the shape ``build_battery_chart`` returns plus the HTML the page
+    swaps in when a chart's own range changes: ``tiles_html``, ``hint_html`` and
+    ``legend_html``. Same offsets and wake attribution as the page itself."""
+    if _history() is None:
+        return jsonify({"error": "battery history store not configured"}), 503
+    try:
+        hours = float(request.args.get("hours", WINDOW_DAYS_DEFAULT * 24))
+    except (TypeError, ValueError):
+        hours = WINDOW_DAYS_DEFAULT * 24
+    hours = min(max(hours, 1.0), float(MAX_WINDOW_HOURS))
+    card = device_card(device_id, window_hours=hours)
+    if card is None:
+        return jsonify({"error": "no battery data for this device"}), 404
+    return jsonify({**card, **render_card_parts(card)})
 
 
 @bp.get("/<device_id>/series.json")

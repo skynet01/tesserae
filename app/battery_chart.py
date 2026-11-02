@@ -589,12 +589,34 @@ def tone_for(pct: int | None) -> str:
     return "ok"
 
 
+#: The per-chart range buttons: (hours, label). A chart's window need not be
+#: one of these (the Batteries page also offers 3, 14 and 90 days); none is
+#: pressed then.
+RANGES: tuple[tuple[int, str], ...] = ((12, "12h"), (24, "24h"), (168, "7d"), (720, "30d"))
+#: The longest window the JSON endpoint serves.
+MAX_WINDOW_HOURS: int = 90 * 24
+
+
+def window_label(hours: float) -> str:
+    """``12 hours``, ``7 days``: a window as it reads in a sentence."""
+    if hours >= 48 and hours % 24 == 0:
+        return f"{int(hours // 24)} days"
+    if hours == 24:
+        return "24 hours"
+    value = f"{hours:g}"
+    return f"{value} hour" + ("" if hours == 1 else "s")
+
+
 #: Event types the cause of a wake is read from, besides the device's own rows.
 _CONTEXT_TYPES: tuple[str, ...] = ("push", "touch", "scheduler", "rotation", "deck")
 
 
 def load_wake_events(
-    event_log: EventLog | None, device_ids: Sequence[str], *, window_days: float
+    event_log: EventLog | None,
+    device_ids: Sequence[str],
+    *,
+    window_days: float | None = None,
+    window_hours: float | None = None,
 ) -> dict[str, WakeEvents]:
     """The event-log rows behind every card's wakes, two queries for the page:
     the devices' heartbeat rows over the chart window, and the push / touch /
@@ -603,7 +625,8 @@ def load_wake_events(
     :func:`build_battery_chart` as ``events``."""
     if event_log is None or not device_ids:
         return {}
-    since = time.time() - window_days * 86400.0
+    hours = window_hours if window_hours is not None else (window_days or 7) * 24
+    since = time.time() - hours * 3600.0
     status = event_log.device_status_events(list(device_ids), since=since)
     context = event_log.context_events(_CONTEXT_TYPES, since=since - PICKUP_MAX_S)
     links: tuple[EventRow, ...] = tuple(
@@ -659,7 +682,8 @@ def build_battery_chart(
     device_id: str,
     *,
     history: BatteryHistory,
-    window_days: int,
+    window_days: float | None = None,
+    window_hours: float | None = None,
     name: str | None = None,
     device: Any = None,
     current: dict[str, Any] | None = None,
@@ -674,6 +698,7 @@ def build_battery_chart(
 ) -> dict[str, Any]:
     """Everything one device's battery card needs.
 
+    The window is ``window_hours`` when given, else ``window_days`` (default 7).
     ``events`` are the device's pre-fetched event-log rows (from
     :func:`load_wake_events`, two queries for a whole page); when ``None`` and an
     ``event_log`` is given, they are fetched here for this one device.
@@ -689,7 +714,8 @@ def build_battery_chart(
           "id": str, "name": str,
           "current": {...},            # live reading, as passed in
           "pct": int | None, "tone": "ok" | "low" | "critical",
-          "window_days": int,
+          "window_hours": float, "window_days": float, "window_label": str,
+          "ranges": [{"hours", "label", "pressed"}, ...],  # per-chart range buttons
           "samples": int,
           "series": [{"t_ms": int, "pct": int}, ...],            # oldest first
           "wakes": [{"t_ms", "pct", "cat", "label", "detail", "reason"}, ...],
@@ -702,7 +728,9 @@ def build_battery_chart(
           "prediction": {...} | None,  # always None when predictions don't apply
         }
     """
-    rows: list[BatteryRow] = history.recent(device_id, window_days=window_days)
+    hours: float = window_hours if window_hours is not None else (window_days or 7) * 24
+    days = hours / 24
+    rows: list[BatteryRow] = history.recent(device_id, window_days=days)
     series: list[dict[str, Any]] = []
     for row in rows:
         adj = apply_to_pct(row.pct, mv_offset, pct_offset, raw_mv=row.battery_mv)
@@ -710,7 +738,7 @@ def build_battery_chart(
             {"t_ms": int(row.timestamp * 1000), "pct": adj if adj is not None else row.pct}
         )
     if events is None:
-        events = load_wake_events(event_log, [device_id], window_days=window_days).get(
+        events = load_wake_events(event_log, [device_id], window_hours=hours).get(
             device_id, WakeEvents()
         )
     now_ms = int(time.time() * 1000)
@@ -723,8 +751,8 @@ def build_battery_chart(
     )
     for wake in all_wakes:
         wake.pop("reason_label", None)
-    stats = wake_stats(all_wakes, window_days=window_days, now_ms=now_ms)
-    wakes = thin_wakes(all_wakes, start_ms=now_ms - window_days * 86_400_000, end_ms=now_ms)
+    stats = wake_stats(all_wakes, window_days=days, now_ms=now_ms)
+    wakes = thin_wakes(all_wakes, start_ms=now_ms - int(hours * 3_600_000), end_ms=now_ms)
     drawn = {w["cat"] for w in wakes}
     applies = is_battery_predictable(device)
     pct = (current or {}).get("pct")
@@ -734,7 +762,10 @@ def build_battery_chart(
         "current": current or {},
         "pct": pct,
         "tone": tone_for(pct),
-        "window_days": window_days,
+        "window_hours": hours,
+        "window_days": int(days) if days == int(days) else round(days, 3),
+        "window_label": window_label(hours),
+        "ranges": [{"hours": h, "label": lbl, "pressed": h == hours} for h, lbl in RANGES],
         "samples": len(rows),
         "series": series,
         "wakes": wakes,
@@ -749,10 +780,23 @@ def build_battery_chart(
         ),
         "predictions_apply": applies,
         "prediction": (
-            prediction_dict(history.predict(device_id, window_days=window_days))
-            if applies
-            else None
+            prediction_dict(history.predict(device_id, window_days=days)) if applies else None
         ),
+    }
+
+
+def render_card_parts(card: dict[str, Any]) -> dict[str, str]:
+    """The card's server-rendered pieces that change with its range, as HTML
+    for the page to swap in: ``tiles_html`` (the stat tiles), ``hint_html`` (the
+    not-enough-samples note, or empty) and ``legend_html`` (the chart key, or
+    empty). Rendered by the same macros as the first paint."""
+    from flask import current_app
+
+    macros: Any = current_app.jinja_env.get_template("_battery_chart.html").module
+    return {
+        "tiles_html": str(macros.battery_tiles(card)).strip(),
+        "hint_html": str(macros.battery_hint(card)).strip(),
+        "legend_html": str(macros.battery_legend(card)).strip(),
     }
 
 

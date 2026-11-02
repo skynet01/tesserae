@@ -690,3 +690,32 @@ def test_an_unmapped_reason_is_labelled_with_its_own_text() -> None:
     status = [_event(NOW - 100, {"parsed": {"connect_reason": "solar flare"}})]
     wakes = _wakes(_series(-100), status)
     assert wakes[0]["label"] == "solar flare" and wakes[0]["cat"] == "other"
+
+
+@pytest.mark.parametrize(
+    ("hours", "label"),
+    [
+        (1, "1 hour"),
+        (12, "12 hours"),
+        (24, "24 hours"),
+        (72, "3 days"),
+        (168, "7 days"),
+        (720, "30 days"),
+    ],
+)
+def test_window_label(hours: float, label: str) -> None:
+    assert bc.window_label(hours) == label
+
+
+def test_builder_takes_the_window_in_hours_and_days(history: BatteryHistory) -> None:
+    for i in range(48):
+        history.record(DEV, pct=90, timestamp=NOW - (48 - i) * 1800)
+    half = bc.build_battery_chart(DEV, history=history, window_hours=12)
+    day = bc.build_battery_chart(DEV, history=history, window_days=1)
+    default = bc.build_battery_chart(DEV, history=history)
+    assert (half["window_hours"], half["window_days"]) == (12, 0.5)
+    assert (day["window_hours"], day["window_days"]) == (24, 1)
+    assert default["window_hours"] == 168
+    assert 0 < half["samples"] < day["samples"]
+    assert [r["hours"] for r in half["ranges"] if r["pressed"]] == [12]
+    assert not any(r["pressed"] for r in default["ranges"][:2])
