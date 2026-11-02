@@ -486,15 +486,27 @@ def wake_stats(
     order = {c: i for i, c in enumerate(CATEGORIES)}
     ranked = sorted(counts, key=lambda c: (-counts[c], order.get(c, 99)))
     breakdown = [
-        {"cat": c, "name": CATEGORIES.get(c, c), "short": _SHORT.get(c, c), "count": counts[c]}
+        {"cat": c, "name": CATEGORIES.get(c, c), "short": _short(c, counts[c]), "count": counts[c]}
         for c in ranked
     ]
+    parts = [f"{b['count']} {b['short']}" for b in breakdown]
+    # The tile shows the top three causes; the rest fold into "N more" (the
+    # full list is the tile's tooltip).
+    rest = sum(b["count"] for b in breakdown[3:])
+    summary = ", ".join(parts[:3]) + (f", {rest} more" if rest else "")
     return {
         "total": len(wakes),
         "per_day": per_day,
         "breakdown": breakdown,
-        "summary": ", ".join(f"{b['count']} {b['short']}" for b in breakdown),
+        "summary": summary,
+        "summary_full": ", ".join(parts),
     }
+
+
+def _short(cat: str, count: int) -> str:
+    """The breakdown word for ``cat``: singular for one (``1 restart``)."""
+    word = _SHORT.get(cat, cat)
+    return word[:-1] if count == 1 and word.endswith("s") else word
 
 
 # -- gaps ----------------------------------------------------------------

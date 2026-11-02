@@ -145,7 +145,7 @@ static/battery-chart.js (STYLES) and in dx-battery.css (.dx-wake-key).
   <div class="dx-stat-tile" data-battery-tile>
     <div class="dx-stat-label">Wakes / day</div>
     <div class="dx-stat-value">{% if wk.per_day is not none %}{{ '%g' % wk.per_day }}{% else %}—{% endif %}</div>
-    <div class="dx-stat-sub dx-battery-wake-sub" title="{{ wk.total }} wake{{ '' if wk.total == 1 else 's' }} in the window">{{ wk.summary }}</div>
+    <div class="dx-stat-sub dx-battery-wake-sub" title="{{ wk.total }} wake{{ '' if wk.total == 1 else 's' }} in the window: {{ wk.summary_full or wk.summary }}">{{ wk.summary }}</div>
   </div>
   {% endif %}
   {% if card.predictions_apply %}

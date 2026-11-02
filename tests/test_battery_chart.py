@@ -431,7 +431,8 @@ def test_wake_stats_rate_and_breakdown_come_from_the_unthinned_wakes() -> None:
     stats = bc.wake_stats(wakes, window_days=7, now_ms=NOW_MS)
     assert stats["total"] == 43
     assert stats["per_day"] == 43.0  # 43 wakes over the one day the device has reported
-    assert stats["summary"] == "34 check-ins, 6 lineup, 2 HA, 1 restarts"
+    assert stats["summary"] == "34 check-ins, 6 lineup, 2 HA, 1 more"
+    assert stats["summary_full"] == "34 check-ins, 6 lineup, 2 HA, 1 restart"
     assert [b["cat"] for b in stats["breakdown"]] == ["scheduled", "lineup", "ha", "problem"]
 
 
