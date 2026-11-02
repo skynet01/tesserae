@@ -228,6 +228,30 @@ def test_regrouping_loses_no_control(app: Flask) -> None:
         assert text in trouble, text
 
 
+def test_display_fields_share_one_grid_row_with_their_actions(app: Flask) -> None:
+    """Identity, panel and rendering fields sit in multi-column grids, the
+    orientation and calibration actions are small buttons in those grids
+    (not full-width bands), and underscan is a plain number box."""
+    client, dev = _full_device(app)
+    page = client.get(f"/settings/devices/{dev}").get_data(as_text=True)
+    display = _section_html(page, "display")
+    assert display.count("dx-field-grid--auto") == 3
+    assert "dx-band" not in display
+    panel = display[display.index('id="display-panel"') : display.index('id="rendering"')]
+    assert 'type="number" id="device-kitchen-panel-underscan" name="panel_underscan"' in panel
+    assert 'type="range"' not in panel
+    assert f'form="device-{dev}-calibrate"' in panel
+    rendering = display[display.index('id="rendering"') :]
+    assert "Open calibration" in rendering
+    # While the numbered card is out, the answer band appears under the grid.
+    answering = _section_html(
+        client.get(f"/settings/devices/{dev}?calibrating={dev}").get_data(as_text=True),
+        "display",
+    )
+    assert 'id="orientation-card"' in answering
+    assert answering.count(f'form="device-{dev}-calibrate-apply"') == 4
+
+
 def test_overview_tiles_link_to_the_settings_behind_them(app: Flask) -> None:
     client, dev = _full_device(app)
     overview = _section_html(

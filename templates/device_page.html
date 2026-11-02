@@ -217,7 +217,7 @@
               <p class="dx-subgroup-desc">How this display is named.</p>
             </div>
           </div>
-          <div class="dx-field-grid">
+          <div class="dx-field-grid dx-field-grid--auto">
             {{ text_input(section.id ~ '-device-name', 'device_name', 'Display name',
                 value=section.device_name, required=True, form=_combined_form_id) }}
             {% set current_icon = section.icon or 'device-mobile' %}
@@ -255,9 +255,14 @@
               <p class="dx-subgroup-desc">Geometry the composer renders at.</p>
             </div>
           </div>
-          <div class="dx-field-grid dx-field-grid--3">
-            {{ number_input(section.id ~ '-panel-w', 'panel_w', 'Logical panel width (px)', value=section.panel.w, min=1, step=1, form=_combined_form_id) }}
-            {{ number_input(section.id ~ '-panel-h', 'panel_h', 'Logical panel height (px)', value=section.panel.h, min=1, step=1, form=_combined_form_id) }}
+          {% set _panel_help = 'The size dashboards are rendered at, not the physical size the device reports.' %}
+          {% set us_max = [section.panel.w, section.panel.h]|min // 4 %}
+          <div class="dx-field-grid dx-field-grid--auto dx-field-grid--panel">
+            {{ number_input(section.id ~ '-panel-w', 'panel_w', 'Width (px)', value=section.panel.w, min=1, step=1, help=_panel_help, form=_combined_form_id) }}
+            {{ number_input(section.id ~ '-panel-h', 'panel_h', 'Height (px)', value=section.panel.h, min=1, step=1, help=_panel_help, form=_combined_form_id) }}
+            {{ number_input(section.id ~ '-panel-underscan', 'panel_underscan', 'Underscan (px)', value=section.panel.get('underscan', 0), min=0, step=1,
+                help='Inset content by this many pixels on every edge so it clears a mat or bezel.',
+                form=_combined_form_id) }}
             {# Degrees are the turn from the panel's own framebuffer, so a
                portrait-native panel reads 0° when it paints its buffer as-is
                (issue #200). #}
@@ -266,16 +271,14 @@
                 options=section.panel_rotation_options,
                 help='Clockwise turn to match the mount.',
                 form=_combined_form_id) }}
-          </div>
-          <p class="field-help">Composition orientation, the size dashboards are rendered at. Not the physical size the device reports.</p>
-          {% if section.status.reported_panel_hint %}
-          <p class="dx-hint"><i class="ph ph-info" aria-hidden="true"></i> {{ section.status.reported_panel_hint }}</p>
-          {% endif %}
-          <div class="dx-field-grid">
-            {% set us_max = [section.panel.w, section.panel.h]|min // 4 %}
-            {{ slider(section.id ~ '-panel-underscan', 'panel_underscan', 'Underscan', value=section.panel.get('underscan', 0), min=0, max=us_max, step=1, unit='px',
-                help='Inset content by this many pixels on every edge so it clears a mat or bezel.',
-                form=_combined_form_id) }}
+            {% if section.calibrate_endpoint and calibrating != section.device_id %}
+            <div class="field dx-field-action">
+              <span class="dx-field-action-label">Mounting{{ info_pop('Not sure which way it is mounted? Send a numbered card once, then pick the rotation that reads upright.') }}</span>
+              <button type="submit" form="{{ section.id }}-calibrate" class="dx-btn">
+                <i class="ph ph-compass" aria-hidden="true"></i><span>Send orientation card</span>
+              </button>
+            </div>
+            {% endif %}
             {% if section.gamut_capable %}
             {{ select_field(section.id ~ '-gamut', 'panel_gamut', 'Colour gamut',
                 value=section.panel.get('gamut', 'waveshare_e6'),
@@ -284,14 +287,17 @@
                 form=_combined_form_id) }}
             {% endif %}
           </div>
+          {% if section.status.reported_panel_hint %}
+          <p class="dx-hint"><i class="ph ph-info" aria-hidden="true"></i> {{ section.status.reported_panel_hint }}</p>
+          {% endif %}
 
-          {# ORIENTATION CARD BAND. Buttons post to the hoisted calibrate
-             forms via form=""; the 1-4 answer flow appears in the band
-             while ?calibrating=<id> matches. #}
-          {% if section.calibrate_endpoint %}
-          <div class="dx-band{% if calibrating == section.device_id %} is-active{% endif %}" id="orientation-card">
+          {# ORIENTATION CARD ANSWER BAND. The send button sits in the grid
+             above; while ?calibrating=<id> matches, this band takes the
+             1-4 answer. Buttons post to the hoisted calibrate forms via
+             form="". #}
+          {% if section.calibrate_endpoint and calibrating == section.device_id %}
+          <div class="dx-band is-active" id="orientation-card">
             <span class="dx-band-icon" aria-hidden="true"><i class="ph ph-compass"></i></span>
-            {% if calibrating == section.device_id %}
             <div class="dx-band-text">
               <p class="dx-band-title">A numbered card was sent to {{ _name }}. Which number is in the top-left corner?</p>
               <p class="dx-band-desc">Look at the panel and pick the number you see top-left; the rotation is set to match and the card is re-sent to confirm.</p>
@@ -304,17 +310,6 @@
                 <i class="ph ph-arrow-clockwise" aria-hidden="true"></i><span>Re-send card</span>
               </button>
             </div>
-            {% else %}
-            <div class="dx-band-text">
-              <p class="dx-band-title">Not sure which way it is mounted?</p>
-              <p class="dx-band-desc">Send a numbered card once, then pick the rotation that reads upright.</p>
-            </div>
-            <div class="dx-band-actions">
-              <button type="submit" form="{{ section.id }}-calibrate" class="dx-btn">
-                <i class="ph ph-compass" aria-hidden="true"></i><span>Send orientation card</span>
-              </button>
-            </div>
-            {% endif %}
           </div>
           {% endif %}
         </div>
@@ -349,7 +344,7 @@
             </div>
           </div>
           {% endif %}
-          <div class="dx-field-grid">
+          <div class="dx-field-grid dx-field-grid--auto">
             {% if _cd %}
             {% if _cd.enabled %}
             {{ select_field(section.id ~ '-colour-depth', 'renderer_id', 'Colour depth',
@@ -380,6 +375,10 @@
                 help='Overrides the app-wide default for widgets rendered on this device. Only widgets that have shipped a translation for the picked language actually change; others keep their built-in English text.',
                 form=_combined_form_id) }}
             {% endif %}
+            <div class="field dx-field-action">
+              <span class="dx-field-action-label">Colour calibration{{ info_pop('Test patterns, palette recalibration and tone curves live on their own page.') }}</span>
+              <a class="dx-btn" href="{{ section.calibration_url }}"><i class="ph ph-palette" aria-hidden="true"></i><span>Open calibration</span></a>
+            </div>
           </div>
           {% if section.picture_quality %}
           {% for pq in section.picture_quality %}
@@ -393,16 +392,6 @@
           </div>
           {% endfor %}
           {% endif %}
-          <div class="dx-band" style="margin-top: 16px;">
-            <span class="dx-band-icon" aria-hidden="true"><i class="ph ph-palette"></i></span>
-            <div class="dx-band-text">
-              <p class="dx-band-title">Colour calibration</p>
-              <p class="dx-band-desc">Test patterns, palette recalibration and tone curves live on their own page.</p>
-            </div>
-            <div class="dx-band-actions">
-              <a class="dx-btn" href="{{ section.calibration_url }}"><i class="ph ph-palette" aria-hidden="true"></i><span>Open calibration</span></a>
-            </div>
-          </div>
         </div>
       </div>
     </section>
@@ -418,23 +407,20 @@
               <p class="dx-subgroup-desc">When the panel wakes and how long it stays up.</p>
             </div>
           </div>
-          {% if section.fields %}
+          {% if section.fields or section.refresh_mode_capable %}
           <div class="dx-field-grid">
-            {% for field in section.fields %}
+            {% for field in (section.fields or []) %}
               {% set value = section.state.get(field.name, field.get('default', '')) %}
               {{ auto_field(section.id ~ '-' ~ field.name, field.name, field, value, form=_combined_form_id) }}
             {% endfor %}
-          </div>
-          {% endif %}
-
-          {# Update delivery (#271), REST only. #}
-          {% if section.refresh_mode_capable %}
-          <div class="dx-field-grid">
+            {# Update delivery (#271), REST only. #}
+            {% if section.refresh_mode_capable %}
             {{ select_field(section.id ~ '-refresh-mode', 'refresh_mode', 'Update delivery',
                 value=section.refresh_mode, blank_label='Auto (partial refresh when possible)',
                 options=[{'value': 'full', 'label': 'Always full refresh'}],
                 help='Auto delivers small changes as partial-refresh patches on capable firmware and falls back to a full frame on the next poll otherwise. Always full refresh repaints the whole panel on every change; use it if updates look incomplete or ghosted.',
                 form=_combined_form_id) }}
+            {% endif %}
           </div>
           {% endif %}
 
