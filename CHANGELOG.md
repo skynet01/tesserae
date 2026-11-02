@@ -75,23 +75,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Changed
 
-- The device page (Settings > Devices > a display) is tidier: the eleven
-  sections are now six, in the sub-nav as Overview, Display, Schedule,
-  Controls (only on devices with buttons or touch), Power and
-  Troubleshooting, with Remove staying at the bottom as the danger zone.
-  Display holds Identity, Panel and Rendering; Schedule holds Timing (wake
-  interval, synchronized wake, quiet hours) and Lineups; Troubleshooting
-  holds Connection (with the firmware and OTA chips), Logs and Diagnostics.
-  Every control is still there, grouped under small sub-headings. The old
-  anchors (`#identity`, `#rendering`, `#timing`, `#lineups`, `#connection`,
-  `#logs`) still jump to the right place, and saving a field still returns you
-  to the part you edited. Each section collapses from its header or chevron
-  button, and the choice is remembered per section in the browser; a jump or
-  a `#link` into a collapsed section opens it. The Showing, Battery,
-  Firmware and Next update tiles are now links to the settings behind them,
-  from the device page and from the Devices quick panel. Power's battery
-  offsets sit inside the battery tile, with their explanation behind its info
-  icon.
+- Device page: six collapsible sections instead of eleven, the top tiles jump to their section, and the battery offsets sit inside the Power tile.
 
 - Lineups redesign, part 2 of 3: the Lineups page is rebuilt on the view model
   from part 1. Each display gets a header that says what is on screen (the
