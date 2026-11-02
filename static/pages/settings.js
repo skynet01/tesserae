@@ -344,7 +344,22 @@
     const first = targetFromHash();
     if (first && page.contains(first)) {
       const opened = expandDevSecFor(first, true);
-      if (opened || anyCollapsed) first.scrollIntoView({ block: 'start' });
+      if (opened || anyCollapsed) {
+        first.scrollIntoView({ block: 'start' });
+        // Images, fonts and late scripts can still shift the layout (and the
+        // browser may restore its own scroll on load): land on the target
+        // again once the page settles, unless the person has scrolled.
+        let moved = false;
+        const stop = function () { moved = true; };
+        ['wheel', 'touchstart', 'keydown', 'mousedown'].forEach(function (t) {
+          window.addEventListener(t, stop, { once: true, passive: true });
+        });
+        const again = function () {
+          if (!moved) first.scrollIntoView({ block: 'start' });
+        };
+        if (document.readyState === 'complete') requestAnimationFrame(again);
+        else window.addEventListener('load', function () { requestAnimationFrame(again); }, { once: true });
+      }
     }
     window.addEventListener('hashchange', function () {
       const el = targetFromHash();
