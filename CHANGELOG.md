@@ -8,6 +8,20 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
+- Device batteries: the chart marks each wake-up with a dot on the line.
+  Hovering a dot (or stepping to it with the arrow keys once the chart has
+  focus) shows the time, the charge and why the device woke, as a short label
+  (Check-in, Wake-up, Server request, Button, Power on, Reboot, Reconnect after
+  error, Brownout, Watchdog reset) where Tesserae knows the reason, and the raw
+  text where it does not. Every battery sample is a check-in; the reason comes
+  from the heartbeat's event-log row (Visionect `connect_reason`, a REST
+  client's `wake_reason` / `reset_reason`, an abnormal-reset report), which is
+  only written when the status changes, so steady beats read as Check-in. One
+  event-log query covers the whole page, and a chart draws at most 120 dots.
+  The chart, its dots and the stat tiles are now a reusable component
+  (`templates/_battery_chart.html`, `static/battery-chart.js`, built by
+  `app.battery_chart.build_battery_chart`) so the device page can embed the
+  same card for one device.
 - Lineups redesign, part 1 of 3: a view model for the Lineups page and the
   endpoints the new page edits through. `GET /decks/view.json` describes every
   display (what is on screen, what is queued and when a sleeping frame picks it
@@ -122,6 +136,14 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
+- Device batteries: the chart hover tooltip is readable in the dark theme. It
+  used the foreground colour as its background with white text, which is a
+  light box with white text on a dark page; it now uses the raised surface,
+  border and text tokens, so it reads in light and dark, Classic and Paper,
+  and follows the theme switch without a reload.
+- Device batteries: a Visionect frame no longer shows drain rate, reaches 20%,
+  reaches 0% or charging estimates, or the "need 8 samples" hint. The chart,
+  percentage, sample count and Clear battery history stay.
 - A lineup step that lands a pre-rendered frame now shows up everywhere the
   newest push is read. Home Assistant's Next and Previous, a physical button,
   a tap, the companion API, the Lineups page's step and a home return could

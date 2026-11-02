@@ -4,7 +4,9 @@
  *  Per-device sub-cards stacked vertically inside the parent
  *  section card; each carries a header with name + pct, a
  *  Chart.js canvas, and a 4-tile stat grid (samples / drain rate
- *  / reaches 20% / reaches 0%).
+ *  / reaches 20% / reaches 0%; samples only for a Visionect frame).
+ *  The chart + tiles are the reusable component in
+ *  templates/_battery_chart.html, drawn by static/battery-chart.js.
  *
  *  v0.63.5 extracted from settings.css to its own file. No rules
  *  changed, no behaviour change — cascade order preserved because
@@ -81,6 +83,12 @@
   height: 180px;
 }
 .dx-battery-chart .battery-chart { display: block; width: 100% !important; height: 100% !important; }
+/* The chart takes keyboard focus (arrow keys step through wake-up dots). */
+.dx-battery-chart .battery-chart:focus-visible {
+  outline: 2px solid var(--t-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
 
 .dx-battery-empty {
   margin: 0;
