@@ -179,7 +179,10 @@
 
 /* Per-chart range: 12h | 24h | 7d | 30d, above the chart. */
 .dx-battery-chartbox { display: flex; flex-direction: column; gap: 10px; }
-.dx-battery-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 24px; }
+.dx-battery-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; min-height: 24px; }
+.dx-battery-bar-key { flex: 1 1 auto; min-width: 0; }
+.dx-battery-bar-key .dx-wake-legend { margin: 0; }
+.dx-battery-bar-end { display: inline-flex; align-items: center; gap: 12px; margin-left: auto; }
 .dx-battery-range {
   display: inline-flex;
   border: 1px solid var(--t-inset-border);
