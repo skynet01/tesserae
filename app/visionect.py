@@ -407,6 +407,10 @@ class _Context:
     latest_render_fn: Callable[[str], dict[str, Any] | None]
     # PushManager.render_in_progress: a push for this device is under way.
     render_busy_fn: Callable[[str], bool] = lambda _device_id: False
+    # PushManager.record_frame_served: the sign took this render. Blocking
+    # (it takes the manager's lock and may write latest_renders.json), so it
+    # runs on an executor thread, never on the loop.
+    record_served_fn: Callable[[str, dict[str, Any]], None] = lambda _device_id, _render: None
 
 
 @dataclass
@@ -418,6 +422,7 @@ class _Inflight:
     conn: Any  # the DeviceConnection it went out on
     writer: Any
     digest: str = ""
+    render: dict[str, Any] = field(default_factory=dict)  # the latest-render entry behind digest
     checksum: int = 0
     minutes: int = 0
     deadline: float = math.inf  # monotonic; set once the write has finished
@@ -445,6 +450,7 @@ class _Sign:
     trusted_at: float = 0.0  # wall clock of that acknowledgement
     frame: Any = None  # EncodedFrame for frame_digest
     frame_digest: str = ""
+    frame_render: dict[str, Any] = field(default_factory=dict)  # the render entry frame came from
     failed_digest: str = ""  # a latest render that couldn't be read or encoded
     failed_stamp: Any = None  # that render's publication timestamp
     failed_retry_at: float = 0.0  # monotonic; when to try it again
@@ -455,6 +461,10 @@ class _Sign:
     shown_digest: str = ""  # acked by the sign during this run
     shown_checksum: int | None = None  # its state checksum (status tag 9)
     shown_at: float = 0.0  # wall clock of that ACK
+    # (device id, render entry) of the newest ACK not yet handed to the push
+    # manager, and the task draining it: latest wins, one executor job at a time.
+    pending_served: tuple[str, dict[str, Any]] | None = None
+    served_task: asyncio.Task[None] | None = None
     crc_corrected: bool = False  # one corrective resend per mismatch
     corrected_digest: str = ""  # the frame that corrective resend was for
     inflight: _Inflight | None = None  # at most one frame or sleep at a time
@@ -1143,6 +1153,7 @@ class VisionectService:
                     sign.dirty = True
                     return
                 sign.frame, sign.frame_digest = frame, digest
+                sign.frame_render = dict(latest)
                 sign.failed_digest = sign.failed_logged = ""
                 sign.failed_tries = 0
                 sign.repaint_until = 0.0
@@ -1159,6 +1170,7 @@ class VisionectService:
                     sign.shown_digest = digest
                     sign.shown_checksum = int(reported)
                     sign.shown_at = time.time()
+                    self._served(sign, device.id, sign.frame_render)
 
         if not self._alive(sign) or sign.inflight is not None:
             return
@@ -1202,6 +1214,7 @@ class VisionectService:
                 conn=conn,
                 writer=writer,
                 digest=sign.frame_digest,
+                render=sign.frame_render,
                 checksum=checksum,
                 resend_stamp=resend,
             )
@@ -1569,6 +1582,9 @@ class VisionectService:
                     sign.shown_digest = inflight.digest
                     sign.shown_checksum = inflight.checksum
                     sign.shown_at = time.time()
+                    device = self._device_for_uuid(uuid)
+                    if device is not None:
+                        self._served(sign, device.id, inflight.render)
                     if inflight.digest != sign.corrected_digest:
                         # A new desired frame gets its own corrective resend;
                         # the ACK of that resend itself doesn't re-arm it.
@@ -1758,6 +1774,35 @@ class VisionectService:
             sign.shown_checksum,
         )
         sign.shown_digest = ""
+
+    def _served(self, sign: _Sign, device_id: str, render: dict[str, Any]) -> None:
+        """Tell the push manager the sign holds ``render`` (it ACKed the
+        picture, or its CRC says it already shows it), so the Lineups and
+        device pages show what is on the glass and call a newer render queued
+        until the sign takes it. Persisted by the manager next to the latest
+        render, so a restart before the next ACK still knows. Latest wins, one
+        executor job per sign at a time, in ACK order."""
+        if not render.get("digest"):
+            return
+        sign.pending_served = (device_id, dict(render))
+        if sign.served_task is None or sign.served_task.done():
+            task = asyncio.get_running_loop().create_task(self._drain_served(sign))
+            sign.served_task = task
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+
+    async def _drain_served(self, sign: _Sign) -> None:
+        loop = asyncio.get_running_loop()
+        while sign.pending_served is not None:
+            ctx = self._ctx
+            device_id, render = sign.pending_served
+            sign.pending_served = None
+            if ctx is None:
+                return
+            try:
+                await loop.run_in_executor(None, ctx.record_served_fn, device_id, render)
+            except Exception:
+                logger.exception("visionect: recording %s's shown frame failed", device_id)
 
     def _consume_resend(self, uuid: str) -> None:
         """Clear the latest render's one-shot resend flag once the sign has
@@ -2217,6 +2262,9 @@ def register(app: Flask) -> None:
                 renders_dir=Path(renders_dir),
                 latest_render_fn=push_mgr.latest_render_for,
                 render_busy_fn=getattr(push_mgr, "render_in_progress", lambda _d: False),
+                record_served_fn=getattr(
+                    push_mgr, "record_frame_served", lambda _device_id, _render: None
+                ),
             )
         )
         push_mgr.add_listener(svc.on_push)

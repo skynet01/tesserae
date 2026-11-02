@@ -76,7 +76,7 @@
 <div class="dx-thumbs" data-render-sync="thumb:{{ section.get('device_id') }}" data-render-sig="{{ section.overview.sync_sig }}">
 <div {{ color_attrs(section.get("device_id")) }} class="dx-thumb {{ extra_class }}{% if section.panel and section.panel.h and section.panel.w and section.panel.h > section.panel.w %} dx-thumb--portrait{% endif %}"{% if section.overview.has_render and section.panel and section.panel.w and section.panel.h %} style="--thumb-ar: {{ section.panel.w }} / {{ section.panel.h }}"{% endif %}>
   {% if section.overview.has_render %}
-  <img src="{{ section.overview.thumb_url }}" alt="{{ 'Last image fetched by' if section.overview.queued and not section.overview.queued_is_only_thumb else 'Latest render on' }} {{ section.device_name }}" loading="lazy"{% if section.overview.preview_is_artifact|default(false) %} data-device-quantised{% endif %}>
+  <img src="{{ section.overview.thumb_url }}" alt="{{ 'Last image ' ~ section.overview.get('taken_verb', 'fetched') ~ ' by' if section.overview.queued and not section.overview.queued_is_only_thumb else 'Latest render on' }} {{ section.device_name }}" loading="lazy"{% if section.overview.preview_is_artifact|default(false) %} data-device-quantised{% endif %}>
   {% else %}
   <span class="dx-thumb-empty"><i class="ph ph-image" aria-hidden="true"></i><span>No render yet</span></span>
   {% endif %}
@@ -87,7 +87,7 @@
   <figcaption><i class="ph ph-clock-countdown" aria-hidden="true"></i>Queued</figcaption>
 </figure>
 {% elif section.overview.queued_is_only_thumb %}
-<span class="dx-thumb-q-tag" data-device-queued-thumb><i class="ph ph-clock-countdown" aria-hidden="true"></i>Queued, not fetched yet</span>
+<span class="dx-thumb-q-tag" data-device-queued-thumb><i class="ph ph-clock-countdown" aria-hidden="true"></i>Queued, not {{ section.overview.get('taken_verb', 'fetched') }} yet</span>
 {% endif %}
 </div>
 {%- endmacro -%}

@@ -240,6 +240,7 @@ class Harness:
         self.latest: dict[str, Any] | None = None
         self.repaints: list[str] = []
         self.consumed: list[str] = []
+        self.served: list[tuple[str, dict[str, Any]]] = []  # what the sign ACKed
         self.busy = False  # the push pipeline is rendering for the device
         self.app = Flask(__name__)
         self.app.config["SETTINGS_STORE"] = self.settings
@@ -257,6 +258,7 @@ class Harness:
                 renders_dir=self.renders,
                 latest_render_fn=lambda _device_id: self.latest,
                 render_busy_fn=lambda _device_id: self.busy,
+                record_served_fn=lambda device_id, render: self.served.append((device_id, render)),
             )
         )
 
@@ -606,6 +608,51 @@ def test_newer_frame_waits_for_the_ack_of_the_older_one(harness: Harness) -> Non
         sign.ack(first.id)
         assert sign.wait_for(lambda s: len(s.images()) == 2)
         assert sign.images()[1].id != first.id
+    finally:
+        sign.close()
+
+
+def test_an_acked_frame_is_recorded_as_served_with_its_render(harness: Harness) -> None:
+    harness.render("frame-a")
+    harness.latest.update(  # type: ignore[union-attr]
+        preview_digest="prev-a", composition_digest="comp-a", page_id="news", timestamp=100.0
+    )
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        # Sent is not shown: nothing is recorded until the sign ACKs.
+        time.sleep(0.3)
+        assert harness.served == []
+        # A newer render lands while the picture is in flight; what is
+        # recorded is the render the sign was sent, not the newest.
+        newest = dict(harness.latest or {})
+        harness.render("frame-b", shade=128)
+        sign.ack(sign.images()[0].id)
+        assert _wait(lambda: len(harness.served) >= 1)
+        device_id, render = harness.served[0]
+        assert device_id == "lobby"
+        assert render["digest"] == "frame-a"
+        assert render["preview_digest"] == "prev-a"
+        assert render["composition_digest"] == "comp-a"
+        assert render["page_id"] == "news"
+        assert render == newest
+    finally:
+        sign.close()
+
+
+def test_a_refused_frame_is_not_recorded_as_served(harness: Harness, monkeypatch) -> None:
+    monkeypatch.setattr(visionect, "NACK_RETRY_S", 30)
+    harness.render("frame-a")
+    assert harness.svc.start()
+    sign = FakeSign(harness.svc.port)
+    try:
+        sign.status()
+        assert sign.wait_for(lambda s: len(s.images()) == 1)
+        sign.nack(sign.images()[0].id)
+        time.sleep(0.5)
+        assert harness.served == []
     finally:
         sign.close()
 
@@ -1544,6 +1591,8 @@ def test_a_frame_adopted_after_a_restart_keeps_its_glass_check(harness: Harness)
         state = harness.svc._signs[UUID]
         assert state.shown_checksum == checksum and state.shown_at > 0
         assert sign.images() == []  # adopted, not resent
+        # What the sign already holds is the server's served record too.
+        assert _wait(lambda: [r["digest"] for _d, r in harness.served] == ["frame-a"])
         # Much later the sign reports something else: one corrective resend.
         state.shown_at = time.time() - visionect.CRC_CONVERGE_S - 1
         sign.status(with_tag(9, checksum ^ 1))
