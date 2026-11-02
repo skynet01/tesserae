@@ -122,6 +122,19 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
+- A Visionect sign that sleeps through quiet hours no longer shows as holding
+  a picture it has not received. The Lineups header and step thumbnails, the
+  device page and the Settings > Devices row took the newest render as "on the
+  glass" for every display except a pull (REST) one, so lineup frames pushed
+  at 06:00 while the frame slept all looked delivered, with no Queued notice,
+  until it woke at 09:30. A sign now reports what it holds: each picture it
+  ACKs is recorded as served (kept in `latest_renders.json`, so a restart
+  remembers it), and the pages show that picture with the newer one Queued and
+  the sign's next wake as the pickup time, then switch when it ACKs. A sign
+  that has not ACKed anything the server remembers keeps the old reading. The
+  Companion API's `has_pending_render`, `current_frame_at` and the default
+  `/preview` follow the same record for a sign.
+
 - A lineup step that lands a pre-rendered frame now shows up everywhere the
   newest push is read. Home Assistant's Next and Previous, a physical button,
   a tap, the companion API, the Lineups page's step and a home return could
