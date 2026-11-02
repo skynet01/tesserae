@@ -8,7 +8,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
-- Device batteries: dots on the chart show each wake-up and why it happened (lineup, Home Assistant, button, manual push, Wi-Fi reconnect or scheduled check-in).
+- Device batteries: dots on the chart show each wake-up and why it happened (lineup, Home Assistant, button, manual push, reconnect, restart or scheduled check-in), each ringed so overlapping dots stay apart.
 - Device batteries: a Wakes / day tile with a breakdown by cause.
 - Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.
 - Lineups redesign, part 1 of 3: a view model for the Lineups page and the
@@ -125,7 +125,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
-- Device batteries: the chart tooltip is readable in the dark theme.
+- Device batteries: the chart tooltip is readable in the dark theme, and dots are no longer cut off at the edges.
 - Device batteries: Visionect frames no longer show drain predictions.
 - A lineup step that lands a pre-rendered frame now shows up everywhere the
   newest push is read. Home Assistant's Next and Previous, a physical button,

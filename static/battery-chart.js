@@ -38,17 +38,23 @@
   /* Dot per cause. `tok` is a theme token; shape is the Chart.js pointStyle.
      Shape carries the meaning as much as colour does: Paper's accent, chart-2
      and danger are all red. Keep in step with .dx-wake-key in dx-battery.css
-     and _wake_shape in _battery_chart.html. */
+     and _wake_shape in _battery_chart.html. Every dot is ringed in the card's
+     colour (wakeHalo below) so overlapping dots stay apart, and grows by 3px
+     while it is the hovered / focused one. */
   var STYLES = {
-    scheduled: { style: "circle", r: 2.2, hover: 4.5, tok: "--t-accent", filled: false, bw: 1.5 },
-    lineup: { style: "circle", r: 3.6, hover: 5.5, tok: "--t-accent", filled: true, bw: 1.5 },
-    ha: { style: "rectRot", r: 4.5, hover: 6.5, tok: "--t-chart-1", filled: true, bw: 1.5 },
-    device: { style: "triangle", r: 4.5, hover: 6.5, tok: "--t-chart-2", filled: true, bw: 1.5 },
-    manual: { style: "rect", r: 3.8, hover: 5.8, tok: "--t-chart-3", filled: true, bw: 1.5 },
-    webhook: { style: "star", r: 5, hover: 7, tok: "--t-chart-other", filled: true, bw: 1.5 },
-    problem: { style: "crossRot", r: 4.5, hover: 6.5, tok: "--t-warn", filled: false, bw: 2.6 },
-    other: { style: "circle", r: 3, hover: 5, tok: "--t-chart-other", filled: true, bw: 1.5 },
+    scheduled: { style: "circle", r: 2.6, hover: 5.6, tok: "--t-accent", filled: false, bw: 1.6 },
+    lineup: { style: "circle", r: 3.8, hover: 6.8, tok: "--t-accent", filled: true, bw: 1.6 },
+    ha: { style: "rectRot", r: 4.8, hover: 7.8, tok: "--t-chart-1", filled: true, bw: 1.6 },
+    device: { style: "triangle", r: 4.8, hover: 7.8, tok: "--t-chart-2", filled: true, bw: 1.6 },
+    manual: { style: "rect", r: 4, hover: 7, tok: "--t-chart-3", filled: true, bw: 1.6 },
+    webhook: { style: "star", r: 5.2, hover: 8.2, tok: "--t-chart-other", filled: true, bw: 1.6 },
+    // Reconnected: softer than a restart (hollow rounded square, warning).
+    reconnect: { style: "rectRounded", r: 4, hover: 7, tok: "--t-warn", filled: false, bw: 2 },
+    // Restarted or crashed: a cross, danger.
+    problem: { style: "crossRot", r: 4.8, hover: 7.8, tok: "--t-danger", filled: false, bw: 2.8 },
+    other: { style: "circle", r: 3.2, hover: 6.2, tok: "--t-chart-other", filled: true, bw: 1.6 },
   };
+
 
   function token(name, fallback) {
     if (window.TesseraeCharts) return window.TesseraeCharts.token(name, fallback);
@@ -218,17 +224,66 @@
       },
     };
 
+    // A ring in the card's colour under each dot: where dots overlap, or sit
+    // on the line, the ring keeps each one's outline readable.
+    var halo = {
+      id: "batteryWakeHalo",
+      beforeDatasetDraw: function (chart, args) {
+        if (args.index !== WAKES) return;
+        var ctx = chart.ctx;
+        var activeIdx = {};
+        chart.getActiveElements().forEach(function (a) {
+          if (a.datasetIndex === WAKES) activeIdx[a.index] = true;
+        });
+        args.meta.data.forEach(function (el, i) {
+          var st = style(i);
+          var r = (activeIdx[i] ? st.hover : st.r) + st.bw / 2 + 1.8;
+          ctx.save();
+          ctx.fillStyle = pal.dotFill;
+          ctx.strokeStyle = pal.dotFill;
+          Chart.helpers.drawPoint(
+            ctx, { pointStyle: st.style, rotation: 0, radius: r, borderWidth: 0 }, el.x, el.y);
+          ctx.restore();
+        });
+      },
+    };
+
+    // A vertical line at the hovered / focused point, bottom to top of the
+    // plot, to read where it falls on the time axis.
+    var crosshair = {
+      id: "batteryCrosshair",
+      beforeDatasetsDraw: function (chart) {
+        var area = chart.chartArea;
+        var active = chart.tooltip && chart.tooltip.getActiveElements();
+        delete canvas.dataset.crosshairX;
+        if (!area || !active || !active.length) return;
+        var x = active[0].element.x;
+        if (x < area.left || x > area.right) return;
+        canvas.dataset.crosshairX = String(Math.round(x)); // read by the browser test
+        var ctx = chart.ctx;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(x, area.bottom);
+        ctx.lineTo(x, area.top);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = rgba(pal.muted, 0.7);
+        ctx.stroke();
+        ctx.restore();
+      },
+    };
+
     var live = canvas.parentElement.querySelector("[data-battery-chart-live]");
 
     var chart = new Chart(canvas.getContext("2d"), {
       type: "line",
-      plugins: [hatchBands],
+      plugins: [hatchBands, crosshair, halo],
       data: {
         datasets: [
           {
             label: "Battery",
             data: linePoints,
             spanGaps: false,
+            clip: 8,
             borderColor: pal.accent,
             backgroundColor: function (ctx) {
               var area = ctx.chart.chartArea;
@@ -239,7 +294,7 @@
               g.addColorStop(1, rgba(pal.accent, 0));
               return g;
             },
-            tension: 0.25, pointRadius: 0, pointHoverRadius: 4,
+            tension: 0.25, pointRadius: 0, pointHoverRadius: 5,
             pointHoverBackgroundColor: pal.accent, pointHoverBorderColor: pal.accent,
             borderWidth: 2, fill: "origin",
           },
@@ -247,6 +302,7 @@
             label: "Wake-ups",
             data: wakePoints,
             showLine: false,
+            clip: false, // a dot at 100% or at the window edge is not cut in half
             order: -1, // drawn above the line
             pointStyle: function (ctx) { return style(ctx.dataIndex).style; },
             pointRadius: function (ctx) { return style(ctx.dataIndex).r; },
@@ -285,7 +341,7 @@
       },
       options: {
         animation: false, maintainAspectRatio: false, responsive: true,
-        layout: { padding: { top: 8, right: 8, bottom: 0, left: 0 } },
+        layout: { padding: { top: 6, right: 12, bottom: 0, left: 10 } },
         interaction: { mode: "batteryChart", intersect: false },
         scales: {
           x: {
@@ -301,9 +357,14 @@
             grid: { display: false }, border: { color: rgba(pal.muted, 0.35) },
           },
           y: {
-            min: 0, max: 100,
+            // The axis reads 0-100%, with room above and below so a dot at
+            // either end is whole.
+            min: -5, max: 105,
+            afterBuildTicks: function (axis) {
+              axis.ticks = [0, 25, 50, 75, 100].map(function (v) { return { value: v }; });
+            },
             ticks: {
-              color: pal.muted, stepSize: 25, font: { size: 11 }, padding: 6,
+              color: pal.muted, font: { size: 11 }, padding: 6,
               callback: function (v) { return v + "%"; },
             },
             grid: { color: rgba(pal.muted, 0.1), drawTicks: false }, border: { display: false },

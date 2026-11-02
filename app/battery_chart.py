@@ -16,20 +16,23 @@ Cause of a wake. :func:`attribute_wakes` combines two things:
 
 * the device's own reason, from the heartbeat's event-log row (Visionect
   ``connect_reason``, a REST client's ``wake_reason`` / ``reset_reason``, an
-  abnormal-reset report in ``diag.reset``). A restart or reconnect reason
-  (Wi-Fi reconnect, reboot, power on, brownout, crash) always wins, and so does
-  a button or touch wake;
+  abnormal-reset report in ``diag.reset``). A reconnect (the previous connection
+  ended badly) or a restart (reboot, power on, brownout, crash) always wins, and
+  so does a button or touch wake;
 * what the server did for that device just before: ``type="push"`` rows (and
   ``type="touch"`` rows) whose ``extra.device_ids`` name it. A push is claimed
   by the first wake at or after it, so a push made while the device slept is
   picked up by its next wake, not by every later one.
 
 The result is a category (``scheduled``, ``lineup``, ``ha``, ``device``,
-``manual``, ``webhook``, ``problem``, ``other``), a one-line cause, an optional
-detail line and the raw device reason. A wake right after a push (within
-:data:`DIRECT_S`) takes the push's cause; a Visionect "by server request" wake
-takes it up to :data:`SERVER_REQUEST_S` later; any other wake is a scheduled
-check-in, and when a push was waiting it says what it picked up.
+``manual``, ``webhook``, ``reconnect``, ``problem`` (a restart), ``other``), a
+one-line cause, an optional detail line and the raw device reason. A wake right
+after a push (within :data:`DIRECT_S`) takes the push's cause; a Visionect "by
+server request" wake takes it up to :data:`SERVER_REQUEST_S` later, and with no
+push to credit it is the sign checking in because Tesserae, which manages its
+sleep and wake, asked: a scheduled check-in. Any other wake is a scheduled
+check-in too, and when a push was waiting it says what it picked up. A reason
+Tesserae has no mapping for is shown as the device reported it.
 
 Gaps. Spans with no samples for much longer than the device's usual interval
 are returned in ``gaps`` so the chart can draw them as "no readings" rather
@@ -67,6 +70,7 @@ MAX_WAKE_DOTS: int = 120
 # is how far apart the two may be and still count as one wake.
 MATCH_TOLERANCE_S: float = 120.0
 DEFAULT_LABEL: str = "Scheduled check-in"
+DROPPED_LABEL: str = "Reconnected after a dropped connection"
 # Fields of a parsed heartbeat that name why the device woke or connected, in
 # priority order. ``connect_reason`` is Visionect's; the others are what REST
 # firmware sends (unknown fields ride along in ``parsed``).
@@ -91,7 +95,8 @@ CATEGORIES: dict[str, str] = {
     "device": "Button or touch",
     "manual": "Manual push",
     "webhook": "Webhook / API",
-    "problem": "Reconnect or restart",
+    "reconnect": "Reconnected",
+    "problem": "Restarted or crashed",
     "other": "Other",
 }
 #: The same, as it reads in "34 check-ins, 6 lineup, 2 HA".
@@ -102,7 +107,8 @@ _SHORT: dict[str, str] = {
     "device": "button/touch",
     "manual": "manual",
     "webhook": "webhook",
-    "problem": "reconnect/restart",
+    "reconnect": "reconnects",
+    "problem": "restarts",
     "other": "other",
 }
 
@@ -176,11 +182,12 @@ _LABELS: dict[str, str] = {
     **dict.fromkeys(("touch", "touchpad"), "Touch"),
     **dict.fromkeys(("by_server_request", "server_request", "server"), "Server request"),
     "server_changes": "Server changes",
+    **dict.fromkeys(("wifi", "wifi_reconnect", "wi_fi_reconnect", "reconnect"), "Wi-Fi reconnect"),
+    # The previous connection ended badly (often the server dropping a stale
+    # one, or a Wi-Fi hiccup) and the device came back.
     **dict.fromkeys(
-        ("wifi", "wifi_reconnect", "wi_fi_reconnect", "reconnect", "connection_error"),
-        "Wi-Fi reconnect",
+        ("connection_error", "connection_driver_error", "protocol_error"), DROPPED_LABEL
     ),
-    "connection_driver_error": "Reconnect after error",
     **dict.fromkeys(("poweron", "power_on", "power_on_reset", "por", "cold_boot"), "Power on"),
     **dict.fromkeys(("reboot", "restart", "sw", "software", "software_reset"), "Reboot"),
     "brownout": "Brownout",
@@ -188,22 +195,12 @@ _LABELS: dict[str, str] = {
     **dict.fromkeys(("watchdog", "wdt", "int_wdt", "task_wdt"), "Watchdog reset"),
     "logs_full": "Logs full",
     "command_line": "Command line",
-    "protocol_error": "Protocol error",
     "display_driver_failed": "Display driver failed",
 }
 _TOKEN_SEP = re.compile(r"[\s\-/]+")
+_RECONNECT_LABELS: frozenset[str] = frozenset({"Wi-Fi reconnect", DROPPED_LABEL})
 _PROBLEM_LABELS: frozenset[str] = frozenset(
-    {
-        "Wi-Fi reconnect",
-        "Reconnect after error",
-        "Reboot",
-        "Power on",
-        "Brownout",
-        "Crash",
-        "Watchdog reset",
-        "Protocol error",
-        "Display driver failed",
-    }
+    {"Reboot", "Power on", "Brownout", "Crash", "Watchdog reset", "Display driver failed"}
 )
 _DEVICE_LABELS: frozenset[str] = frozenset({"Button", "Touch"})
 _SERVER_LABELS: frozenset[str] = frozenset({"Server request", "Server changes"})
@@ -254,9 +251,11 @@ def reason_label(raw: str | None) -> str:
 
 
 def reason_class(label: str) -> str:
-    """How a device reason label behaves in attribution: ``problem``,
-    ``device`` (button / touch), ``server`` (the server asked it to connect),
-    ``scheduled`` or ``other`` (reported as is)."""
+    """How a device reason label behaves in attribution: ``reconnect``,
+    ``problem`` (a restart), ``device`` (button / touch), ``server`` (the server
+    asked it to connect), ``scheduled`` or ``other`` (reported as is)."""
+    if label in _RECONNECT_LABELS:
+        return "reconnect"
     if label in _PROBLEM_LABELS:
         return "problem"
     if label in _DEVICE_LABELS:
@@ -419,8 +418,8 @@ def attribute_wakes(
             else None
         )
         cat, label, detail = "scheduled", DEFAULT_LABEL, None
-        if cls == "problem":
-            cat, label = "problem", reason_lbl
+        if cls in ("problem", "reconnect"):
+            cat, label = cls, reason_lbl
             detail = f"Picked up {cause[1]}" if cause else None
         elif cls == "device":
             cat, label = "device", reason_lbl
@@ -429,8 +428,8 @@ def attribute_wakes(
         elif cls == "server":
             if cause and lag_s <= SERVER_REQUEST_S:
                 cat, label = cause
-            else:
-                cat, label = "other", reason_lbl
+            elif cause:
+                detail = f"Picked up {cause[1]}"
         elif cls == "other":
             cat, label = "other", reason_lbl
         elif cause and lag_s <= DIRECT_S:

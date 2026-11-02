@@ -50,6 +50,7 @@ def _seed(app: Flask, data_root: Path) -> None:
     for device_id, kind in (
         ("hall_frame", "visionect_place_and_play_32"),
         ("attic_esp", "esp32_client"),
+        ("busy_esp", "esp32_client"),
     ):
         client.post(
             "/settings/devices/add",
@@ -70,9 +71,40 @@ def _seed(app: Flask, data_root: Path) -> None:
 
     # The frame sleeps through samples 10..27 (a 9.5 hour gap); the ESP never does.
     for i in range(48):
-        store.record("attic_esp", pct=92 - i // 2, timestamp=at(i))
+        store.record("attic_esp", pct=100 - i // 2, timestamp=at(i))  # starts at 100%
         if not 10 <= i <= 27:
-            store.record("hall_frame", pct=92 - i // 2, timestamp=at(i))
+            store.record("hall_frame", pct=100 - i // 2, timestamp=at(i))
+    # A busy display: a check-in every 4 minutes, with a cause now and then, so
+    # the chart is crowded (the screenshot of it shows dots staying apart).
+    for i in range(360):
+        store.record("busy_esp", pct=100 - i // 9, timestamp=now - (360 - i) * 240)
+    causes = [
+        ("page", {}),
+        ("home_assistant", {"button": "Next"}),
+        ("scheduler", {}),
+        ("button", {"button": "right"}),
+        ("webhook", {}),
+        ("deck", {}),
+    ]
+    for k, i in enumerate(range(5, 360, 7)):
+        source, extra = causes[k % len(causes)]
+        log.record(
+            type="push",
+            source=source,
+            target="page_a",
+            status="sent",
+            extra={"device_ids": ["busy_esp"], **extra},
+        )
+        backdate(now - (360 - i) * 240 - 20)
+    for i, reason in {60: "connection error", 61: "connection error", 200: "reboot"}.items():
+        log.record(
+            type="device",
+            source="busy_esp",
+            target="rest://busy_esp/status",
+            status="ok",
+            extra={"parsed": {"wake_reason": reason}},
+        )
+        backdate(now - (360 - i) * 240 + 2)
     # Quiet hours cover the frame's sleep, so the gap reads "asleep".
     pad = 1800
     start = datetime.fromtimestamp(at(9) - pad, UTC).strftime("%H:%M")
@@ -174,6 +206,33 @@ _GAP_JS = """() => {
            y: r.top + (area.top + area.bottom) / 2 };
 }""".replace("__CANVAS__", repr(CANVAS))
 
+# The first chart's state for one dot: crosshair x (relative to the canvas),
+# the dot's x, its current radius, and whether it is the active element.
+_STATE_JS = """(label) => {
+  const canvas = document.querySelector(__CANVAS__);
+  const chart = Chart.getChart(canvas);
+  const wakes = JSON.parse(canvas.dataset.wakes);
+  const i = wakes.findIndex((w) => w.label === label);
+  const el = chart.getDatasetMeta(1).data[i];
+  return { cross: canvas.dataset.crosshairX === undefined ? null : Number(canvas.dataset.crosshairX),
+           x: el.x, radius: el.options.radius,
+           active: chart.getActiveElements().some((a) => a.datasetIndex === 1 && a.index === i) };
+}""".replace("__CANVAS__", repr(CANVAS))
+
+# Whether any dot of any chart pokes outside its canvas (clipped), plus the y axis.
+_BOUNDS_JS = """() => [...document.querySelectorAll('canvas.battery-chart')].map((canvas) => {
+  const chart = Chart.getChart(canvas);
+  const w = canvas.getBoundingClientRect().width;
+  let out = 0;
+  chart.getDatasetMeta(1).data.forEach((el, i) => {
+    const r = el.options.hoverRadius + el.options.borderWidth;
+    if (el.y - r < 0 || el.x - r < 0 || el.x + r > w) out += 1;
+  });
+  return { out, dots: chart.getDatasetMeta(1).data.length, clip: chart.data.datasets[1].clip,
+           min: chart.scales.y.min, max: chart.scales.y.max,
+           ticks: chart.scales.y.ticks.map((t) => t.value) };
+})""".replace("__CANVAS__", repr(CANVAS))
+
 _TIP_TEXT_JS = """() => {
   const t = Chart.getChart(document.querySelector(__CANVAS__)).tooltip;
   return { opacity: t.opacity, body: t.body.flatMap((b) => b.lines), title: t.title };
@@ -204,7 +263,7 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
     shots = os.environ.get("BATTERY_SHOTS")
     with sync_playwright() as p:
         browser = _launch(p)
-        page = browser.new_page(viewport={"width": 1100, "height": 1500})
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
         _open(page, base, app, ui=ui, theme=theme)
         assert page.evaluate("document.documentElement.dataset.ui || 'classic'") == (
             "paper" if ui == "paper" else "classic"
@@ -224,6 +283,24 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
         tip = page.evaluate(_TIP_TEXT_JS)
         assert tip["opacity"] > 0
         assert "Home Assistant: Next" in tip["body"], tip
+        # The hovered dot grows and a crosshair marks where it falls in time.
+        hovered = page.evaluate(_STATE_JS, "Home Assistant: Next")
+        assert hovered["active"] and hovered["cross"] is not None
+        assert abs(hovered["cross"] - hovered["x"]) <= 1
+        page.mouse.move(2, 2)
+        page.wait_for_timeout(150)
+        rest = page.evaluate(_STATE_JS, "Home Assistant: Next")
+        assert not rest["active"] and rest["cross"] is None
+        assert hovered["radius"] >= rest["radius"] + 2, (hovered, rest)
+        page.mouse.move(spot["x"], spot["y"])
+        page.wait_for_timeout(150)
+
+        # No dot is cut off at 100%, at 0% or at the window edges.
+        for chart in page.evaluate(_BOUNDS_JS):
+            assert chart["out"] == 0, chart
+            assert chart["clip"] is False
+            assert chart["min"] < 0 and chart["max"] > 100
+            assert chart["ticks"] == [0, 25, 50, 75, 100]
         if shots:
             Path(shots).mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(Path(shots) / f"batteries-{ui}-{theme}.png"), full_page=True)
@@ -236,6 +313,7 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
         gap_tip = page.evaluate(_TIP_TEXT_JS)
         assert gap_tip["opacity"] > 0
         assert "Asleep" in gap_tip["body"][0] and "(quiet hours), no readings" in gap_tip["body"][0]
+        assert page.evaluate(f"document.querySelector({CANVAS!r}).dataset.crosshairX") is not None
 
         if shots:
             page.screenshot(
@@ -244,7 +322,7 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
 
         # The key lists only the causes drawn, plus the band.
         key = page.inner_text("article[data-lf-text$=' hall_frame'] .dx-wake-legend")
-        assert "Home Assistant" in key and "Reconnect or restart" in key
+        assert "Home Assistant" in key and "Reconnected" in key and "Restarted or crashed" in key
         assert "No readings" in key and "Manual push" not in key
 
         # And from the keyboard: focus the chart, step back one wake.
@@ -255,9 +333,15 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
         tip = page.evaluate(_TIP_TEXT_JS)
         assert tip["opacity"] > 0
         assert any("%" in line for line in tip["body"])
+        before = page.evaluate(f"document.querySelector({CANVAS!r}).dataset.crosshairX")
+        page.keyboard.press("ArrowLeft")
+        page.wait_for_timeout(150)
+        after = page.evaluate(f"document.querySelector({CANVAS!r}).dataset.crosshairX")
+        assert before is not None and after is not None and float(after) < float(before)
         page.keyboard.press("Escape")
         page.wait_for_timeout(150)
         assert page.evaluate(_TIP_TEXT_JS)["opacity"] == 0
+        assert page.evaluate(f"document.querySelector({CANVAS!r}).dataset.crosshairX") is None
         browser.close()
 
 
@@ -286,7 +370,7 @@ def test_a_gap_outside_quiet_hours_reads_as_offline(served: tuple[str, Flask]) -
     app.config["SETTINGS_STORE"].patch_section("app", {"quiet_hours_enabled": False})
     with sync_playwright() as p:
         browser = _launch(p)
-        page = browser.new_page(viewport={"width": 1100, "height": 1500})
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
         _open(page, base, app, ui="classic", theme="light")
         spot = page.evaluate(_GAP_JS)
         page.mouse.move(spot["x"], spot["y"])

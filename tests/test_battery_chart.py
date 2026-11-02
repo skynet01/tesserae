@@ -23,6 +23,7 @@ NOW = time.time()
 NOW_MS = int(NOW * 1000)
 DEV = "d1"
 CHECK_IN = "Scheduled check-in"
+DROPPED = "Reconnected after a dropped connection"
 
 
 def _event(
@@ -84,13 +85,14 @@ def _wakes(series: list[dict[str, Any]], status: list[EventRow] = (), pushes=(),
         ("unknown", CHECK_IN),
         ("by server request", "Server request"),
         ("reboot", "Reboot"),
-        ("connection error", "Wi-Fi reconnect"),
-        ("connection driver error", "Reconnect after error"),
+        ("connection error", DROPPED),
+        ("connection driver error", DROPPED),
+        ("protocol error", DROPPED),
+        ("wifi-reconnect", "Wi-Fi reconnect"),
         ("ext0", "Button"),
         ("POWERON", "Power on"),
         ("brownout", "Brownout"),
         ("task_wdt", "Watchdog reset"),
-        ("wifi-reconnect", "Wi-Fi reconnect"),
         ("moon phase", "moon phase"),
     ],
 )
@@ -188,21 +190,23 @@ def test_a_wake_with_nothing_pushed_is_a_scheduled_check_in() -> None:
 
 
 @pytest.mark.parametrize(
-    ("reason", "label"),
+    ("reason", "cat", "label"),
     [
-        ("connection error", "Wi-Fi reconnect"),
-        ("reboot", "Reboot"),
-        ("poweron", "Power on"),
-        ("brownout", "Brownout"),
-        ("panic", "Crash"),
+        ("connection error", "reconnect", DROPPED),
+        ("protocol error", "reconnect", DROPPED),
+        ("reboot", "problem", "Reboot"),
+        ("poweron", "problem", "Power on"),
+        ("brownout", "problem", "Brownout"),
+        ("panic", "problem", "Crash"),
     ],
 )
-def test_the_devices_own_problem_reason_wins_over_a_push(reason: str, label: str) -> None:
+def test_the_devices_own_reconnect_or_restart_wins_over_a_push(
+    reason: str, cat: str, label: str
+) -> None:
     status = [_event(NOW - 100, {"parsed": {"connect_reason": reason}})]
     pushes = [_push(NOW - 105, "home_assistant")]
-    cat, got, detail = _cause(_wakes(_series(-100), status, pushes))
-    assert (cat, got) == ("problem", label)
-    assert detail == "Picked up Home Assistant"
+    got = _cause(_wakes(_series(-100), status, pushes))
+    assert got == (cat, label, "Picked up Home Assistant")
 
 
 @pytest.mark.parametrize(
@@ -289,15 +293,21 @@ def test_by_server_request_takes_the_cause_of_the_push_that_triggered_it() -> No
     assert (cat, label) == ("ha", "Home Assistant: Next")
 
 
-def test_by_server_request_with_no_push_stays_a_server_request() -> None:
+def test_by_server_request_with_no_push_is_the_server_asking_it_to_check_in() -> None:
     status = [_event(NOW - 100, {"parsed": {"connect_reason": "by server request"}})]
-    assert _cause(_wakes(_series(-100), status))[:2] == ("other", "Server request")
+    wakes = _wakes(_series(-100), status)
+    assert _cause(wakes) == ("scheduled", CHECK_IN, None)
+    assert wakes[0]["reason"] == "by server request"
 
 
 def test_by_server_request_ignores_a_push_too_old_to_have_caused_it() -> None:
     status = [_event(NOW - 100, {"parsed": {"connect_reason": "by server request"}})]
     pushes = [_push(NOW - 4000, "page")]
-    assert _cause(_wakes(_series(-100), status, pushes))[:2] == ("other", "Server request")
+    assert _cause(_wakes(_series(-100), status, pushes)) == (
+        "scheduled",
+        CHECK_IN,
+        "Picked up Manual push",
+    )
 
 
 def test_a_button_wake_from_the_device_is_a_device_cause() -> None:
@@ -421,7 +431,7 @@ def test_wake_stats_rate_and_breakdown_come_from_the_unthinned_wakes() -> None:
     stats = bc.wake_stats(wakes, window_days=7, now_ms=NOW_MS)
     assert stats["total"] == 43
     assert stats["per_day"] == 43.0  # 43 wakes over the one day the device has reported
-    assert stats["summary"] == "34 check-ins, 6 lineup, 2 HA, 1 reconnect/restart"
+    assert stats["summary"] == "34 check-ins, 6 lineup, 2 HA, 1 restarts"
     assert [b["cat"] for b in stats["breakdown"]] == ["scheduled", "lineup", "ha", "problem"]
 
 
@@ -645,3 +655,38 @@ def test_load_wake_events_is_batched_and_window_bounded(tmp_path: Path) -> None:
     assert len(bc.load_wake_events(log, ["c"], window_days=30)["c"].status) == 1
     assert bc.load_wake_events(None, ["a"], window_days=1) == {}
     assert bc.load_wake_events(log, [], window_days=1) == {}
+
+
+def test_a_week_of_the_live_visionect_frames_reasons_reads_as_check_ins_and_reconnects() -> None:
+    """connect_reason counts from the live frame over seven days."""
+    counts = {
+        "by server request": 81,
+        "connection error": 24,
+        "protocol error": 8,
+        "reboot": 5,
+        "wakeup": 3,
+        "heartbeat": 2,
+    }
+    status, series, i = [], [], 0
+    for reason, n in counts.items():
+        for _ in range(n):
+            ts = NOW - 7 * 86400 + i * 3000
+            series.append({"t_ms": int(ts * 1000), "pct": 80})
+            status.append(_event(ts + 1, {"parsed": {"connect_reason": reason}}))
+            i += 1
+    wakes = _wakes(series, status)
+    stats = bc.wake_stats(wakes, window_days=7, now_ms=NOW_MS)
+    assert stats["total"] == 123
+    assert {b["cat"]: b["count"] for b in stats["breakdown"]} == {
+        "scheduled": 86,  # 81 by server request + 3 wakeup + 2 heartbeat
+        "reconnect": 32,  # 24 connection error + 8 protocol error
+        "problem": 5,  # reboot
+    }
+    assert stats["summary"] == "86 check-ins, 32 reconnects, 5 restarts"
+    assert not any(w["cat"] == "other" for w in wakes)
+
+
+def test_an_unmapped_reason_is_labelled_with_its_own_text() -> None:
+    status = [_event(NOW - 100, {"parsed": {"connect_reason": "solar flare"}})]
+    wakes = _wakes(_series(-100), status)
+    assert wakes[0]["label"] == "solar flare" and wakes[0]["cat"] == "other"
