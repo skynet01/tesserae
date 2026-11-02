@@ -8,9 +8,10 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
-- Device batteries: dots on the chart show each wake-up and why it happened (lineup, Home Assistant, button, manual push, Wi-Fi reconnect or scheduled check-in).
+- Device batteries: dots on the chart show each wake-up and why it happened (lineup, Home Assistant, button, manual push, reconnect, restart or scheduled check-in), each ringed so overlapping dots stay apart.
 - Device batteries: a Wakes / day tile with a breakdown by cause.
 - Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.
+- Device batteries: each chart has its own 12h / 24h / 7d / 30d range, remembered per device, and drag-to-zoom.
 - Lineups redesign, part 1 of 3: a view model for the Lineups page and the
   endpoints the new page edits through. `GET /decks/view.json` describes every
   display (what is on screen, what is queued and when a sleeping frame picks it
@@ -80,6 +81,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 - Device page: six collapsible sections instead of eleven, the top tiles jump to their section, the battery offsets sit inside the Power tile, and the Display fields sit in a compact grid.
 
+- Device batteries: Clear battery history is a small link in the card's corner.
 - Lineups redesign, part 2 of 3: the Lineups page is rebuilt on the view model
   from part 1. Each display gets a header that says what is on screen (the
   picture itself), what is queued and when it lands, and when the frame next
@@ -129,7 +131,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 - Visionect: a sleeping frame shows the picture it actually holds, with newer ones marked Queued until it wakes.
 
-- Device batteries: the chart tooltip is readable in the dark theme.
+- Device batteries: the chart tooltip is readable in the dark theme, and dots are no longer cut off at the edges.
 - Device batteries: Visionect frames no longer show drain predictions.
 - History: 12-hour times no longer overlap the thumbnail.
 - A lineup step that lands a pre-rendered frame now shows up everywhere the

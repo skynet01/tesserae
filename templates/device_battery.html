@@ -1,6 +1,6 @@
 {% extends "_base.html" %}
 {% from "_components.html" import section_card %}
-{% from "_battery_chart.html" import battery_chart, battery_stat_tiles, battery_chart_assets %}
+{% from "_battery_chart.html" import battery_chart, battery_stat_tiles, battery_chart_assets, battery_clear_link %}
 {% block title %}Device batteries, Tesserae{% endblock %}
 
 {% block main %}
@@ -68,6 +68,7 @@
           <h4>{{ c.name }}</h4>
           {% if show_id %}<code class="dx-battery-id">{{ c.id }}</code>{% endif %}
         </div>
+        <div class="dx-battery-side">
         <div class="dx-battery-pct-block">
           {% if pct is not none %}
           <span class="dx-battery-pct"><strong>{{ pct }}</strong><span class="dx-battery-pct-unit">%</span></span>
@@ -75,22 +76,13 @@
           <span class="dx-status-dot is-{{ 'stale' if tone == 'critical' else 'warn' if tone == 'low' else 'ok' }}"
                 aria-label="{{ tone }}" title="{{ tone|capitalize }}"></span>
         </div>
+        {{ battery_clear_link(c) }}
+        </div>
       </header>
 
       {{ battery_chart(c) }}
 
       {{ battery_stat_tiles(c) }}
-
-      {% if c.samples %}
-      <form method="post"
-            action="{{ url_for('device_battery.clear_history', device_id=c.id) }}"
-            class="dx-battery-actions"
-            onsubmit="return confirm('Clear battery history for {{ c.name|e }}? This deletes every recorded sample for this device and cannot be undone.');">
-        <button type="submit" class="dx-link-btn dx-link-btn--danger">
-          Clear battery history
-        </button>
-      </form>
-      {% endif %}
     </article>
     {% endfor %}
   </div>

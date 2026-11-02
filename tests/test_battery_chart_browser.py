@@ -50,6 +50,7 @@ def _seed(app: Flask, data_root: Path) -> None:
     for device_id, kind in (
         ("hall_frame", "visionect_place_and_play_32"),
         ("attic_esp", "esp32_client"),
+        ("busy_esp", "esp32_client"),
     ):
         client.post(
             "/settings/devices/add",
@@ -70,9 +71,40 @@ def _seed(app: Flask, data_root: Path) -> None:
 
     # The frame sleeps through samples 10..27 (a 9.5 hour gap); the ESP never does.
     for i in range(48):
-        store.record("attic_esp", pct=92 - i // 2, timestamp=at(i))
+        store.record("attic_esp", pct=100 - i // 2, timestamp=at(i))  # starts at 100%
         if not 10 <= i <= 27:
-            store.record("hall_frame", pct=92 - i // 2, timestamp=at(i))
+            store.record("hall_frame", pct=100 - i // 2, timestamp=at(i))
+    # A busy display: a check-in every 4 minutes, with a cause now and then, so
+    # the chart is crowded (the screenshot of it shows dots staying apart).
+    for i in range(360):
+        store.record("busy_esp", pct=100 - i // 9, timestamp=now - (360 - i) * 240)
+    causes = [
+        ("page", {}),
+        ("home_assistant", {"button": "Next"}),
+        ("scheduler", {}),
+        ("button", {"button": "right"}),
+        ("webhook", {}),
+        ("deck", {}),
+    ]
+    for k, i in enumerate(range(5, 360, 7)):
+        source, extra = causes[k % len(causes)]
+        log.record(
+            type="push",
+            source=source,
+            target="page_a",
+            status="sent",
+            extra={"device_ids": ["busy_esp"], **extra},
+        )
+        backdate(now - (360 - i) * 240 - 20)
+    for i, reason in {60: "connection error", 61: "connection error", 200: "reboot"}.items():
+        log.record(
+            type="device",
+            source="busy_esp",
+            target="rest://busy_esp/status",
+            status="ok",
+            extra={"parsed": {"wake_reason": reason}},
+        )
+        backdate(now - (360 - i) * 240 + 2)
     # Quiet hours cover the frame's sleep, so the gap reads "asleep".
     pad = 1800
     start = datetime.fromtimestamp(at(9) - pad, UTC).strftime("%H:%M")
@@ -174,6 +206,33 @@ _GAP_JS = """() => {
            y: r.top + (area.top + area.bottom) / 2 };
 }""".replace("__CANVAS__", repr(CANVAS))
 
+# The first chart's state for one dot: crosshair x (relative to the canvas),
+# the dot's x, its current radius, and whether it is the active element.
+_STATE_JS = """(label) => {
+  const canvas = document.querySelector(__CANVAS__);
+  const chart = Chart.getChart(canvas);
+  const wakes = JSON.parse(canvas.dataset.wakes);
+  const i = wakes.findIndex((w) => w.label === label);
+  const el = chart.getDatasetMeta(1).data[i];
+  return { cross: canvas.dataset.crosshairX === undefined ? null : Number(canvas.dataset.crosshairX),
+           x: el.x, radius: el.options.radius,
+           active: chart.getActiveElements().some((a) => a.datasetIndex === 1 && a.index === i) };
+}""".replace("__CANVAS__", repr(CANVAS))
+
+# Whether any dot of any chart pokes outside its canvas (clipped), plus the y axis.
+_BOUNDS_JS = """() => [...document.querySelectorAll('canvas.battery-chart')].map((canvas) => {
+  const chart = Chart.getChart(canvas);
+  const w = canvas.getBoundingClientRect().width;
+  let out = 0;
+  chart.getDatasetMeta(1).data.forEach((el, i) => {
+    const r = el.options.hoverRadius + el.options.borderWidth;
+    if (el.y - r < 0 || el.x - r < 0 || el.x + r > w) out += 1;
+  });
+  return { out, dots: chart.getDatasetMeta(1).data.length, clip: chart.data.datasets[1].clip,
+           min: chart.scales.y.min, max: chart.scales.y.max,
+           ticks: chart.scales.y.ticks.map((t) => t.value) };
+})""".replace("__CANVAS__", repr(CANVAS))
+
 _TIP_TEXT_JS = """() => {
   const t = Chart.getChart(document.querySelector(__CANVAS__)).tooltip;
   return { opacity: t.opacity, body: t.body.flatMap((b) => b.lines), title: t.title };
@@ -204,7 +263,7 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
     shots = os.environ.get("BATTERY_SHOTS")
     with sync_playwright() as p:
         browser = _launch(p)
-        page = browser.new_page(viewport={"width": 1100, "height": 1500})
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
         _open(page, base, app, ui=ui, theme=theme)
         assert page.evaluate("document.documentElement.dataset.ui || 'classic'") == (
             "paper" if ui == "paper" else "classic"
@@ -224,6 +283,24 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
         tip = page.evaluate(_TIP_TEXT_JS)
         assert tip["opacity"] > 0
         assert "Home Assistant: Next" in tip["body"], tip
+        # The hovered dot grows and a crosshair marks where it falls in time.
+        hovered = page.evaluate(_STATE_JS, "Home Assistant: Next")
+        assert hovered["active"] and hovered["cross"] is not None
+        assert abs(hovered["cross"] - hovered["x"]) <= 1
+        page.mouse.move(2, 2)
+        page.wait_for_timeout(150)
+        rest = page.evaluate(_STATE_JS, "Home Assistant: Next")
+        assert not rest["active"] and rest["cross"] is None
+        assert hovered["radius"] >= rest["radius"] + 2, (hovered, rest)
+        page.mouse.move(spot["x"], spot["y"])
+        page.wait_for_timeout(150)
+
+        # No dot is cut off at 100%, at 0% or at the window edges.
+        for chart in page.evaluate(_BOUNDS_JS):
+            assert chart["out"] == 0, chart
+            assert chart["clip"] is False
+            assert chart["min"] < 0 and chart["max"] > 100
+            assert chart["ticks"] == [0, 25, 50, 75, 100]
         if shots:
             Path(shots).mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(Path(shots) / f"batteries-{ui}-{theme}.png"), full_page=True)
@@ -236,6 +313,7 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
         gap_tip = page.evaluate(_TIP_TEXT_JS)
         assert gap_tip["opacity"] > 0
         assert "Asleep" in gap_tip["body"][0] and "(quiet hours), no readings" in gap_tip["body"][0]
+        assert page.evaluate(f"document.querySelector({CANVAS!r}).dataset.crosshairX") is not None
 
         if shots:
             page.screenshot(
@@ -244,7 +322,7 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
 
         # The key lists only the causes drawn, plus the band.
         key = page.inner_text("article[data-lf-text$=' hall_frame'] .dx-wake-legend")
-        assert "Home Assistant" in key and "Reconnect or restart" in key
+        assert "Home Assistant" in key and "Reconnected" in key and "Restarted or crashed" in key
         assert "No readings" in key and "Manual push" not in key
 
         # And from the keyboard: focus the chart, step back one wake.
@@ -255,9 +333,15 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
         tip = page.evaluate(_TIP_TEXT_JS)
         assert tip["opacity"] > 0
         assert any("%" in line for line in tip["body"])
+        before = page.evaluate(f"document.querySelector({CANVAS!r}).dataset.crosshairX")
+        page.keyboard.press("ArrowLeft")
+        page.wait_for_timeout(150)
+        after = page.evaluate(f"document.querySelector({CANVAS!r}).dataset.crosshairX")
+        assert before is not None and after is not None and float(after) < float(before)
         page.keyboard.press("Escape")
         page.wait_for_timeout(150)
         assert page.evaluate(_TIP_TEXT_JS)["opacity"] == 0
+        assert page.evaluate(f"document.querySelector({CANVAS!r}).dataset.crosshairX") is None
         browser.close()
 
 
@@ -286,7 +370,7 @@ def test_a_gap_outside_quiet_hours_reads_as_offline(served: tuple[str, Flask]) -
     app.config["SETTINGS_STORE"].patch_section("app", {"quiet_hours_enabled": False})
     with sync_playwright() as p:
         browser = _launch(p)
-        page = browser.new_page(viewport={"width": 1100, "height": 1500})
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
         _open(page, base, app, ui="classic", theme="light")
         spot = page.evaluate(_GAP_JS)
         page.mouse.move(spot["x"], spot["y"])
@@ -294,3 +378,135 @@ def test_a_gap_outside_quiet_hours_reads_as_offline(served: tuple[str, Flask]) -
         body = page.evaluate(_TIP_TEXT_JS)["body"][0]
         browser.close()
     assert body.startswith("No readings ") and body.endswith("(offline)")
+
+
+ATTIC = "article[data-lf-text$=' attic_esp']"
+BUSY = "article[data-lf-text$=' busy_esp']"
+
+
+def _state(page: Any, card: str) -> dict[str, Any]:
+    """A card's chart window, wakes, samples tile and pressed range."""
+    return page.evaluate(
+        """(card) => {
+          const root = document.querySelector(card);
+          const canvas = root.querySelector('canvas.battery-chart');
+          const chart = Chart.getChart(canvas);
+          const tile = (label) => [...root.querySelectorAll('.dx-stat-tile')]
+            .find((t) => t.querySelector('.dx-stat-label').textContent.trim() === label);
+          const pressed = [...root.querySelectorAll('.dx-battery-range button')]
+            .filter((b) => b.getAttribute('aria-pressed') === 'true').map((b) => b.textContent);
+          return { hours: Number(canvas.dataset.windowHours), series: JSON.parse(canvas.dataset.series).length,
+                   samples: Number(tile('Samples').querySelector('.dx-stat-value').textContent),
+                   pressed, xmin: chart.scales.x.min, xmax: chart.scales.x.max,
+                   resetHidden: root.querySelector('[data-battery-zoom-reset]').hidden,
+                   resetShown: getComputedStyle(root.querySelector('[data-battery-zoom-reset]')).display !== 'none' };
+        }""",
+        card,
+    )
+
+
+def test_each_chart_has_its_own_range_that_survives_a_reload(served: tuple[str, Flask]) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, app = served
+    with sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
+        _open(page, base, app, ui="classic", theme="light")  # page default: 1 day
+        before = _state(page, ATTIC)
+        busy_before = _state(page, BUSY)
+        assert before["hours"] == 24 and before["pressed"] == ["24h"]
+
+        # 12h: only this card changes, without a reload, tiles included.
+        page.click(f"{ATTIC} .dx-battery-range button[data-hours='12']")
+        page.wait_for_function(
+            "(c) => document.querySelector(c + ' canvas').dataset.windowHours === '12'", arg=ATTIC
+        )
+        after = _state(page, ATTIC)
+        assert after["pressed"] == ["12h"]
+        assert 0 < after["series"] < before["series"] and after["samples"] == after["series"]
+        assert _state(page, BUSY) == busy_before
+        if os.environ.get("BATTERY_SHOTS"):
+            page.screenshot(path=str(Path(os.environ["BATTERY_SHOTS"]) / "batteries-12h.png"))
+        assert after["xmax"] - after["xmin"] <= 12 * 3600 * 1000 + 1
+
+        # The choice is remembered per device: a reload opens this card on 12h.
+        page.reload()
+        page.wait_for_function(
+            "(c) => document.querySelector(c + ' canvas').dataset.windowHours === '12'", arg=ATTIC
+        )
+        assert _state(page, ATTIC)["pressed"] == ["12h"]
+        assert _state(page, BUSY)["hours"] == 24
+
+        # And it switches back, key and tiles following.
+        page.click(f"{ATTIC} .dx-battery-range button[data-hours='168']")
+        page.wait_for_function(
+            "(c) => document.querySelector(c + ' canvas').dataset.windowHours === '168'", arg=ATTIC
+        )
+        assert _state(page, ATTIC)["pressed"] == ["7d"]
+        browser.close()
+
+
+def test_dragging_across_a_chart_zooms_and_reset_undoes_it(served: tuple[str, Flask]) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, app = served
+    with sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
+        _open(page, base, app, ui="paper", theme="dark")
+        whole = _state(page, ATTIC)
+        assert whole["resetHidden"] is True and whole["resetShown"] is False  # truly not displayed
+        box = page.evaluate(
+            """(card) => { const c = document.querySelector(card + ' canvas');
+              const a = Chart.getChart(c).chartArea; const r = c.getBoundingClientRect();
+              return { x0: r.left + a.left + (a.right - a.left) * 0.3,
+                       x1: r.left + a.left + (a.right - a.left) * 0.6,
+                       y: r.top + (a.top + a.bottom) / 2 }; }""",
+            ATTIC,
+        )
+        page.mouse.move(box["x0"], box["y"])
+        page.mouse.down()
+        page.mouse.move((box["x0"] + box["x1"]) / 2, box["y"], steps=4)
+        page.mouse.move(box["x1"], box["y"], steps=4)
+        page.mouse.up()
+        zoomed = _state(page, ATTIC)
+        assert zoomed["resetHidden"] is False and zoomed["resetShown"] is True
+        if os.environ.get("BATTERY_SHOTS"):
+            page.screenshot(path=str(Path(os.environ["BATTERY_SHOTS"]) / "batteries-zoomed.png"))
+        assert (zoomed["xmax"] - zoomed["xmin"]) < 0.4 * (whole["xmax"] - whole["xmin"])
+        # Dots outside the zoomed span are not drawn.
+        shown = page.evaluate(
+            "(c) => Chart.getChart(document.querySelector(c + ' canvas')).data.datasets[1].data.length",
+            ATTIC,
+        )
+        assert shown < whole["series"]
+        page.click(f"{ATTIC} [data-battery-zoom-reset]")
+        reset = _state(page, ATTIC)
+        assert reset["resetHidden"] is True and reset["xmin"] == whole["xmin"]
+        browser.close()
+
+
+def test_clear_history_is_a_small_quiet_link_in_the_cards_top_right(
+    served: tuple[str, Flask],
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, app = served
+    with sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_page(viewport={"width": 1100, "height": 2400})
+        _open(page, base, app, ui="classic", theme="light")
+        geo = page.evaluate(
+            """(card) => { const root = document.querySelector(card);
+              const link = root.querySelector('.dx-battery-clear button').getBoundingClientRect();
+              const r = root.getBoundingClientRect();
+              const chart = root.querySelector('.dx-battery-chartbox').getBoundingClientRect();
+              return { right: r.right - link.right, top: link.top - r.top,
+                       chartTop: chart.top - r.top, w: link.width, h: link.height }; }""",
+            ATTIC,
+        )
+        browser.close()
+    assert geo["top"] < geo["chartTop"]  # in the header, above the chart
+    assert geo["right"] < 40  # against the right edge
+    assert geo["h"] < 24 and geo["w"] < 160  # text-sized, not a big button

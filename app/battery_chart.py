@@ -16,20 +16,23 @@ Cause of a wake. :func:`attribute_wakes` combines two things:
 
 * the device's own reason, from the heartbeat's event-log row (Visionect
   ``connect_reason``, a REST client's ``wake_reason`` / ``reset_reason``, an
-  abnormal-reset report in ``diag.reset``). A restart or reconnect reason
-  (Wi-Fi reconnect, reboot, power on, brownout, crash) always wins, and so does
-  a button or touch wake;
+  abnormal-reset report in ``diag.reset``). A reconnect (the previous connection
+  ended badly) or a restart (reboot, power on, brownout, crash) always wins, and
+  so does a button or touch wake;
 * what the server did for that device just before: ``type="push"`` rows (and
   ``type="touch"`` rows) whose ``extra.device_ids`` name it. A push is claimed
   by the first wake at or after it, so a push made while the device slept is
   picked up by its next wake, not by every later one.
 
 The result is a category (``scheduled``, ``lineup``, ``ha``, ``device``,
-``manual``, ``webhook``, ``problem``, ``other``), a one-line cause, an optional
-detail line and the raw device reason. A wake right after a push (within
-:data:`DIRECT_S`) takes the push's cause; a Visionect "by server request" wake
-takes it up to :data:`SERVER_REQUEST_S` later; any other wake is a scheduled
-check-in, and when a push was waiting it says what it picked up.
+``manual``, ``webhook``, ``reconnect``, ``problem`` (a restart), ``other``), a
+one-line cause, an optional detail line and the raw device reason. A wake right
+after a push (within :data:`DIRECT_S`) takes the push's cause; a Visionect "by
+server request" wake takes it up to :data:`SERVER_REQUEST_S` later, and with no
+push to credit it is the sign checking in because Tesserae, which manages its
+sleep and wake, asked: a scheduled check-in. Any other wake is a scheduled
+check-in too, and when a push was waiting it says what it picked up. A reason
+Tesserae has no mapping for is shown as the device reported it.
 
 Gaps. Spans with no samples for much longer than the device's usual interval
 are returned in ``gaps`` so the chart can draw them as "no readings" rather
@@ -67,6 +70,7 @@ MAX_WAKE_DOTS: int = 120
 # is how far apart the two may be and still count as one wake.
 MATCH_TOLERANCE_S: float = 120.0
 DEFAULT_LABEL: str = "Scheduled check-in"
+DROPPED_LABEL: str = "Reconnected after a dropped connection"
 # Fields of a parsed heartbeat that name why the device woke or connected, in
 # priority order. ``connect_reason`` is Visionect's; the others are what REST
 # firmware sends (unknown fields ride along in ``parsed``).
@@ -91,7 +95,8 @@ CATEGORIES: dict[str, str] = {
     "device": "Button or touch",
     "manual": "Manual push",
     "webhook": "Webhook / API",
-    "problem": "Reconnect or restart",
+    "reconnect": "Reconnected",
+    "problem": "Restarted or crashed",
     "other": "Other",
 }
 #: The same, as it reads in "34 check-ins, 6 lineup, 2 HA".
@@ -102,7 +107,8 @@ _SHORT: dict[str, str] = {
     "device": "button/touch",
     "manual": "manual",
     "webhook": "webhook",
-    "problem": "reconnect/restart",
+    "reconnect": "reconnects",
+    "problem": "restarts",
     "other": "other",
 }
 
@@ -176,11 +182,12 @@ _LABELS: dict[str, str] = {
     **dict.fromkeys(("touch", "touchpad"), "Touch"),
     **dict.fromkeys(("by_server_request", "server_request", "server"), "Server request"),
     "server_changes": "Server changes",
+    **dict.fromkeys(("wifi", "wifi_reconnect", "wi_fi_reconnect", "reconnect"), "Wi-Fi reconnect"),
+    # The previous connection ended badly (often the server dropping a stale
+    # one, or a Wi-Fi hiccup) and the device came back.
     **dict.fromkeys(
-        ("wifi", "wifi_reconnect", "wi_fi_reconnect", "reconnect", "connection_error"),
-        "Wi-Fi reconnect",
+        ("connection_error", "connection_driver_error", "protocol_error"), DROPPED_LABEL
     ),
-    "connection_driver_error": "Reconnect after error",
     **dict.fromkeys(("poweron", "power_on", "power_on_reset", "por", "cold_boot"), "Power on"),
     **dict.fromkeys(("reboot", "restart", "sw", "software", "software_reset"), "Reboot"),
     "brownout": "Brownout",
@@ -188,22 +195,12 @@ _LABELS: dict[str, str] = {
     **dict.fromkeys(("watchdog", "wdt", "int_wdt", "task_wdt"), "Watchdog reset"),
     "logs_full": "Logs full",
     "command_line": "Command line",
-    "protocol_error": "Protocol error",
     "display_driver_failed": "Display driver failed",
 }
 _TOKEN_SEP = re.compile(r"[\s\-/]+")
+_RECONNECT_LABELS: frozenset[str] = frozenset({"Wi-Fi reconnect", DROPPED_LABEL})
 _PROBLEM_LABELS: frozenset[str] = frozenset(
-    {
-        "Wi-Fi reconnect",
-        "Reconnect after error",
-        "Reboot",
-        "Power on",
-        "Brownout",
-        "Crash",
-        "Watchdog reset",
-        "Protocol error",
-        "Display driver failed",
-    }
+    {"Reboot", "Power on", "Brownout", "Crash", "Watchdog reset", "Display driver failed"}
 )
 _DEVICE_LABELS: frozenset[str] = frozenset({"Button", "Touch"})
 _SERVER_LABELS: frozenset[str] = frozenset({"Server request", "Server changes"})
@@ -254,9 +251,11 @@ def reason_label(raw: str | None) -> str:
 
 
 def reason_class(label: str) -> str:
-    """How a device reason label behaves in attribution: ``problem``,
-    ``device`` (button / touch), ``server`` (the server asked it to connect),
-    ``scheduled`` or ``other`` (reported as is)."""
+    """How a device reason label behaves in attribution: ``reconnect``,
+    ``problem`` (a restart), ``device`` (button / touch), ``server`` (the server
+    asked it to connect), ``scheduled`` or ``other`` (reported as is)."""
+    if label in _RECONNECT_LABELS:
+        return "reconnect"
     if label in _PROBLEM_LABELS:
         return "problem"
     if label in _DEVICE_LABELS:
@@ -419,8 +418,8 @@ def attribute_wakes(
             else None
         )
         cat, label, detail = "scheduled", DEFAULT_LABEL, None
-        if cls == "problem":
-            cat, label = "problem", reason_lbl
+        if cls in ("problem", "reconnect"):
+            cat, label = cls, reason_lbl
             detail = f"Picked up {cause[1]}" if cause else None
         elif cls == "device":
             cat, label = "device", reason_lbl
@@ -429,8 +428,8 @@ def attribute_wakes(
         elif cls == "server":
             if cause and lag_s <= SERVER_REQUEST_S:
                 cat, label = cause
-            else:
-                cat, label = "other", reason_lbl
+            elif cause:
+                detail = f"Picked up {cause[1]}"
         elif cls == "other":
             cat, label = "other", reason_lbl
         elif cause and lag_s <= DIRECT_S:
@@ -487,15 +486,27 @@ def wake_stats(
     order = {c: i for i, c in enumerate(CATEGORIES)}
     ranked = sorted(counts, key=lambda c: (-counts[c], order.get(c, 99)))
     breakdown = [
-        {"cat": c, "name": CATEGORIES.get(c, c), "short": _SHORT.get(c, c), "count": counts[c]}
+        {"cat": c, "name": CATEGORIES.get(c, c), "short": _short(c, counts[c]), "count": counts[c]}
         for c in ranked
     ]
+    parts = [f"{b['count']} {b['short']}" for b in breakdown]
+    # The tile shows the top three causes; the rest fold into "N more" (the
+    # full list is the tile's tooltip).
+    rest = sum(b["count"] for b in breakdown[3:])
+    summary = ", ".join(parts[:3]) + (f", {rest} more" if rest else "")
     return {
         "total": len(wakes),
         "per_day": per_day,
         "breakdown": breakdown,
-        "summary": ", ".join(f"{b['count']} {b['short']}" for b in breakdown),
+        "summary": summary,
+        "summary_full": ", ".join(parts),
     }
+
+
+def _short(cat: str, count: int) -> str:
+    """The breakdown word for ``cat``: singular for one (``1 restart``)."""
+    word = _SHORT.get(cat, cat)
+    return word[:-1] if count == 1 and word.endswith("s") else word
 
 
 # -- gaps ----------------------------------------------------------------
@@ -590,12 +601,34 @@ def tone_for(pct: int | None) -> str:
     return "ok"
 
 
+#: The per-chart range buttons: (hours, label). A chart's window need not be
+#: one of these (the Batteries page also offers 3, 14 and 90 days); none is
+#: pressed then.
+RANGES: tuple[tuple[int, str], ...] = ((12, "12h"), (24, "24h"), (168, "7d"), (720, "30d"))
+#: The longest window the JSON endpoint serves.
+MAX_WINDOW_HOURS: int = 90 * 24
+
+
+def window_label(hours: float) -> str:
+    """``12 hours``, ``7 days``: a window as it reads in a sentence."""
+    if hours >= 48 and hours % 24 == 0:
+        return f"{int(hours // 24)} days"
+    if hours == 24:
+        return "24 hours"
+    value = f"{hours:g}"
+    return f"{value} hour" + ("" if hours == 1 else "s")
+
+
 #: Event types the cause of a wake is read from, besides the device's own rows.
 _CONTEXT_TYPES: tuple[str, ...] = ("push", "touch", "scheduler", "rotation", "deck")
 
 
 def load_wake_events(
-    event_log: EventLog | None, device_ids: Sequence[str], *, window_days: float
+    event_log: EventLog | None,
+    device_ids: Sequence[str],
+    *,
+    window_days: float | None = None,
+    window_hours: float | None = None,
 ) -> dict[str, WakeEvents]:
     """The event-log rows behind every card's wakes, two queries for the page:
     the devices' heartbeat rows over the chart window, and the push / touch /
@@ -604,7 +637,8 @@ def load_wake_events(
     :func:`build_battery_chart` as ``events``."""
     if event_log is None or not device_ids:
         return {}
-    since = time.time() - window_days * 86400.0
+    hours = window_hours if window_hours is not None else (window_days or 7) * 24
+    since = time.time() - hours * 3600.0
     status = event_log.device_status_events(list(device_ids), since=since)
     context = event_log.context_events(_CONTEXT_TYPES, since=since - PICKUP_MAX_S)
     links: tuple[EventRow, ...] = tuple(
@@ -660,7 +694,8 @@ def build_battery_chart(
     device_id: str,
     *,
     history: BatteryHistory,
-    window_days: int,
+    window_days: float | None = None,
+    window_hours: float | None = None,
     name: str | None = None,
     device: Any = None,
     current: dict[str, Any] | None = None,
@@ -675,6 +710,7 @@ def build_battery_chart(
 ) -> dict[str, Any]:
     """Everything one device's battery card needs.
 
+    The window is ``window_hours`` when given, else ``window_days`` (default 7).
     ``events`` are the device's pre-fetched event-log rows (from
     :func:`load_wake_events`, two queries for a whole page); when ``None`` and an
     ``event_log`` is given, they are fetched here for this one device.
@@ -690,7 +726,8 @@ def build_battery_chart(
           "id": str, "name": str,
           "current": {...},            # live reading, as passed in
           "pct": int | None, "tone": "ok" | "low" | "critical",
-          "window_days": int,
+          "window_hours": float, "window_days": float, "window_label": str,
+          "ranges": [{"hours", "label", "pressed"}, ...],  # per-chart range buttons
           "samples": int,
           "series": [{"t_ms": int, "pct": int}, ...],            # oldest first
           "wakes": [{"t_ms", "pct", "cat", "label", "detail", "reason"}, ...],
@@ -703,7 +740,9 @@ def build_battery_chart(
           "prediction": {...} | None,  # always None when predictions don't apply
         }
     """
-    rows: list[BatteryRow] = history.recent(device_id, window_days=window_days)
+    hours: float = window_hours if window_hours is not None else (window_days or 7) * 24
+    days = hours / 24
+    rows: list[BatteryRow] = history.recent(device_id, window_days=days)
     series: list[dict[str, Any]] = []
     for row in rows:
         adj = apply_to_pct(row.pct, mv_offset, pct_offset, raw_mv=row.battery_mv)
@@ -711,7 +750,7 @@ def build_battery_chart(
             {"t_ms": int(row.timestamp * 1000), "pct": adj if adj is not None else row.pct}
         )
     if events is None:
-        events = load_wake_events(event_log, [device_id], window_days=window_days).get(
+        events = load_wake_events(event_log, [device_id], window_hours=hours).get(
             device_id, WakeEvents()
         )
     now_ms = int(time.time() * 1000)
@@ -724,8 +763,8 @@ def build_battery_chart(
     )
     for wake in all_wakes:
         wake.pop("reason_label", None)
-    stats = wake_stats(all_wakes, window_days=window_days, now_ms=now_ms)
-    wakes = thin_wakes(all_wakes, start_ms=now_ms - window_days * 86_400_000, end_ms=now_ms)
+    stats = wake_stats(all_wakes, window_days=days, now_ms=now_ms)
+    wakes = thin_wakes(all_wakes, start_ms=now_ms - int(hours * 3_600_000), end_ms=now_ms)
     drawn = {w["cat"] for w in wakes}
     applies = is_battery_predictable(device)
     pct = (current or {}).get("pct")
@@ -735,7 +774,10 @@ def build_battery_chart(
         "current": current or {},
         "pct": pct,
         "tone": tone_for(pct),
-        "window_days": window_days,
+        "window_hours": hours,
+        "window_days": int(days) if days == int(days) else round(days, 3),
+        "window_label": window_label(hours),
+        "ranges": [{"hours": h, "label": lbl, "pressed": h == hours} for h, lbl in RANGES],
         "samples": len(rows),
         "series": series,
         "wakes": wakes,
@@ -750,10 +792,23 @@ def build_battery_chart(
         ),
         "predictions_apply": applies,
         "prediction": (
-            prediction_dict(history.predict(device_id, window_days=window_days))
-            if applies
-            else None
+            prediction_dict(history.predict(device_id, window_days=days)) if applies else None
         ),
+    }
+
+
+def render_card_parts(card: dict[str, Any]) -> dict[str, str]:
+    """The card's server-rendered pieces that change with its range, as HTML
+    for the page to swap in: ``tiles_html`` (the stat tiles), ``hint_html`` (the
+    not-enough-samples note, or empty) and ``legend_html`` (the chart key, or
+    empty). Rendered by the same macros as the first paint."""
+    from flask import current_app
+
+    macros: Any = current_app.jinja_env.get_template("_battery_chart.html").module
+    return {
+        "tiles_html": str(macros.battery_tiles(card)).strip(),
+        "hint_html": str(macros.battery_hint(card)).strip(),
+        "legend_html": str(macros.battery_legend(card)).strip(),
     }
 
 
