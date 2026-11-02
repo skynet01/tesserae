@@ -29,6 +29,13 @@ from flask import (
     url_for,
 )
 
+from app.battery_chart import (
+    WakeEvents,
+    app_chart_options,
+    build_battery_chart,
+    load_wake_events,
+    prediction_dict,
+)
 from app.battery_offset import apply_to_mv, apply_to_pct, get_offset
 from app.device_loader import DeviceRegistry
 from app.state.battery_history import BatteryHistory
@@ -108,53 +115,6 @@ def _current_battery_per_device() -> dict[str, dict[str, Any]]:
     return out
 
 
-def _device_card(
-    device_id: str,
-    *,
-    history: BatteryHistory,
-    current: dict[str, Any] | None,
-    name: str,
-    window_days: int,
-    mv_offset: int = 0,
-    pct_offset: int = 0,
-) -> dict[str, Any]:
-    """One device's card data, including the chart series and the
-    prediction.
-
-    The chart series carries the **offset-adjusted** percent so the
-    chart matches the dashboard's current-battery readout. Without
-    this, the user would calibrate a device, see "85% → 100%" on
-    the headline, and find the chart still showing the old 85%
-    curve, which reads as a bug. ``BatteryHistory.recent`` returns
-    the raw rows; the offset is layered at this read site only."""
-    samples = history.recent(device_id, window_days=window_days)
-    prediction = history.predict(device_id, window_days=window_days)
-    series: list[dict[str, Any]] = []
-    for row in samples:
-        adj = apply_to_pct(row.pct, mv_offset, pct_offset, raw_mv=row.battery_mv)
-        series.append(
-            {"t_ms": int(row.timestamp * 1000), "pct": adj if adj is not None else row.pct}
-        )
-    return {
-        "id": device_id,
-        "name": name,
-        "current": current or {},
-        "samples": len(samples),
-        "series": series,
-        "prediction": {
-            "slope_per_day": prediction.slope_per_day,
-            "is_charging": prediction.is_charging,
-            "charge_rate_per_day": prediction.charge_rate_per_day,
-            "days_to_20pct": prediction.days_to_20pct,
-            "days_to_empty": prediction.days_to_empty,
-            "days_to_full": prediction.days_to_full,
-            "samples": prediction.samples,
-        }
-        if prediction is not None
-        else None,
-    }
-
-
 @bp.get("")
 def index() -> str:
     store = _history()
@@ -178,18 +138,27 @@ def index() -> str:
         device_ids = (set(current.keys()) | set(store.device_ids())) & registered_ids
         # Stable display order: name asc, falling back to id.
         names = {d.id: d.display_name for d in (registry.devices.values() if registry else [])}
-        manifests = {d.id: d.manifest for d in (registry.devices.values() if registry else [])}
-        for device_id in sorted(device_ids, key=lambda i: (names.get(i) or i).lower()):
-            mv_off, pct_off = get_offset(manifests.get(device_id, {}))
+        devices = registry.devices if registry else {}
+        ordered = sorted(device_ids, key=lambda i: (names.get(i) or i).lower())
+        # One event-log query for every card's wake dots.
+        wake_events = load_wake_events(
+            current_app.config.get("EVENT_LOG"), ordered, window_days=window_days
+        )
+        for device_id in ordered:
+            device = devices.get(device_id)
+            mv_off, pct_off = get_offset(device.manifest) if device is not None else (0, 0)
             cards.append(
-                _device_card(
+                build_battery_chart(
                     device_id,
                     history=store,
-                    current=current.get(device_id),
-                    name=names.get(device_id, device_id),
                     window_days=window_days,
+                    name=names.get(device_id, device_id),
+                    device=device,
+                    current=current.get(device_id),
                     mv_offset=mv_off,
                     pct_offset=pct_off,
+                    events=wake_events.get(device_id, WakeEvents()),
+                    **app_chart_options(current_app.config, device),
                 )
             )
     return render_template(
@@ -239,17 +208,7 @@ def series_json(device_id: str) -> Any:
             "device_id": device_id,
             "window_days": window_days,
             "series": series,
-            "prediction": {
-                "slope_per_day": prediction.slope_per_day,
-                "is_charging": prediction.is_charging,
-                "charge_rate_per_day": prediction.charge_rate_per_day,
-                "days_to_20pct": prediction.days_to_20pct,
-                "days_to_empty": prediction.days_to_empty,
-                "days_to_full": prediction.days_to_full,
-                "samples": prediction.samples,
-            }
-            if prediction is not None
-            else None,
+            "prediction": prediction_dict(prediction),
         }
     )
 

@@ -435,3 +435,72 @@ def test_clear_history_button_renders_only_for_devices_with_samples(
         store.record("esp32_attic", pct=80 - i * 5, timestamp=now - (4 - i) * 86400 / 2)
     body = client.get("/devices/battery?window=7").get_data(as_text=True)
     assert "Clear battery history" in body
+
+
+def _add(client, device_id: str, kind: str) -> None:
+    resp = client.post(
+        "/settings/devices/add", data={"id": device_id, "kind": kind, "name": device_id.upper()}
+    )
+    assert resp.status_code in (200, 302)
+
+
+def test_visionect_card_hides_predictions_but_keeps_chart_and_clear(app: Flask) -> None:
+    store: BatteryHistory = app.config["BATTERY_HISTORY"]
+    client = app.test_client()
+    _sign_in(client)
+    _add(client, "hall_frame", "visionect_place_and_play_32")
+    _add(client, "attic_esp", "esp32_client")
+    # A catalog SKU instance: recognised by protocol, not by kind id.
+    from app import visionect
+
+    assert visionect.is_visionect_device(app.config["DEVICE_REGISTRY"].devices["hall_frame"])
+    now = time.time()
+    for dev in ("hall_frame", "attic_esp"):
+        for i in range(10):
+            store.record(dev, pct=100 - i * 5, timestamp=now - (10 - i) * 86400 / 2)
+    body = client.get("/devices/battery?window=7").get_data(as_text=True)
+
+    def card(device_id: str) -> str:
+        start = body.index(f'data-lf-text="{device_id} {device_id}"')
+        end = body.index("</article>", start)
+        return body[start:end]
+
+    frame, esp = card("hall_frame"), card("attic_esp")
+    # Chart, samples and Clear stay on the Visionect card.
+    assert "battery-chart" in frame
+    assert '<div class="dx-stat-label">Samples</div>' in frame
+    assert "Clear battery history" in frame
+    # Wakes per day is a measurement, not a prediction: Visionect keeps it.
+    assert '<div class="dx-stat-label">Wakes / day</div>' in frame
+    # No predictions of any kind, and no "need 8 samples" hint.
+    for label in ("Drain rate", "Reaches 20%", "Reaches 0%", "Charging", "Full in"):
+        assert f'<div class="dx-stat-label">{label}</div>' not in frame
+    assert "Need at least 8 samples" not in frame
+    # The other frame still gets them.
+    assert '<div class="dx-stat-label">Drain rate</div>' in esp
+    assert '<div class="dx-stat-label">Reaches 20%</div>' in esp
+
+
+def test_cards_embed_wake_dots_with_reasons(app: Flask) -> None:
+    store: BatteryHistory = app.config["BATTERY_HISTORY"]
+    client = app.test_client()
+    _sign_in(client)
+    _add(client, "hall_frame", "visionect_place_and_play_32")
+    now = time.time()
+    store.record("hall_frame", pct=90, timestamp=now - 3600)
+    store.record("hall_frame", pct=89, timestamp=now)
+    # The heartbeat row the status handler writes when the reason changes.
+    app.config["EVENT_LOG"].record(
+        type="device",
+        source="hall_frame",
+        target="rest://hall_frame/status",
+        status="ok",
+        extra={"parsed": {"connect_reason": "by server request"}},
+    )
+    body = client.get("/devices/battery?window=7").get_data(as_text=True)
+    assert "data-wakes=" in body
+    assert "Server request" in body
+    assert "Scheduled check-in" in body
+    # Component wiring: shared script, keyboard-focusable canvas.
+    assert "battery-chart.js" in body
+    assert 'tabindex="0"' in body
