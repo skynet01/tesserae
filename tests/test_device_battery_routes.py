@@ -470,6 +470,8 @@ def test_visionect_card_hides_predictions_but_keeps_chart_and_clear(app: Flask) 
     assert "battery-chart" in frame
     assert '<div class="dx-stat-label">Samples</div>' in frame
     assert "Clear battery history" in frame
+    # Wakes per day is a measurement, not a prediction: Visionect keeps it.
+    assert '<div class="dx-stat-label">Wakes / day</div>' in frame
     # No predictions of any kind, and no "need 8 samples" hint.
     for label in ("Drain rate", "Reaches 20%", "Reaches 0%", "Charging", "Full in"):
         assert f'<div class="dx-stat-label">{label}</div>' not in frame
@@ -498,7 +500,7 @@ def test_cards_embed_wake_dots_with_reasons(app: Flask) -> None:
     body = client.get("/devices/battery?window=7").get_data(as_text=True)
     assert "data-wakes=" in body
     assert "Server request" in body
-    assert "Check-in" in body
+    assert "Scheduled check-in" in body
     # Component wiring: shared script, keyboard-focusable canvas.
     assert "battery-chart.js" in body
     assert 'tabindex="0"' in body

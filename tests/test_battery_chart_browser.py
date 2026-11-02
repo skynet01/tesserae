@@ -11,6 +11,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,13 +58,40 @@ def _seed(app: Flask, data_root: Path) -> None:
     store = app.config["BATTERY_HISTORY"]
     log = app.config["EVENT_LOG"]
     now = time.time()
-    reasons = {20: "wakeup", 14: "by server request", 8: "reboot"}
-    for device_id in ("hall_frame", "attic_esp"):
-        for i in range(48):  # a sample every 30 minutes over the last day
-            store.record(device_id, pct=92 - i // 2, timestamp=now - (48 - i) * 1800)
-    # The event-log rows the status handler writes when the reason changes,
-    # moved back to the time of the sample they belong to.
-    for idx, reason in reasons.items():
+
+    def at(i: int) -> float:
+        return now - (48 - i) * 1800  # sample i of a sample every 30 minutes
+
+    def backdate(ts: float) -> None:
+        with contextlib.closing(sqlite3.connect(data_root / "core" / "events.db")) as conn, conn:
+            conn.execute(
+                "UPDATE events SET timestamp = ? WHERE id = (SELECT MAX(id) FROM events)", (ts,)
+            )
+
+    # The frame sleeps through samples 10..27 (a 9.5 hour gap); the ESP never does.
+    for i in range(48):
+        store.record("attic_esp", pct=92 - i // 2, timestamp=at(i))
+        if not 10 <= i <= 27:
+            store.record("hall_frame", pct=92 - i // 2, timestamp=at(i))
+    # Quiet hours cover the frame's sleep, so the gap reads "asleep".
+    pad = 1800
+    start = datetime.fromtimestamp(at(9) - pad, UTC).strftime("%H:%M")
+    end = datetime.fromtimestamp(at(28) + pad, UTC).strftime("%H:%M")
+    app.config["SETTINGS_STORE"].patch_section(
+        "app", {"quiet_hours_enabled": True, "quiet_hours_start": start, "quiet_hours_end": end}
+    )
+    # Home Assistant pressed Next, and the frame connected "by server request";
+    # then it lost its connection, then it rebooted. These are the rows the
+    # handlers write, moved back to the time of the sample they belong to.
+    log.record(
+        type="push",
+        source="home_assistant",
+        target="hall_frame",
+        status="sent",
+        extra={"device_ids": ["hall_frame"], "button": "Next"},
+    )
+    backdate(at(32) - 60)
+    for idx, reason in {32: "by server request", 38: "connection error", 44: "reboot"}.items():
         log.record(
             type="device",
             source="hall_frame",
@@ -71,11 +99,7 @@ def _seed(app: Flask, data_root: Path) -> None:
             status="ok",
             extra={"parsed": {"connect_reason": reason}},
         )
-        with contextlib.closing(sqlite3.connect(data_root / "core" / "events.db")) as conn, conn:
-            conn.execute(
-                "UPDATE events SET timestamp = ? WHERE id = (SELECT MAX(id) FROM events)",
-                (now - (48 - idx) * 1800 + 2,),
-            )
+        backdate(at(idx) + 2)
 
 
 @pytest.fixture
@@ -137,6 +161,19 @@ _DOT_JS = """(label) => {
   return { x: r.left + el.x, y: r.top + el.y };
 }""".replace("__CANVAS__", repr(CANVAS))
 
+# Where the first gap's band is hovered, in page coordinates.
+_GAP_JS = """() => {
+  const canvas = document.querySelector(__CANVAS__);
+  const chart = Chart.getChart(canvas);
+  const gaps = JSON.parse(canvas.dataset.gaps);
+  if (!gaps.length) return null;
+  const mid = (gaps[0].start_ms + gaps[0].end_ms) / 2;
+  const r = canvas.getBoundingClientRect();
+  const area = chart.chartArea;
+  return { x: r.left + chart.scales.x.getPixelForValue(mid),
+           y: r.top + (area.top + area.bottom) / 2 };
+}""".replace("__CANVAS__", repr(CANVAS))
+
 _TIP_TEXT_JS = """() => {
   const t = Chart.getChart(document.querySelector(__CANVAS__)).tooltip;
   return { opacity: t.opacity, body: t.body.flatMap((b) => b.lines), title: t.title };
@@ -180,16 +217,35 @@ def test_tooltip_is_readable_and_dots_explain_themselves(
         assert ratios["edge"] >= 1.2, ratios
 
         # Hovering a dot names its reason.
-        spot = page.evaluate(_DOT_JS, "Server request")
+        spot = page.evaluate(_DOT_JS, "Home Assistant: Next")
         assert spot is not None
         page.mouse.move(spot["x"], spot["y"])
         page.wait_for_timeout(150)
         tip = page.evaluate(_TIP_TEXT_JS)
         assert tip["opacity"] > 0
-        assert "Server request" in tip["body"], tip
+        assert "Home Assistant: Next" in tip["body"], tip
         if shots:
             Path(shots).mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(Path(shots) / f"batteries-{ui}-{theme}.png"), full_page=True)
+
+        # A span with no readings says why, instead of reading as measured data.
+        spot = page.evaluate(_GAP_JS)
+        assert spot is not None
+        page.mouse.move(spot["x"], spot["y"])
+        page.wait_for_timeout(150)
+        gap_tip = page.evaluate(_TIP_TEXT_JS)
+        assert gap_tip["opacity"] > 0
+        assert "Asleep" in gap_tip["body"][0] and "(quiet hours), no readings" in gap_tip["body"][0]
+
+        if shots:
+            page.screenshot(
+                path=str(Path(shots) / f"batteries-{ui}-{theme}-gap.png"), full_page=True
+            )
+
+        # The key lists only the causes drawn, plus the band.
+        key = page.inner_text("article[data-lf-text$=' hall_frame'] .dx-wake-legend")
+        assert "Home Assistant" in key and "Reconnect or restart" in key
+        assert "No readings" in key and "Manual push" not in key
 
         # And from the keyboard: focus the chart, step back one wake.
         page.mouse.move(2, 2)
@@ -219,5 +275,22 @@ def test_visionect_card_has_no_prediction_tiles_in_the_browser(served: tuple[str
                          [...c.querySelectorAll('.dx-stat-label')].map((l) => l.textContent.trim())]))"""
         )
         browser.close()
-    assert labels["hall_frame"] == ["Samples"]
+    assert labels["hall_frame"] == ["Samples", "Wakes / day"]
     assert "Drain rate" in labels["attic_esp"]
+
+
+def test_a_gap_outside_quiet_hours_reads_as_offline(served: tuple[str, Flask]) -> None:
+    from playwright.sync_api import sync_playwright
+
+    base, app = served
+    app.config["SETTINGS_STORE"].patch_section("app", {"quiet_hours_enabled": False})
+    with sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_page(viewport={"width": 1100, "height": 1500})
+        _open(page, base, app, ui="classic", theme="light")
+        spot = page.evaluate(_GAP_JS)
+        page.mouse.move(spot["x"], spot["y"])
+        page.wait_for_timeout(150)
+        body = page.evaluate(_TIP_TEXT_JS)["body"][0]
+        browser.close()
+    assert body.startswith("No readings ") and body.endswith("(offline)")

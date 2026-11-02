@@ -310,6 +310,30 @@ class EventLog:
             out.setdefault(event.source, []).append(event)
         return out
 
+    def context_events(
+        self, types: Sequence[str], *, since: float, limit: int = 5000
+    ) -> dict[str, list[EventRow]]:
+        """Rows of the given ``types`` since ``since`` (epoch seconds) in one
+        query, oldest first, grouped by type. Like :meth:`device_status_events`
+        it serves ``events_by_type_time`` and keeps only the newest ``limit``
+        rows, so a page that correlates pushes with wakes reads a bounded
+        slice of the log."""
+        kinds = [t for t in types if t]
+        if not kinds:
+            return {}
+        placeholders = ",".join("?" * len(kinds))
+        sql = (
+            f"SELECT * FROM events WHERE type IN ({placeholders}) AND timestamp >= ? "
+            "ORDER BY timestamp DESC LIMIT ?"
+        )
+        with self._lock, self._conn() as conn:
+            rows = conn.execute(sql, [*kinds, since, int(limit)]).fetchall()
+        out: dict[str, list[EventRow]] = {}
+        for row in reversed(rows):
+            event = _row_to_event(row)
+            out.setdefault(event.type, []).append(event)
+        return out
+
     def list(
         self,
         *,

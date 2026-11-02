@@ -3,8 +3,8 @@
  *
  *  Per-device sub-cards stacked vertically inside the parent
  *  section card; each carries a header with name + pct, a
- *  Chart.js canvas, and a 4-tile stat grid (samples / drain rate
- *  / reaches 20% / reaches 0%; samples only for a Visionect frame).
+ *  Chart.js canvas, and a 4-tile stat grid (samples / wakes per day / drain
+ *  rate / reaches 20% / reaches 0%; no predictions for a Visionect frame).
  *  The chart + tiles are the reusable component in
  *  templates/_battery_chart.html, drawn by static/battery-chart.js.
  *
@@ -98,11 +98,52 @@
   font-size: 12.5px;
 }
 
-.dx-battery-stats { gap: 8px; grid-template-columns: repeat(4, 1fr); }
+.dx-battery-stats { gap: 8px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 @media (max-width: 720px) { .dx-battery-stats { grid-template-columns: repeat(2, 1fr); } }
 .dx-battery-hint {
   margin: 0;
   font-size: 11.5px;
   color: var(--t-muted);
   text-align: center;
+}
+
+/* Wakes / day tile: the cause breakdown can run long, let it wrap. */
+.dx-battery-wake-sub { white-space: normal; line-height: 1.35; }
+
+/* Chart key: one entry per cause drawn, plus the no-readings band. The shape
+   and colour per cause mirror STYLES in static/battery-chart.js. */
+.dx-wake-legend {
+  list-style: none;
+  margin: -4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 11.5px;
+  color: var(--t-muted);
+}
+.dx-wake-key { display: inline-flex; align-items: center; gap: 5px; }
+.dx-wake-shape { flex: 0 0 auto; fill: currentColor; stroke: none; }
+.dx-wake-shape .is-hollow { fill: var(--t-inset); stroke: currentColor; stroke-width: 1.5; }
+.dx-wake-shape .is-stroke { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+.dx-wake-key[data-cat="scheduled"],
+.dx-wake-key[data-cat="lineup"] { --dx-key: var(--t-accent); }
+.dx-wake-key[data-cat="ha"] { --dx-key: var(--t-chart-1); }
+.dx-wake-key[data-cat="device"] { --dx-key: var(--t-chart-2); }
+.dx-wake-key[data-cat="manual"] { --dx-key: var(--t-chart-3); }
+.dx-wake-key[data-cat="webhook"],
+.dx-wake-key[data-cat="other"] { --dx-key: var(--t-chart-other); }
+.dx-wake-key[data-cat="problem"] { --dx-key: var(--t-warn); }
+.dx-wake-key .dx-wake-shape { color: var(--dx-key, var(--t-muted)); }
+/* A span with no readings: the hatched band the chart draws. */
+.dx-gap-swatch {
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px dashed var(--t-muted);
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--t-muted) 35%, transparent) 0 1px,
+    transparent 1px 4px
+  );
 }

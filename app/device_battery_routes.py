@@ -29,7 +29,13 @@ from flask import (
     url_for,
 )
 
-from app.battery_chart import build_battery_chart, load_wake_events, prediction_dict
+from app.battery_chart import (
+    WakeEvents,
+    app_chart_options,
+    build_battery_chart,
+    load_wake_events,
+    prediction_dict,
+)
 from app.battery_offset import apply_to_mv, apply_to_pct, get_offset
 from app.device_loader import DeviceRegistry
 from app.state.battery_history import BatteryHistory
@@ -151,7 +157,8 @@ def index() -> str:
                     current=current.get(device_id),
                     mv_offset=mv_off,
                     pct_offset=pct_off,
-                    events=wake_events.get(device_id, []),
+                    events=wake_events.get(device_id, WakeEvents()),
+                    **app_chart_options(current_app.config, device),
                 )
             )
     return render_template(
