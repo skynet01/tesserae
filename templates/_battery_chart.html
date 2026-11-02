@@ -98,13 +98,17 @@ static/battery-chart.js (STYLES) and in dx-battery.css (.dx-wake-key).
 <div class="dx-battery-chartbox" data-battery-chart="{{ card.id }}"
      data-url="{{ url_for('device_battery.card_json', device_id=card.id) }}"
      data-window-hours="{{ card.window_hours }}">
+  {#- One toolbar row: the key on the left, zoom reset and the range on the right. -#}
   <div class="dx-battery-bar">
-    <div class="dx-battery-range" role="group" aria-label="Chart range for {{ card.name }}">
-      {% for r in card.ranges %}
-      <button type="button" data-hours="{{ r.hours }}" aria-pressed="{{ 'true' if r.pressed else 'false' }}">{{ r.label }}</button>
-      {% endfor %}
+    <div class="dx-battery-bar-key" data-battery-legend>{{ battery_legend(card) }}</div>
+    <div class="dx-battery-bar-end">
+      <button type="button" class="dx-battery-quiet" data-battery-zoom-reset hidden>Reset zoom</button>
+      <div class="dx-battery-range" role="group" aria-label="Chart range for {{ card.name }}">
+        {% for r in card.ranges %}
+        <button type="button" data-hours="{{ r.hours }}" aria-pressed="{{ 'true' if r.pressed else 'false' }}">{{ r.label }}</button>
+        {% endfor %}
+      </div>
     </div>
-    <button type="button" class="dx-battery-quiet" data-battery-zoom-reset hidden>Reset zoom</button>
   </div>
   <div class="dx-battery-chart"{% if not card.series %} hidden{% endif %}>
     <canvas class="battery-chart"
@@ -119,7 +123,6 @@ static/battery-chart.js (STYLES) and in dx-battery.css (.dx-wake-key).
     <span class="sr-only" aria-live="polite" data-battery-chart-live></span>
   </div>
   <p class="dx-battery-empty" data-battery-empty{% if card.series %} hidden{% endif %}>No samples in this window.</p>
-  <div data-battery-legend>{{ battery_legend(card) }}</div>
 </div>
 {%- endmacro -%}
 
