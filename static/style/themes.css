@@ -199,7 +199,7 @@
   font-size: var(--t-size-xs);
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--t-muted, #837F73);
+  color: var(--t-subhead, var(--t-muted, #837F73));
 }
 .themes-strip-list {
   list-style: none;

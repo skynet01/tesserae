@@ -79,6 +79,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Changed
 
+- Sub-headings (device page groups, stats, themes, wizard) use the theme accent colour.
+
 - Device page: six collapsible sections instead of eleven, the top tiles jump to their section, the battery offsets sit inside the Power tile, and the Display fields sit in a compact grid.
 
 - Device batteries: Clear battery history is a small link in the card's corner.

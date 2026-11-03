@@ -247,7 +247,7 @@
   font-size: 0.82rem;
   text-transform: uppercase;
   letter-spacing: 0.02em;
-  color: var(--t-muted);
+  color: var(--t-subhead);
 }
 
 .dx-chip-list {
