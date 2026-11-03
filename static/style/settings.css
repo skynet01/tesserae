@@ -4331,7 +4331,8 @@ select.dx-input:hover {
 }
 .dx-devsec :is(.dx-section-body, .dx-subgroup) > .field-help { margin: 10px 0 0; font-size: 12px; color: var(--dx-faint); }
 .dx-devsec .dx-divider { margin: 18px 0 14px; }
-.dx-devsec .device-subhead { margin: 0 0 4px; }
+/* The device page draws its own separators between groups. */
+.dx-devsec .device-subhead { margin: 0 0 4px; padding-top: 0; border-top: 0; }
 .dx-devsec .dx-toggle-row { padding: 6px 0 14px; }
 .dx-devsec .dx-quiet-hours [data-dep-target] + [data-dep-target] { margin-top: 14px; }
 .dx-devsec .dx-quiet-hours[data-dep-off] [data-dep-target] { opacity: 0.55; pointer-events: none; }
