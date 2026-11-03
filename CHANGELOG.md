@@ -12,6 +12,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Device batteries: a Wakes / day tile with a breakdown by cause.
 - Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.
 - Device batteries: each chart has its own 12h / 24h / 7d / 30d range, remembered per device, and drag-to-zoom.
+- Collapsible sections on the Server, System, About, Stats, Widgets, Companion, Generative AI, Cloud relay, calendar-feed and gallery pages, remembered per page; `section_card` takes `collapsible=False` to opt out.
 - Lineups redesign, part 1 of 3: a view model for the Lineups page and the
   endpoints the new page edits through. `GET /decks/view.json` describes every
   display (what is on screen, what is queued and when a sleeping frame picks it
@@ -79,11 +80,11 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Changed
 
-- Sub-headings (device page groups, stats, themes, wizard) use the theme accent colour.
 
 - Device page: six collapsible sections instead of eleven, the top tiles jump to their section, the battery offsets sit inside the Power tile, and the Display fields sit in a compact grid.
 
 - Device batteries: Clear battery history is a small link in the card's corner.
+- Sub-section titles (System, Stats, Themes, wizard and device groups) are one 18px accent-coloured heading with a hairline above, in place of the small uppercase caption.
 - Lineups redesign, part 2 of 3: the Lineups page is rebuilt on the view model
   from part 1. Each display gets a header that says what is on screen (the
   picture itself), what is queued and when it lands, and when the frame next
