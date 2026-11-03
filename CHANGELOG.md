@@ -137,6 +137,9 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Device batteries: the chart tooltip is readable in the dark theme, and dots are no longer cut off at the edges.
 - Device batteries: Visionect frames no longer show drain predictions.
 - History: 12-hour times no longer overlap the thumbnail.
+- A link now always sits left of a button, and the primary action is rightmost,
+  across the admin pages, dialogs and banners.
+
 - A lineup step that lands a pre-rendered frame now shows up everywhere the
   newest push is read. Home Assistant's Next and Previous, a physical button,
   a tap, the companion API, the Lineups page's step and a home return could
