@@ -16,27 +16,6 @@
 </{{ _tag }}>
 {%- endmacro -%}
 
-{# Head of a collapsible device-page section: icon, title, blurb and a
-   chevron button. The button is the keyboard and screen-reader control;
-   settings.js (initDevSections) also makes the rest of the header a click
-   target, remembers the choice per section id, and expands the section for
-   a jump or a #hash. The body it controls is ``<id>-body``. #}
-{%- macro devsec_head(id, icon, title, desc) -%}
-<header class="dx-section-head" data-devsec-head>
-  <span class="dx-section-icon" aria-hidden="true"><i class="ph ph-{{ icon }}"></i></span>
-  <div class="dx-section-titleblock">
-    <h3 class="dx-section-title">{{ title }}</h3>
-    <p class="dx-section-desc">{{ desc }}</p>
-  </div>
-  {#- Called with {% call %}: the caller's actions sit at the header's end. -#}
-  {% if caller is defined %}<div class="dx-section-actions">{{ caller() }}</div>{% endif %}
-  <button type="button" class="dx-sec-toggle" data-devsec-toggle aria-expanded="true" aria-controls="{{ id }}-body">
-    <i class="ph ph-caret-down" aria-hidden="true"></i>
-    <span class="sr-only">Collapse {{ title }}</span>
-  </button>
-</header>
-{%- endmacro -%}
-
 {%- macro mode_badge(section) -%}
 {% if section.mode_observation and section.mode_observation.mode == 'bluetooth' %}
 <i class="ph ph-bluetooth dx-devrow-icon" role="img" data-device-mode-badge

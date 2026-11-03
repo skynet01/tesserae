@@ -655,6 +655,8 @@
 .dx-devpage .dx-dp .dx-btn.is-sm .ph { font-size: 14px; }
 .dx-devpage .dx-dp .dx-btn.is-icon { width: var(--dp-input-h); height: var(--dp-input-h) !important; min-height: var(--dp-input-h) !important; padding: 0 !important; flex: none; }
 .dx-devpage .dx-dp .dx-btn.is-icon.is-sm { width: 32px; height: 32px !important; min-height: 32px !important; }
+.dx-devpage .dx-dp .dx-more > summary.dx-btn { color: var(--t-fg-soft); }
+.dx-devpage .dx-dp .dx-more > summary.dx-btn .ph { font-size: 20px; }
 .dx-devpage .dx-dp .dx-rail-actions .dx-btn.is-icon { width: var(--dp-btn-h); height: var(--dp-btn-h) !important; min-height: var(--dp-btn-h) !important; }
 .dx-devpage .dx-dp .dx-btn.is-num { width: 40px; padding: 0 !important; font-family: var(--t-font-mono) !important; font-weight: 400 !important; }
 .dx-devpage .dx-dp .dx-swap { width: 34px; color: var(--t-fg-soft); }
@@ -949,6 +951,6 @@
    teal on white 4.1:1, Paper dark red under white 4.5:1 short), so on this
    page small accent text uses the darker hover shade and the primary
    button a slightly deeper fill. Large group titles keep the accent (3:1). */
-.dx-devpage .dx-dp .dx-btn.is-primary { background: color-mix(in oklab, var(--t-accent) 88%, #000); border-color: color-mix(in oklab, var(--t-accent) 88%, #000); }
-.dx-devpage .dx-dp .dx-btn.is-primary:hover { background: color-mix(in oklab, var(--t-accent) 78%, #000); border-color: color-mix(in oklab, var(--t-accent) 78%, #000); }
+.dx-devpage .dx-dp .dx-btn.is-primary { background: oklch(from var(--t-accent) calc(l - 0.04) c h); border-color: oklch(from var(--t-accent) calc(l - 0.04) c h); }
+.dx-devpage .dx-dp .dx-btn.is-primary:hover { background: oklch(from var(--t-accent) calc(l - 0.09) c h); border-color: oklch(from var(--t-accent) calc(l - 0.09) c h); }
 :root:not([data-theme="dark"]):not([data-ui="paper"]) .dx-devpage .dx-dp :is(.dx-link-btn, .dx-callout > a, .dx-subnav-link.is-active) { color: var(--t-accent-hover); }
