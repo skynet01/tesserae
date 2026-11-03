@@ -137,13 +137,16 @@
    Device page (2026-11 redesign): the standard field and the summary rail.
    ===================================================================== #}
 
-{#- One standard field: a label line (label, one info popover, one kind tag)
+{#- ``attrs`` / ``input_attrs`` on these macros are raw attribute text
+    written by the templates; escape any data put into them (``|e``).
+
+    One standard field: a label line (label, one info popover, one kind tag)
     over a control line. ``w`` sizes it by its content (num 110, time 140,
     sm 150, md 196, lg 232, xl 300, auto); the control(s) come from the
     caller. ``label_for`` False labels a group of controls (days, a size
     pair) with a span instead, whose id the group can point at. -#}
-{%- macro fld(id, label, help=None, w='md', tag=None, cls='', attrs='', label_for=True) -%}
-<div class="dx-f w-{{ w }}{% if cls %} {{ cls }}{% endif %}"{% if attrs %} {{ attrs }}{% endif %}>
+{%- macro fld(id, label, help=None, w='md', tag=None, cls='', attrs='', label_for=True, data=None) -%}
+<div class="dx-f w-{{ w }}{% if cls %} {{ cls }}{% endif %}"{% if attrs %} {{ attrs|safe }}{% endif %}{% for k, v in (data or {}).items() %} data-{{ k }}="{{ v }}"{% endfor %}>
   <div class="dx-f-head">
     {%- if label_for %}<label class="dx-f-label" for="{{ id }}">{{ label }}</label>
     {%- else %}<span class="dx-f-label" id="{{ id }}-label">{{ label }}</span>{% endif -%}
@@ -157,10 +160,10 @@
     level with the inputs beside it. A caller adds what appears beside the
     switch when it is on (Poll every). -#}
 {%- macro toggle_fld(id, name, label, checked=False, help=None, form=None, tag=None, cls='', attrs='', input_attrs='') -%}
-<div class="dx-f is-toggle{% if cls %} {{ cls }}{% endif %}"{% if attrs %} {{ attrs }}{% endif %}>
+<div class="dx-f is-toggle{% if cls %} {{ cls }}{% endif %}"{% if attrs %} {{ attrs|safe }}{% endif %}>
   <div class="dx-f-ctl">
     <span class="dx-sw">
-      <input type="checkbox" id="{{ id }}" name="{{ name }}"{% if form %} form="{{ form }}"{% endif %}{% if checked %} checked{% endif %}{% if input_attrs %} {{ input_attrs }}{% endif %}>
+      <input type="checkbox" id="{{ id }}" name="{{ name }}"{% if form %} form="{{ form }}"{% endif %}{% if checked %} checked{% endif %}{% if input_attrs %} {{ input_attrs|safe }}{% endif %}>
       <span class="dx-sw-track" aria-hidden="true"><span class="dx-sw-knob"></span></span>
     </span>
     <label class="dx-f-label" for="{{ id }}">{{ label }}</label>
@@ -181,7 +184,7 @@
   {%- if value_key == ov|string %}{% set selected.found = true %}{% endif -%}
 {%- endfor -%}
 {%- set has_value = value_key != '' -%}
-<select class="dx-in" id="{{ id }}"{% if name %} name="{{ name }}"{% endif %}{% if form %} form="{{ form }}"{% endif %}{% if attrs %} {{ attrs }}{% endif %}>
+<select class="dx-in" id="{{ id }}"{% if name %} name="{{ name }}"{% endif %}{% if form %} form="{{ form }}"{% endif %}{% if attrs %} {{ attrs|safe }}{% endif %}>
   {%- if blank_label is not none %}<option value=""{% if not has_value %} selected{% endif %}>{{ blank_label }}</option>{% endif %}
   {%- if not selected.found and (has_value or blank_label is none) %}<option value="{{ value_key }}" selected data-unmatched-option>{% if has_value %}Unavailable: {{ value_key }}{% else %}(not set){% endif %}</option>{% endif %}
   {%- set ns = namespace(group='') %}
@@ -362,7 +365,7 @@
 {%- if ov.queued or outdated or overdue or low or bt or coll %}
 <ul class="dx-callouts" aria-label="Needs attention">
   {%- if ov.queued %}
-  <li class="dx-callout{% if ov.queued.live %} is-live{% endif %}" role="status" data-device-queued>
+  <li class="dx-callout{% if ov.queued.live %} is-live{% endif %}" role="status" title="{{ ov.queued.title }}" data-device-queued>
     <i class="ph ph-clock-countdown is-warn" aria-hidden="true"></i><span>{{ ov.queued.text }}</span>
   </li>
   {%- endif %}

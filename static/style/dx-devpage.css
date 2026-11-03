@@ -84,6 +84,8 @@
   line-height: 1.4;
 }
 .dx-dp-main { min-width: 0; }
+/* Classes here set display on things the scripts hide; hidden still wins. */
+.dx-dp [hidden] { display: none !important; }
 .dx-dp :is(h1, h2, h3, p) { margin: 0; }
 .dx-dp code, .dx-dp .dx-mono { font-family: var(--t-font-mono); font-size: var(--t-type-mono); font-variant-numeric: tabular-nums; }
 :root[data-ui="paper"] .dx-dp :is(code, .dx-mono) { font-size: 0.75rem; }
@@ -236,6 +238,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.dx-devpage .dx-dp .dx-vital-v.dx-devstatus { color: var(--t-fg); font-size: inherit; }
 .dx-dp .dx-vital-v.is-muted { color: var(--t-fg-soft); font-weight: 400; }
 .dx-dp .dx-vital-v.is-warn { color: var(--dx-warn-text, var(--t-warn)); }
 .dx-dp .dx-vital-v .dx-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--t-border-strong); }
@@ -346,6 +349,12 @@
 .dx-dp .dx-subnav-link.is-danger { color: var(--dx-danger, var(--t-danger)); margin-left: auto; }
 .dx-dp .dx-subnav-link.is-danger.is-active { background: var(--dx-danger-hover, var(--t-danger-bg)); }
 
+/* Paper on a desktop pins the battery pill to the top-right corner; the
+   strip, stuck at the top, keeps its last link clear of it. */
+@media (min-width: 901px) {
+  :root[data-ui="paper"] body:has(.topbar > .topbar-batteries--topbar) .dx-dp .dx-secnav { padding-right: 84px; }
+}
+
 /* ---- Sections ---------------------------------------------------------- */
 .dx-dp .dx-dsec {
   padding: var(--dp-pad-y) var(--dp-pad-x);
@@ -414,7 +423,7 @@
   letter-spacing: -0.01em;
   color: var(--dp-group);
 }
-.dx-devpage .dx-dp .dx-grp-end { margin-left: auto; display: inline-flex; align-items: center; gap: 14px; }
+.dx-devpage .dx-dp .dx-grp-head > .dx-grp-end { margin-left: auto; display: inline-flex; align-items: center; gap: 14px; }
 
 /* ---- The standard field ------------------------------------------------ */
 .dx-dp .dx-fg { display: flex; flex-wrap: wrap; gap: 18px 16px; align-items: flex-start; }
@@ -934,3 +943,12 @@
   .dx-dp .dx-collect .dx-btn-row { flex-wrap: wrap; }
   .dx-dp .dx-save-bar { margin-left: 0; margin-right: 0; }
 }
+
+/* ---- Contrast (WCAG AA for small text) ----------------------------------
+   The accent is a touch light for 14px text in two themes (Classic light
+   teal on white 4.1:1, Paper dark red under white 4.5:1 short), so on this
+   page small accent text uses the darker hover shade and the primary
+   button a slightly deeper fill. Large group titles keep the accent (3:1). */
+.dx-devpage .dx-dp .dx-btn.is-primary { background: color-mix(in oklab, var(--t-accent) 88%, #000); border-color: color-mix(in oklab, var(--t-accent) 88%, #000); }
+.dx-devpage .dx-dp .dx-btn.is-primary:hover { background: color-mix(in oklab, var(--t-accent) 78%, #000); border-color: color-mix(in oklab, var(--t-accent) 78%, #000); }
+:root:not([data-theme="dark"]):not([data-ui="paper"]) .dx-devpage .dx-dp :is(.dx-link-btn, .dx-callout > a, .dx-subnav-link.is-active) { color: var(--t-accent-hover); }

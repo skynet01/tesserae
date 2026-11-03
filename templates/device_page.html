@@ -279,7 +279,7 @@
               {% set fid = section.id ~ '-pq-' ~ pq.base_id ~ '-' ~ field.name %}
               {% set value = pq.state.get(field.name, field.get('default', '')) %}
               {% if field.get('type') == 'select' %}
-              {% call fld(fid, field.get('label', field.name)|replace(' (quarter-turns)', '')|replace('Client-side scale mode', 'Client scale'), help=field.get('help'), w='md', attrs='data-pq-renderer="' ~ pq.base_name ~ '"') %}
+              {% call fld(fid, field.get('label', field.name)|replace(' (quarter-turns)', '')|replace('Client-side scale mode', 'Client scale'), help=field.get('help'), w='md', data={'pq-renderer': pq.base_name}) %}
                 {{ dx_select(fid, pq.clone_id ~ ':' ~ field.name, value, field.get('choices', []), form=_form) }}
               {% endcall %}
               {% else %}
