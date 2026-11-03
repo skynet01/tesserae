@@ -8,6 +8,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
+- Collapsible sections on the Server, System, About, Stats, Widgets, Companion, Generative AI, Cloud relay, calendar-feed and gallery pages, remembered per page; `section_card` takes `collapsible=False` to opt out.
 - Lineups redesign, part 1 of 3: a view model for the Lineups page and the
   endpoints the new page edits through. `GET /decks/view.json` describes every
   display (what is on screen, what is queued and when a sleeping frame picks it
@@ -75,6 +76,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Changed
 
+- Sub-section titles (System, Stats, Themes, wizard and device groups) are one 18px accent-coloured heading with a hairline above, in place of the small uppercase caption.
 - Lineups redesign, part 2 of 3: the Lineups page is rebuilt on the view model
   from part 1. Each display gets a header that says what is on screen (the
   picture itself), what is queued and when it lands, and when the frame next
