@@ -37,7 +37,7 @@
   --dp-btn-h: 36px;
   --dp-input-h: 40px;
   --dp-input-border: #dedcd6;
-  --dp-group: var(--t-accent);
+  --dp-group: var(--t-fg);
   --dp-focus: var(--t-accent);
   --dp-nav-h: 54px;
   --dp-top: var(--t-topbar-h, 61px);
@@ -58,7 +58,7 @@
   --dp-hair: var(--t-border);
   --dp-btn-h: 40px;
   --dp-input-border: var(--t-border-strong);
-  --dp-group: var(--p-red, var(--t-accent));
+  --dp-group: var(--t-fg);
   --dp-focus: var(--p-focus, var(--t-accent));
 }
 
@@ -117,7 +117,7 @@
 }
 .dx-dp .dx-rail-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 14px;
   margin: 0 0 16px;
   padding-bottom: 16px;
@@ -349,12 +349,6 @@
 .dx-dp .dx-subnav-link.is-danger { color: var(--dx-danger, var(--t-danger)); margin-left: auto; }
 .dx-dp .dx-subnav-link.is-danger.is-active { background: var(--dx-danger-hover, var(--t-danger-bg)); }
 
-/* Paper on a desktop pins the battery pill to the top-right corner; the
-   strip, stuck at the top, keeps its last link clear of it. */
-@media (min-width: 901px) {
-  :root[data-ui="paper"] body:has(.topbar > .topbar-batteries--topbar) .dx-dp .dx-secnav { padding-right: 84px; }
-}
-
 /* ---- Sections ---------------------------------------------------------- */
 .dx-dp .dx-dsec {
   padding: var(--dp-pad-y) var(--dp-pad-x);
@@ -412,13 +406,13 @@
 .dx-dp .dx-dsec-body { margin-top: var(--t-gap-head); }
 .dx-dp .dx-dsec.is-danger { border-color: var(--dx-danger-border, color-mix(in oklab, var(--t-danger) 40%, transparent)); }
 
-/* Groups: an accent title, then rows. Spacing, not rules, separates them. */
+/* Groups: a quiet title in the text colour, then rows. Spacing, not rules, separates them. */
 .dx-dp .dx-grp { scroll-margin-top: calc(var(--dp-top) + var(--dp-nav-h) + 16px); }
 .dx-dp .dx-grp + .dx-grp { margin-top: var(--t-gap-group); }
 .dx-dp .dx-grp-head { display: flex; align-items: center; gap: 10px 12px; flex-wrap: wrap; margin-bottom: var(--t-gap-title); }
 .dx-dp .dx-grp-title {
-  font-size: var(--t-type-group);
-  font-weight: 700;
+  font-size: var(--t-type-body);
+  font-weight: 600;
   line-height: 1.25;
   letter-spacing: -0.01em;
   color: var(--dp-group);

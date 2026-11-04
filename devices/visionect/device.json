@@ -21,6 +21,129 @@
       "label": "Frame UUID",
       "default": "",
       "help": "The frame's UUID, e.g. 36002000-1247-3830-3933-303600000000 (on the label, or in the old Visionect server's device list). Leave blank and the first unknown frame that connects within an hour of adding the device (or clearing this field) is bound to it; later ones are listed as discovered devices."
+    },
+    "heartbeat_min": {
+      "type": "int",
+      "label": "Sleep interval",
+      "min": 1,
+      "max": 1440,
+      "presets": [
+        {"value": 5, "label": "5 minutes"},
+        {"value": 15, "label": "15 minutes"},
+        {"value": 30, "label": "30 minutes"},
+        {"value": 60, "label": "1 hour"},
+        {"value": 120, "label": "2 hours"},
+        {"value": 360, "label": "6 hours"},
+        {"value": 720, "label": "12 hours"},
+        {"value": 1440, "label": "1 day"}
+      ],
+      "help": "How long the frame sleeps between check-ins. Tesserae writes it to the frame the next time it connects and saves it to the frame's flash. Custom value is in minutes."
+    },
+    "frame_sleep": {
+      "type": "select",
+      "group": "sign",
+      "label": "Sleep between check-ins",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "sleep", "label": "Sleep between check-ins"},
+        {"value": "awake", "label": "Stay awake (drains the battery)"}
+      ],
+      "help": "Whether the frame sleeps between check-ins. Staying awake keeps Wi-Fi on and drains the battery; use it only on mains power."
+    },
+    "touch_mode": {
+      "type": "select",
+      "group": "sign",
+      "label": "Touch",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "0", "label": "Off"},
+        {"value": "1", "label": "On"},
+        {"value": "3", "label": "On with beep"}
+      ],
+      "help": "Whether the frame reacts to touch, and whether it beeps."
+    },
+    "system_screens": {
+      "type": "select",
+      "group": "sign",
+      "label": "System screens",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "1", "label": "Battery"},
+        {"value": "2", "label": "Not connected"},
+        {"value": "3", "label": "Battery and not connected"}
+      ],
+      "help": "Which built-in status screens the frame may draw itself: the low-battery screen, the not-connected screen, or both."
+    },
+    "roaming_mode": {
+      "type": "select",
+      "group": "sign",
+      "label": "Wi-Fi roaming",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "0", "label": "Off"},
+        {"value": "1", "label": "On"}
+      ],
+      "help": "Lets the frame move to a stronger access point of the same network."
+    },
+    "wifi_region": {
+      "type": "select",
+      "group": "sign",
+      "label": "Wi-Fi region",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "0", "label": "Default"},
+        {"value": "1", "label": "US"},
+        {"value": "2", "label": "Europe"},
+        {"value": "3", "label": "Japan"}
+      ],
+      "help": "The regulatory region the Wi-Fi radio uses."
+    },
+    "wifi_mode": {
+      "type": "select",
+      "group": "sign",
+      "label": "Wi-Fi power mode",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "0", "label": "Default"},
+        {"value": "1", "label": "No broadcast filtering"},
+        {"value": "2", "label": "Enhanced max power save"},
+        {"value": "3", "label": "No broadcast filtering, enhanced power save"}
+      ],
+      "help": "Wi-Fi power saving behaviour. Leave on default unless the frame misses updates."
+    },
+    "epd_border": {
+      "type": "select",
+      "group": "sign",
+      "label": "Panel border",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "0", "label": "From the server"},
+        {"value": "1", "label": "White"},
+        {"value": "2", "label": "Black"}
+      ],
+      "help": "The colour of the panel's border pixels."
+    },
+    "charging_mode": {
+      "type": "select",
+      "group": "sign",
+      "label": "Battery charging",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "0", "label": "Normal"},
+        {"value": "1", "label": "Charging off"}
+      ],
+      "help": "Charging off stops the battery charging from its supply."
+    },
+    "ble_mode": {
+      "type": "select",
+      "group": "sign",
+      "label": "Bluetooth",
+      "choices": [
+        {"value": "", "label": "Leave as the frame has it"},
+        {"value": "0", "label": "Off"},
+        {"value": "1", "label": "On"}
+      ],
+      "help": "Whether the frame's Bluetooth radio is on."
     }
   }
 }

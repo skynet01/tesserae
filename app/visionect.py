@@ -138,17 +138,67 @@ MAX_UNKNOWN_SIGNS = 16
 MAX_DISCOVERED = 8
 MAX_WARNED_UNBOUND = 64
 # The sign's own settings (TCLV parameters), read on every connection and
-# shown on the device page. Writing the check-in interval (minutes) and the
-# sleep-mode switch, then saving them to the sign's flash, is implemented
-# (``desired_params``, ``_sync_params``) but NOT offered in the UI: it has not
-# been tried on hardware, and a bad flash-save write persists on the sign.
-# Nothing sets ``heartbeat_min`` / ``frame_sleep`` in a device's config, so
-# nothing is written. Only these two (and the flash save) are ever written.
+# shown on the device page. The check-in interval (minutes) is set from the
+# device page's "Sleep interval" field (``heartbeat_min`` in the device's
+# config); ``desired_params`` / ``_sync_params`` write it, save it to the
+# sign's flash and read it back, once per connection. The sleep-mode switch
+# (``frame_sleep``) and the ``SIGN_SETTINGS`` below are written the same way
+# from the device page's Advanced disclosure. Only those (and the flash save)
+# are ever written.
 PARAM_HEARTBEAT = 29
 PARAM_SLEEP_DISABLE = 52
 PARAM_FLASH_SAVE = 53
 PARAM_WIFI_SSID = 65
 READ_PARAMS = (PARAM_HEARTBEAT, PARAM_SLEEP_DISABLE, PARAM_WIFI_SSID)
+# The sign's other plain settings, offered under "Advanced: frame settings" on
+# the device page. Config name -> (TCLV id, ((config value, wire value, label),
+# ...)); the ids and meanings are the vendor's parameter table as pyvisionect
+# lists it. They are read once per connection in a second read, and a setting
+# the sign answers with a read error (or not at all) is never offered, so each
+# frame shows what its own firmware has. Network identity (server, SSID,
+# password, Wi-Fi band), encryption, panel geometry and shipping mode are left
+# out on purpose: a wrong value there loses or bricks the sign.
+SIGN_SETTINGS: dict[str, tuple[int, tuple[tuple[str, int, str], ...]]] = {
+    "frame_sleep": (
+        PARAM_SLEEP_DISABLE,
+        (("sleep", 0, "Sleep between check-ins"), ("awake", 1, "Stay awake (drains the battery)")),
+    ),
+    "touch_mode": (50, (("0", 0, "Off"), ("1", 1, "On"), ("3", 3, "On with beep"))),
+    "system_screens": (
+        49,
+        (("1", 1, "Battery"), ("2", 2, "Not connected"), ("3", 3, "Battery and not connected")),
+    ),
+    "roaming_mode": (54, (("0", 0, "Off"), ("1", 1, "On"))),
+    "wifi_region": (
+        144,
+        (("0", 0, "Default"), ("1", 1, "US"), ("2", 2, "Europe"), ("3", 3, "Japan")),
+    ),
+    "wifi_mode": (
+        173,
+        (
+            ("0", 0, "Default"),
+            ("1", 1, "No broadcast filtering"),
+            ("2", 2, "Enhanced max power save"),
+            ("3", 3, "No broadcast filtering, enhanced power save"),
+        ),
+    ),
+    "epd_border": (109, (("0", 0, "From the server"), ("1", 1, "White"), ("2", 2, "Black"))),
+    "charging_mode": (172, (("0", 0, "Normal"), ("1", 1, "Charging off"))),
+    "ble_mode": (155, (("0", 0, "Off"), ("1", 1, "On"))),
+}
+EXTRA_PARAMS = tuple(pid for pid, _ in SIGN_SETTINGS.values() if pid not in READ_PARAMS)
+ALL_READ_PARAMS = READ_PARAMS + EXTRA_PARAMS
+
+
+def sign_setting_labels(known: dict[int, int]) -> dict[str, str]:
+    """The settings the sign has answered, config name -> what it is set to."""
+    out: dict[str, str] = {}
+    for name, (pid, choices) in SIGN_SETTINGS.items():
+        if pid not in known:
+            continue
+        label = next((lab for _cv, wire, lab in choices if wire == known[pid]), None)
+        out[name] = label or f"{known[pid]}"
+    return out
 HEARTBEAT_MAX_MINUTES = 24 * 60
 # Gaps between consecutive statuses that count as a check-in cadence (see
 # ``observed_status_gap_s``), and how many status times are kept to measure it.
@@ -164,6 +214,7 @@ PARAM_NAMES = {
     PARAM_SLEEP_DISABLE: "sleep mode",
     PARAM_FLASH_SAVE: "flash save",
 }
+PARAM_NAMES.update({pid: name.replace("_", " ") for name, (pid, _c) in SIGN_SETTINGS.items()})
 # pyvisionect.devices.enums.ParamControl.
 PARAM_READ = 0
 PARAM_READ_ERROR = 2
@@ -282,10 +333,9 @@ def observed_status_gap_s(times: Sequence[float]) -> float | None:
 
 def desired_params(cfg: dict[str, Any]) -> dict[int, int]:
     """The sign settings a device's config asks for, as TCLV id to value:
-    ``heartbeat_min`` (minutes between check-ins) and ``frame_sleep``
-    ("sleep" or "awake"). Blank, absent or junk leaves the sign's own
-    setting, which is what every device does: the device kind has no such
-    config fields, because writing them is untested on hardware."""
+    ``heartbeat_min`` (minutes between check-ins) and the ``SIGN_SETTINGS``
+    choices (``frame_sleep`` is "sleep" or "awake"). Blank, absent or junk
+    leaves the sign's own setting."""
     out: dict[int, int] = {}
     try:
         minutes = int(str(cfg.get("heartbeat_min") or "").strip())
@@ -293,9 +343,11 @@ def desired_params(cfg: dict[str, Any]) -> dict[int, int]:
         minutes = 0
     if 1 <= minutes <= HEARTBEAT_MAX_MINUTES:
         out[PARAM_HEARTBEAT] = minutes
-    mode = str(cfg.get("frame_sleep") or "").strip()
-    if mode in ("sleep", "awake"):
-        out[PARAM_SLEEP_DISABLE] = 1 if mode == "awake" else 0
+    for name, (pid, choices) in SIGN_SETTINGS.items():
+        chosen = str(cfg.get(name) or "").strip()
+        for config_value, wire, _label in choices:
+            if chosen == config_value:
+                out[pid] = wire
     return out
 
 
@@ -481,6 +533,12 @@ class _Sign:
     # recorded with the sign's own cadence.
     known_interval_min: int | None = None
     known_sleep_disabled: bool | None = None
+    # Every setting the sign has answered (id -> value), and the ids it
+    # refused to read. Both outlive the connection so the device page keeps
+    # offering what the frame supports while it sleeps.
+    known_params: dict[int, int] = field(default_factory=dict)
+    params_unsupported: set[int] = field(default_factory=set)
+    extras_asked: bool = False  # the second read (EXTRA_PARAMS) went out this connection
     # Wall clock times of the sign's recent statuses, newest last. The gap
     # between them is its real check-in cadence, which the configured interval
     # (TCLV 29) is not: a 32" set to 30 min reports about every 15.
@@ -1388,17 +1446,40 @@ class VisionectService:
             self._await_params(sign)
             await self._write(conn, writer)
             return True
-        want = desired_params(self._device_cfg(device.id))
-        if any(pid not in sign.params for pid in want):
-            return False  # not read yet (or this firmware doesn't have it)
-        change = tuple(sorted((pid, v) for pid, v in want.items() if sign.params[pid] != v))
-        if not change or change == sign.params_written:
+        if not sign.extras_asked:
+            sign.extras_asked = True
+            try:
+                conn.read_params(list(EXTRA_PARAMS))
+            except Exception:
+                logger.debug("visionect: reading %s's extra settings failed", sign.uuid, exc_info=True)
+                return False
+            self._note(sign, "out", "read more settings")
+            self._await_params(sign)
+            await self._write(conn, writer)
+            return True
+        # Only settings this sign has answered are written: one it doesn't
+        # have (or didn't answer) is skipped, not allowed to hold up the rest.
+        want = {
+            pid: v for pid, v in desired_params(self._device_cfg(device.id)).items()
+            if pid in sign.params
+        }
+        # A (setting, value) pair goes out once per connection, so a stale
+        # value still showing while a read back is in flight isn't rewritten.
+        change = tuple(
+            sorted(
+                (pid, v)
+                for pid, v in want.items()
+                if sign.params[pid] != v and (pid, v) not in sign.params_written
+            )
+        )
+        if not change:
             return False
-        sign.params_written = change
+        sign.params_written = tuple(sorted({*sign.params_written, *change}))
         try:
             conn.write_params(dict(change))
             conn.write_params({PARAM_FLASH_SAVE: 1})
             conn.read_params(list(READ_PARAMS))
+            conn.read_params(list(EXTRA_PARAMS))
         except Exception as exc:
             sign.param_error = f"Tesserae couldn't write the frame's settings: {exc}"
             logger.warning("visionect: writing %s's settings failed: %s", sign.uuid, exc)
@@ -1440,12 +1521,17 @@ class VisionectService:
                 )
                 logger.warning("visionect: sign %s refused a write to TCLV %d", sign.uuid, pid)
                 continue
-            if control != PARAM_READ or pid not in READ_PARAMS or not item.value:
+            if control == PARAM_READ_ERROR and pid in ALL_READ_PARAMS:
+                sign.params_unsupported.add(pid)  # this firmware doesn't have it
+                continue
+            if control != PARAM_READ or pid not in ALL_READ_PARAMS or not item.value:
                 continue  # a write's echo, an error, or nothing to read
+            sign.params_unsupported.discard(pid)
             if pid == PARAM_WIFI_SSID:
                 sign.params[pid] = item.value.split(b"\0")[0].decode("ascii", "replace")
             else:
                 sign.params[pid] = int.from_bytes(item.value, "little")
+                sign.known_params[pid] = sign.params[pid]
                 if pid == PARAM_HEARTBEAT:
                     sign.known_interval_min = sign.params[pid]
                 elif pid == PARAM_SLEEP_DISABLE:
@@ -1693,6 +1779,7 @@ class VisionectService:
         # Read the sign's settings afresh on every connection (a reboot or a
         # USB console may have changed them); a new connection may write again.
         sign.params, sign.params_asked, sign.params_wait_until = {}, False, 0.0
+        sign.extras_asked = False
         sign.params_written, sign.param_error = (), ""
         device = device or self._bind(uuid)
         self._check_glass(sign, status)
@@ -1904,6 +1991,7 @@ class VisionectService:
             "status": status_summary(sign.status),
             "heartbeat_min": sign.params.get(PARAM_HEARTBEAT),
             "sleep_disabled": sign.params.get(PARAM_SLEEP_DISABLE),
+            "settings": sign_setting_labels(sign.known_params),
             "wifi": sign.params.get(PARAM_WIFI_SSID),
             "param_error": sign.param_error,
             "action": dict(sign.action) if sign.action else None,

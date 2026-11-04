@@ -121,3 +121,11 @@ def test_only_the_place_and_play_32_declares_no_buttons(tmp_path) -> None:
     for kind_id in kinds:
         if kind_id != "visionect_place_and_play_32":
             assert has_buttons(registry.get(kind_id)), kind_id
+
+
+@pytest.mark.parametrize(
+    ("minutes", "ok"),
+    [(None, True), ("", True), (30, True), (1, True), (1440, True), (0, False), (1441, False), (True, False), ("5", False)],
+)
+def test_validate_config_checks_the_sleep_interval(visionect, minutes: object, ok: bool) -> None:
+    assert visionect.validate_config({"heartbeat_min": minutes})[0] is ok

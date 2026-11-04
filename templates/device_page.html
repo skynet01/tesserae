@@ -273,7 +273,7 @@
             {% endcall %}
             {% endif %}
             {% endif %}
-            {% for field in (section.fields or []) if field.type == 'select' %}{{ config_field(section, field, _form) }}{% endfor %}
+            {% for field in (section.fields or []) if field.type == 'select' and field.get('group') != 'sign' %}{{ config_field(section, field, _form) }}{% endfor %}
             {% for pq in section.picture_quality %}
             {% for field in pq.fields %}
               {% set fid = section.id ~ '-pq-' ~ pq.base_id ~ '-' ~ field.name %}
@@ -289,6 +289,21 @@
             {% endfor %}
           </div>
         </div>
+
+        {#- The frame's own plain settings (Visionect): only the ones this
+            frame answered when it last connected are offered. -#}
+        {% set _sign_fields = (section.fields or [])|selectattr('group', 'equalto', 'sign')|list %}
+        {% if sign and _sign_fields %}
+        {% set _offered = _sign_fields|selectattr('name', 'in', sign.settings.keys()|list)|list %}
+        <details class="dx-adv" id="frame-settings">
+          <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Advanced: frame settings</span></summary>
+          <div class="dx-fg dx-adv-body">
+            {% for field in _offered %}{{ config_field(section, dict(field, help=(field.help ~ ' The frame is set to ' ~ sign.settings[field.name] ~ '.')), _form) }}{% else %}
+            <p class="dx-help">Shown once the frame has connected and told Tesserae which of its settings it has.</p>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
       </div>
     </section>
 
@@ -311,9 +326,12 @@
             {#- One control per setting: a Visionect sign sets its own check-in
                 interval, read here; every other kind picks it below. -#}
             {% set _sign_interval = (sign.rows|selectattr(0, 'in', ['Check-in interval', 'Next check-in'])|first) if sign else none %}
-            {% if _sign_interval and not t_fields %}
-            {% call fld(section.id ~ '-sleep-ro', 'Sleep interval', help='This frame sleeps between check-ins on its own interval, set on the frame and read at each check-in.', w='md', label_for=False) %}
-              <p class="dx-f-value" aria-labelledby="{{ section.id }}-sleep-ro-label">{{ _sign_interval[1] }} <span class="dx-help">· set on the frame</span></p>
+            {% set _hb = t_fields|selectattr('name', 'equalto', 'heartbeat_min')|first %}
+            {% set _hb_now = (section.state.get('heartbeat_min') or sign.heartbeat_min) if _hb else none %}
+            {% if _hb and _hb_now %}{{ config_field(section, dict(_hb, default=_hb_now), _form) }}
+            {% elif _sign_interval %}
+            {% call fld(section.id ~ '-sleep-ro', 'Sleep interval', help='Shown once the frame has connected and told Tesserae its interval; then you can change it here.' if _hb else 'This frame sleeps between check-ins on its own interval, set on the frame and read at each check-in.', w='md', label_for=False) %}
+              <p class="dx-f-value" aria-labelledby="{{ section.id }}-sleep-ro-label">{{ _sign_interval[1] }}{% if not _hb %} <span class="dx-help">· set on the frame</span>{% endif %}</p>
             {% endcall %}
             {% endif %}
             {% for field in t_fields if field.name in ('sleep_interval_s', 'refresh_rate_s') %}{{ config_field(section, field, _form) }}{% endfor %}
@@ -323,7 +341,7 @@
               {{ dx_select(section.id ~ '-refresh-mode', 'refresh_mode', section.refresh_mode, [{'value': 'full', 'label': 'Always full refresh'}], blank_label='Auto (partial)', form=_form) }}
             {% endcall %}
             {% endif %}
-            {% for field in t_fields if field.name not in ('sleep_interval_s', 'refresh_rate_s', 'always_on') and not (field.name == 'awake_poll_s' and has_always_on) %}{{ config_field(section, field, _form) }}{% endfor %}
+            {% for field in t_fields if field.name not in ('sleep_interval_s', 'refresh_rate_s', 'always_on', 'heartbeat_min') and not (field.name == 'awake_poll_s' and has_always_on) %}{{ config_field(section, field, _form) }}{% endfor %}
             {% for field in t_fields if field.name == 'always_on' %}{{ config_field(section, field, _form, awake=awake_spec) }}{% endfor %}
           </div>
 
@@ -573,7 +591,7 @@
           {#- The sign's report, minus what is shown once elsewhere: the
               interval (Timing), and firmware / battery / temperature when the
               rail's vitals already carry them. -#}
-          {% set _dup = (['Check-in interval', 'Next check-in'] if not t_fields else [])
+          {% set _dup = ['Check-in interval', 'Next check-in']
               + ([] if section.overview.firmware.muted else ['Firmware'])
               + ([] if section.overview.battery.muted else ['Battery'])
               + (['Temperature'] if section.status.tiles.environment else []) %}

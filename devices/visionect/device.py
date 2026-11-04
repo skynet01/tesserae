@@ -66,6 +66,10 @@ def validate_config(payload: dict[str, Any]) -> tuple[bool, str | None]:
     """The UUID is optional (blank binds the first unknown sign within an
     hour), but when set it must be a 32-hex-digit UUID, with or without
     dashes."""
+    minutes = payload.get("heartbeat_min")
+    if minutes not in (None, ""):
+        if isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 1440:
+            return False, "sleep interval must be 1 to 1440 minutes"
     raw = payload.get("uuid")
     if raw is None or raw == "":
         return True, None

@@ -859,14 +859,23 @@ def test_register_does_not_start_the_listener_when_autostart_is_off(
     assert "PYTEST_CURRENT_TEST" not in Path(visionect.__file__).read_text()
 
 
-def test_the_device_kind_offers_no_flash_writing_settings() -> None:
-    """The check-in interval and sleep mode writes are untested on hardware
-    (a bad flash-save write persists on the sign): the kind has no fields for
-    them, so a device's config never asks for either and nothing is written."""
+def test_the_device_kind_offers_the_sleep_interval_and_sign_settings() -> None:
+    """The kind has a sleep interval field (minutes, bounded) and one select per
+    sign setting, whose choices match what ``desired_params`` writes."""
     kind = json.loads(
         (Path(visionect.__file__).parent.parent / "devices/visionect/device.json").read_text()
     )
-    assert set(kind["config_schema"]) == {"uuid"}
+    schema = kind["config_schema"]
+    assert set(schema) == {"uuid", "heartbeat_min", *visionect.SIGN_SETTINGS}
+    assert (schema["heartbeat_min"]["min"], schema["heartbeat_min"]["max"]) == (
+        1,
+        visionect.HEARTBEAT_MAX_MINUTES,
+    )
+    assert "default" not in schema["heartbeat_min"]
+    for name, (_pid, choices) in visionect.SIGN_SETTINGS.items():
+        spec = schema[name]
+        assert spec["type"] == "select" and spec["group"] == "sign"
+        assert [c["value"] for c in spec["choices"]] == ["", *(cv for cv, _w, _l in choices)]
     assert visionect.desired_params({"uuid": UUID}) == {}
 
 
@@ -2219,7 +2228,9 @@ def test_desired_params(cfg: dict[str, Any], want: dict[int, int]) -> None:
 
 def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path) -> None:
     h = Harness(tmp_path, uuid=UUID)
-    h.settings.sections["devices"]["lobby"].update(heartbeat_min="5", frame_sleep="awake")
+    h.settings.sections["devices"]["lobby"].update(
+        heartbeat_min="5", frame_sleep="awake", touch_mode="3", wifi_region="2"
+    )
     try:
         assert h.svc.start()
         sign = FakeSign(h.svc.port)
@@ -2230,23 +2241,40 @@ def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path)
             assert {i[0] for i in _params(sign)[0]} == set(visionect.READ_PARAMS)
             assert all(control == 0 for _, control, _ in _params(sign)[0])
             _answer(sign, {29: _u32(1), 52: _u32(0), 65: b"home-wifi"})
-            # Then the two changed settings, a flash save, and a read back.
-            assert sign.wait_for(lambda s: len(_params(s)) == 4)
-            write, save, reread = _params(sign)[1:]
+            # Then the second read, for the plain settings.
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            assert {i[0] for i in _params(sign)[1]} == set(visionect.EXTRA_PARAMS)
+            # The frame has touch (off) and a region, but none of the rest.
+            _answer(sign, {50: _u32(0), 144: _u32(0)})
+            _answer(sign, {49: _u32(0x580000)}, control=2)
+            # Then the changed settings, a flash save, and a read back of both sets.
+            assert sign.wait_for(lambda s: len(_params(s)) == 6)
+            write, save, reread, reread_extra = _params(sign)[2:]
             assert sorted((i[0], i[1], int.from_bytes(i[2], "little")) for i in write) == [
                 (29, 1, 5),
+                (50, 1, 3),
                 (52, 1, 1),
+                (144, 1, 2),
             ]
             assert [(i[0], i[1]) for i in save] == [(53, 1)]
             assert {i[0] for i in reread} == set(visionect.READ_PARAMS)
+            assert {i[0] for i in reread_extra} == set(visionect.EXTRA_PARAMS)
             _answer(sign, {29: _u32(5), 52: _u32(1), 65: b"home-wifi"})
+            _answer(sign, {50: _u32(3), 144: _u32(2)})
             assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("heartbeat_min") == 5)
             view = h.svc.sign_view(UUID) or {}
             assert view["sleep_disabled"] == 1 and view["wifi"] == "home-wifi"
+            # Only what the frame answered is offered, labelled with its value.
+            expected = {
+                "frame_sleep": "Stay awake (drains the battery)",
+                "touch_mode": "On with beep",
+                "wifi_region": "Europe",
+            }
+            assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("settings") == expected)
             # In step now: nothing more is written.
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > 4, timeout=1.5)
-            assert len(_params(sign)) == 4
+            sign.wait_for(lambda s: len(_params(s)) > 6, timeout=1.5)
+            assert len(_params(sign)) == 6
         finally:
             sign.close()
     finally:
@@ -2263,13 +2291,37 @@ def test_a_refused_setting_is_reported_and_not_written_again(tmp_path: Path) -> 
             sign.status()
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
             _answer(sign, {29: _u32(1), 52: _u32(0)})
-            assert sign.wait_for(lambda s: len(_params(s)) == 4)
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            _answer(sign, {50: _u32(0)})
+            assert sign.wait_for(lambda s: len(_params(s)) == 6)
             _answer(sign, {29: _u32(0x005A0000)}, control=3)
             _answer(sign, {29: _u32(1), 52: _u32(0)})  # the read back: unchanged
             assert _wait(lambda: "refused" in (h.svc.sign_view(UUID) or {}).get("param_error", ""))
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > 4, timeout=1.5)
-            assert len(_params(sign)) == 4
+            sign.wait_for(lambda s: len(_params(s)) > 6, timeout=1.5)
+            assert len(_params(sign)) == 6
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_a_setting_the_frame_lacks_is_skipped_not_blocking(tmp_path: Path) -> None:
+    h = Harness(tmp_path, uuid=UUID)
+    h.settings.sections["devices"]["lobby"].update(heartbeat_min="5", wifi_region="1")
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            _answer(sign, {29: _u32(1), 52: _u32(0)})
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            _answer(sign, {144: _u32(0x580000)}, control=2)  # no Wi-Fi region on this firmware
+            assert sign.wait_for(lambda s: len(_params(s)) == 6)
+            write = _params(sign)[2]
+            assert [(i[0], int.from_bytes(i[2], "little")) for i in write] == [(29, 5)]
+            assert "wifi_region" not in (h.svc.sign_view(UUID) or {}).get("settings", {})
         finally:
             sign.close()
     finally:
@@ -2285,9 +2337,11 @@ def test_blank_settings_leave_the_sign_alone(tmp_path: Path) -> None:
             sign.status()
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
             _answer(sign, {29: _u32(1), 52: _u32(0)})
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            _answer(sign, {50: _u32(1)})
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > 1, timeout=1.5)
-            assert len(_params(sign)) == 1  # read only
+            sign.wait_for(lambda s: len(_params(s)) > 2, timeout=1.5)
+            assert len(_params(sign)) == 2  # reads only
         finally:
             sign.close()
     finally:

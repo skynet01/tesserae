@@ -553,6 +553,7 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
             "connect_reason": "wakeup",
             "status": {"firmware": "6.17.4168", "battery_pct": 61, "rssi": -53},
             "heartbeat_min": 5,
+            "settings": {"touch_mode": "On", "frame_sleep": "Stay awake (drains the battery)"},
             "sleep_disabled": 1,
             "wifi": "home-wifi",
             "param_error": "",
@@ -571,13 +572,18 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
         "6.17.4168",
         "61%",
         "home-wifi · -53 dBm",
-        "Every 5 min",  # the Sleep interval, read-only: set on the frame
-        "set on the frame",
+        'name="heartbeat_min"',  # the Sleep interval editor
         "Off (stays awake)",
         "Full refresh asked",
         "Sleep between check-ins",
     ):
         assert text in page, text
+    assert 'name="heartbeat_min" value="5"' in page
+    # Advanced: only the settings this frame answered, with what it is set to.
+    assert "Advanced: frame settings" in page
+    assert 'name="touch_mode"' in page and "The frame is set to On." in page
+    assert 'name="frame_sleep"' in page
+    assert 'name="wifi_region"' not in page and 'name="charging_mode"' not in page
     for action in ("status", "refresh", "reboot"):
         assert f"/settings/devices/hall/visionect/{action}" in page
     # The frame log replaces the diagnostics that only repeated the report.
