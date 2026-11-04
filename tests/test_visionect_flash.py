@@ -968,6 +968,8 @@ def test_the_firmware_page_flashes_a_visionect_frame_with_visionect_s_notes(
     ):
         assert text in page, text
     assert "USB update only" not in page.split("Fleet rollout")[0]
+    assert 'title="Other versions"' in page  # the gear, next to the available version
+    assert page.index("fw-vs-gear") < page.index("update available")
     assert 'value="7ffffff0" selected' in page
     assert 'data-fw-notes="7ffffff0">' in page  # the default choice's notes show
     assert 'data-fw-notes="a529a106" hidden' in page

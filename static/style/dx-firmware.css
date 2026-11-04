@@ -176,6 +176,25 @@
 }
 
 /* Visionect frames: progress in the row, and the version chooser. */
+.fw-vs-gear {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 4px;
+  padding: 0;
+  vertical-align: middle;
+  color: var(--t-fg-soft);
+  background: none;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.fw-vs-gear:hover,
+.fw-vs-gear:focus-visible {
+  color: var(--t-fg);
+  background: color-mix(in oklab, var(--t-fg) 10%, transparent);
+}
 .fw-progress {
   display: block;
   width: 100%;
