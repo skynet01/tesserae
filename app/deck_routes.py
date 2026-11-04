@@ -72,6 +72,7 @@ from app.next_update import DeviceTiming, reach_for_device, tracks_held_frame
 from app.state.deck_model import Deck, DeckPage
 from app.state.deck_store import DeckStore
 from app.state.page_store import PageStore
+from app.step_items import step_draws as _step_draws
 from app.step_items import step_items as _step_items
 
 bp = Blueprint("decks", __name__, url_prefix="/decks")
@@ -1408,6 +1409,7 @@ def _build_lineups_view(
             height=h,
             item_count=count,
             items=items,
+            draw=_step_draws(page) if page is not None else False,
         )
 
     by_display: dict[str, list[LineupInput]] = {d.id: [] for d in devices}
@@ -2206,6 +2208,8 @@ def step_item(deck_id: str) -> Response:
     if render is None:
         return fail("That display's panel is unknown.", 400)
     if render.path.is_file():
+        import hashlib
+
         base = url_for("composer.lineup_thumbnail", kind="draft", key=render.cache_key, ext=_EXT)
         return jsonify(
             {
@@ -2215,6 +2219,8 @@ def step_item(deck_id: str) -> Response:
                 "label": item.label,
                 "thumb_url": base,
                 "large_url": f"{base}?lg=1",
+                # Lets the page tell when a draw came out the same as one before.
+                "sig": hashlib.sha256(render.path.read_bytes()).hexdigest()[:16],
             }
         )
     if not preview_cache.is_pending(render.path) and (
@@ -2323,7 +2329,12 @@ def push_step(deck_id: str) -> Response:
             if made is None:
                 return fail(_EditError("That display's panel is unknown.", 400, deck_id))
             renders[did] = made
-        name = f"{page.name} ({chosen.label})"
+        drawn = chosen.key.startswith("draw:")
+        if drawn and not all(r.path.is_file() for r in renders.values()):
+            # A draw is only ever what the preview showed; drawing it again
+            # would send a different picture.
+            return fail(_EditError("That picture is no longer stored. Draw another.", 409, deck_id))
+        name = page.name if drawn else f"{page.name} ({chosen.label})"
         item_base_url = request.host_url.rstrip("/")
         item_pool = current_app.config.get("BROWSER_POOL")
         from app.composer import _preview_timezone_id

@@ -11,17 +11,33 @@ pinned to one entry through an option:
   ``paper`` pins a paper by code. A cell already pinned to one paper has one
   item.
 
-``comics_daily`` shows whichever strips fit and takes turns by a per-placement
-cursor with no way to name a turn, and the other widgets show one thing; they
-report one item, so the Lineups page draws no arrows for them.
+A second mode, "draw next", is for widgets whose items cannot be named but whose
+output differs from one render to the next, so the arrows draw the dashboard
+again instead of choosing:
 
-``pin_item`` returns the page definition with the chosen item written into
-that cell's options. The composer applies it for ``/compose/<page>?item=``
-(a preview or a push render); nothing is saved to the page.
+* ``picture_google_album`` / ``picture_apple_album`` pick a random photo on
+  every fetch (a preview too). A sequential album would move its real cursor on
+  each fetch (they do not look at ``ctx["preview"]``), so a draw forces
+  ``mode`` to random and never costs the frame its place.
+* ``news_illustrated`` and ``comics_daily`` only move their cursor on a settled
+  render and hold a preview still, so each reads a hidden ``_browse`` option
+  (how many turns past the current one to show, read-only) that a draw sets.
+
+A draw's key is ``draw:<nonce>:<n>``: the nonce makes each drawing its own
+cached file, ``n`` is how far ahead of the current turn it looks.
+
+Everything else shows one thing and reports one item, so the Lineups page draws
+no arrows for it.
+
+``pin_item`` returns the page definition with the chosen item (or the draw's
+options) written into that placement's options. The composer applies it for
+``/compose/<page>?item=`` (a preview or a push render); nothing is saved to the
+page.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -51,6 +67,8 @@ class StepItems:
     option: str
     count: int
     items: tuple[ItemInfo, ...]
+    #: "pick": items are named and listed; "draw": no list, the arrows draw again
+    mode: str = "pick"
 
 
 def _plugin_module(plugin_id: str) -> Any:
@@ -134,12 +152,39 @@ def _news_items(cell: Any) -> StepItems | None:
     return StepItems(str(cell.id), "paper", len(items), items)
 
 
+def _draw_items(cell: Any) -> StepItems | None:
+    return StepItems(str(cell.id), "_draw", 0, (), mode="draw")
+
+
+def _news_illustrated_items(cell: Any) -> StepItems | None:
+    """Stories can only be browsed when there is more than one."""
+    module = _plugin_module("news_illustrated")
+    reg = current_app.config.get("PLUGIN_REGISTRY")
+    plugin = reg.get("news_illustrated") if reg is not None else None
+    store = getattr(module, "store", None)
+    if plugin is None or store is None:
+        return None
+    try:
+        if len(store.load_stories(plugin.data_dir)) <= 1:
+            return None
+    except Exception:
+        return None
+    return _draw_items(cell)
+
+
 #: plugin id -> reader of that cell's items. A widget joins by being pinnable
 #: through one cell option and listing what it would walk.
 _PROVIDERS: dict[str, Callable[[Any], StepItems | None]] = {
     "picture_gallery": _gallery_items,
     "news_front_pages": _news_items,
+    "picture_google_album": _draw_items,
+    "picture_apple_album": _draw_items,
+    "comics_daily": _draw_items,
+    "news_illustrated": _news_illustrated_items,
 }
+
+#: A draw's key; the nonce is the page's own random token, ``n`` the turns ahead.
+DRAW_KEY = re.compile(r"draw:([0-9a-f]{8,16}):(\d{1,2})")
 
 
 def _placements(page: Any) -> list[tuple[str, Any]]:
@@ -174,7 +219,13 @@ def step_items(page: Any) -> tuple[int, tuple[ItemInfo, ...]]:
     """``(count, items)`` for the Lineups view: one item unless the dashboard
     walks a list."""
     found = step_choices(page)
-    return (found.count, found.items) if found is not None else (1, ())
+    return (found.count, found.items) if found is not None and found.mode == "pick" else (1, ())
+
+
+def step_draws(page: Any) -> bool:
+    """True when the arrows draw the dashboard again rather than choose."""
+    found = step_choices(page)
+    return found is not None and found.mode == "draw"
 
 
 def find_item(page: Any, key: str) -> ItemInfo | None:
@@ -182,6 +233,9 @@ def find_item(page: Any, key: str) -> ItemInfo | None:
     found = step_choices(page)
     if found is None or not key:
         return None
+    if found.mode == "draw":
+        m = DRAW_KEY.fullmatch(key)
+        return ItemInfo(int(m.group(2)), "", key=key) if m else None
     return next((it for it in found.items if it.key == key), None)
 
 
@@ -189,16 +243,26 @@ def pin_item(page: Any, page_dict: dict[str, Any], key: str) -> dict[str, Any] |
     """``page_dict`` with the widget's pin option set to ``key``, or None when
     ``key`` is not one of the page's items."""
     found = step_choices(page)
-    if found is None or not any(it.key == key for it in found.items):
+    if found is None or find_item(page, key) is None:
         return None
+    options: dict[str, Any] = {found.option: key}
+    if found.mode == "draw":
+        m = DRAW_KEY.fullmatch(key)
+        assert m is not None
+        options = {"_draw": m.group(1), "_browse": int(m.group(2))}
 
     def pinned(placements: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [
-            {**one, "options": {**(one.get("options") or {}), found.option: key}}
-            if str(one.get("id")) == found.cell_id
-            else one
-            for one in placements
-        ]
+        out = []
+        for one in placements:
+            if str(one.get("id")) == found.cell_id:
+                merged = {**(one.get("options") or {}), **options}
+                # A sequential album moves its real cursor on every fetch, a
+                # preview too: draw at random instead of costing the frame a photo.
+                if found.mode == "draw" and merged.get("mode") == "sequential":
+                    merged["mode"] = "random"
+                one = {**one, "options": merged}
+            out.append(one)
+        return out
 
     out = {**page_dict, "cells": pinned(page_dict.get("cells") or [])}
     canvas = page_dict.get("canvas")

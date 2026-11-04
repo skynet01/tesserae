@@ -1019,35 +1019,52 @@
   }
 
   /* ------------------------------------------------------------ items */
-  // The item a person picked with the arrows on a step (tile or lightbox), per display,
-  // lineup and step: {key, idx, dash, state: "loading" | "ready" | "error", thumb_url,
-  // large_url, error, pushed, digest}. Ours, not the server's: it survives every redraw and
-  // is dropped when the step no longer lists that item. Previews are asked for once the
-  // arrows have rested (ITEM_DEBOUNCE), one request chain per step, so clicking through a
-  // folder asks for the item you stopped on, not every one passed.
+  // What a person chose with the arrows on a step (tile or lightbox), per display, lineup
+  // and step. Ours, not the server's: it survives every redraw and is dropped when the step
+  // no longer offers it. Two kinds:
+  //  - pick (a gallery, the newspapers): {key, idx, ...}, an item named in the step's list.
+  //    Previews are asked for once the arrows have rested (ITEM_DEBOUNCE), so clicking
+  //    through a folder asks for the item you stopped on, not every one passed.
+  //  - draw (a widget that cannot name its items but differs per render): {mode: "draw",
+  //    hist: [entry], pos}. Next draws the dashboard once more (one at a time) and shows it;
+  //    previous walks back through what was already drawn here without drawing again. An
+  //    entry is {key: "draw:<nonce>:<n>", state: "loading" | "ready" | "error", thumb_url,
+  //    large_url, sig}.
+  // choiceFor() gives the renderers one shape for both.
   const ITEM_DEBOUNCE = 280;
   const ITEM_POLL = 1500;
   const ITEM_POLLS = 40;
+  const DRAW_KEEP = 8; // pictures kept per step to go back through
   const picks = new Map();
   let pickSeq = 0;
   const pickKey = (did, lid, i) => `${did}|${lid}|${i}`;
+  function stopPick(p) {
+    clearTimeout(p.timer);
+    (p.hist || []).forEach((e) => clearTimeout(e.timer));
+  }
   function dropPick(k) {
     const p = picks.get(k);
-    if (p) clearTimeout(p.timer);
+    if (p) stopPick(p);
     picks.delete(k);
   }
   function choiceFor(d, l, s) {
     const k = pickKey(d.id, l.id, s.index);
     const p = picks.get(k);
     if (!p) return null;
+    const landed = p.pushed && (s.composition_digest || "") !== p.digest;
+    if (p.mode === "draw") {
+      if (p.dash !== s.dashboard_id || !s.draw_items || landed) {
+        dropPick(k);
+        return null;
+      }
+      const e = p.pos >= 0 ? p.hist[p.pos] : null;
+      return e
+        ? { mode: "draw", owner: p, key: e.key, state: e.state, thumb_url: e.thumb_url, large_url: e.large_url, error: e.error, pos: p.pos, of: p.hist.length, note: p.note }
+        : null;
+    }
     const it = s.pick_items && s.items ? s.items[p.idx] : null;
     // Gone: another dashboard now, the item left the list, or what was pushed has landed.
-    if (
-      p.dash !== s.dashboard_id ||
-      !it ||
-      it.key !== p.key ||
-      (p.pushed && (s.composition_digest || "") !== p.digest)
-    ) {
+    if (p.dash !== s.dashboard_id || !it || it.key !== p.key || landed) {
       dropPick(k);
       return null;
     }
@@ -1059,51 +1076,105 @@
     const s = found && found.l.steps[Number(i)];
     return s ? { d: found.d, l: found.l, s } : null;
   }
-  function pollPick(k, p, n) {
-    if (picks.get(k) !== p) return;
+  // Ask for ``e``'s picture until it is drawn. ``owner`` is the pick it belongs to (itself,
+  // for a named item); the chain stops when either is gone.
+  function pollEntry(k, owner, e, n) {
+    const alive = () => picks.get(k) === owner && (owner === e || owner.hist.includes(e));
+    if (!alive()) return;
     const [did, lid, i] = k.split("|");
     const at = stepOf(did, lid, i);
     if (!at) return;
-    const tok = p.token;
-    API.stepItem(at.l, at.s, did, p.key).then(
+    const tok = e.token;
+    const fail = (msg) => {
+      e.state = "error";
+      e.error = msg;
+      pickChanged();
+    };
+    API.stepItem(at.l, at.s, did, e.key).then(
       (r) => {
-        if (picks.get(k) !== p || p.token !== tok) return;
+        if (!alive() || e.token !== tok) return;
         if (r && r.state === "ready") {
-          p.state = "ready";
-          p.thumb_url = r.thumb_url;
-          p.large_url = r.large_url;
+          e.state = "ready";
+          e.thumb_url = r.thumb_url;
+          e.large_url = r.large_url;
+          e.sig = r.sig || "";
+          const twin = owner.hist && e.sig && owner.hist.find((x) => x !== e && x.sig === e.sig);
+          if (twin) {
+            // The widget drew what it already drew: not a new picture, so it is not kept.
+            owner.hist.splice(owner.hist.indexOf(e), 1);
+            owner.pos = Math.min(owner.pos, owner.hist.length - 1);
+            owner.note = "That came out the same as one already drawn. Try again, or this may be all there is.";
+            say(owner.note);
+          }
           pickChanged();
         } else if (n >= ITEM_POLLS) {
-          p.state = "error";
-          p.error = "It took too long to draw.";
-          pickChanged();
+          fail("It took too long to draw.");
         } else {
-          p.timer = setTimeout(() => pollPick(k, p, n + 1), ITEM_POLL);
+          e.timer = setTimeout(() => pollEntry(k, owner, e, n + 1), ITEM_POLL);
         }
       },
       (err) => {
-        if (picks.get(k) !== p || p.token !== tok) return;
+        if (!alive() || e.token !== tok) return;
         if (err && err.status === 503 && n < 8) {
           // Other previews are being drawn; wait our turn instead of piling on.
-          p.timer = setTimeout(() => pollPick(k, p, n + 1), 5000);
+          e.timer = setTimeout(() => pollEntry(k, owner, e, n + 1), 5000);
           return;
         }
-        p.state = "error";
-        p.error = err && err.status === 503 ? "Too many previews are being drawn; try again in a moment." : (err && err.message) || "It could not be drawn.";
-        pickChanged();
+        fail(
+          err && err.status === 503
+            ? "Too many previews are being drawn; try again in a moment."
+            : (err && err.message) || "It could not be drawn."
+        );
       }
     );
+  }
+  const newNonce = () => {
+    const a = new Uint8Array(6);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(a);
+    else a.forEach((_, j) => (a[j] = Math.floor(Math.random() * 256)));
+    return [...a].map((b) => b.toString(16).padStart(2, "0")).join("");
+  };
+  // Draw next: the next picture already drawn here, else one more drawing (one at a time).
+  // Draw previous: back through what was drawn, then to the step as last sent.
+  function drawStep(did, lid, i, delta) {
+    const at = stepOf(did, lid, i);
+    if (!at || !at.s.draw_items) return;
+    const k = pickKey(did, lid, i);
+    let p = picks.get(k);
+    if (!p || p.mode !== "draw" || p.dash !== at.s.dashboard_id) {
+      if (p) stopPick(p);
+      p = { mode: "draw", dash: at.s.dashboard_id, hist: [], pos: -1, count: 0, pushed: false, digest: at.s.composition_digest || "", note: "", timer: null };
+      picks.set(k, p);
+    }
+    p.note = "";
+    if (delta < 0) {
+      if (p.pos < 0) return;
+      p.pos--;
+    } else if (p.pos < p.hist.length - 1) {
+      p.pos++;
+    } else {
+      if (p.hist.some((e) => e.state === "loading")) return;
+      const e = { key: `draw:${newNonce()}:${++p.count}`, state: "loading", thumb_url: "", large_url: "", error: "", sig: "", token: ++pickSeq, timer: null };
+      p.hist.push(e);
+      if (p.hist.length > DRAW_KEEP) clearTimeout(p.hist.shift().timer);
+      p.pos = p.hist.length - 1;
+      e.timer = setTimeout(() => pollEntry(k, p, e, 0), 0);
+      say(`${at.s.name}: drawing another picture.`);
+    }
+    pickChanged();
   }
   // Move the chosen item by ``delta`` (wrapping); nothing chosen yet starts at the first
   // (next) or the last (previous).
   function stepItem(did, lid, i, delta) {
     const at = stepOf(did, lid, i);
-    if (!at || !at.s.pick_items || !at.s.items.length) return;
+    if (!at) return;
+    if (at.s.draw_items) return drawStep(did, lid, i, delta);
+    if (!at.s.pick_items || !at.s.items.length) return;
     const n = at.s.items.length;
     const k = pickKey(did, lid, i);
     const cur = picks.get(k);
-    const idx = cur ? (cur.idx + delta + n) % n : delta > 0 ? 0 : n - 1;
-    if (cur) clearTimeout(cur.timer);
+    const idx = cur && cur.mode !== "draw" ? (cur.idx + delta + n) % n : delta > 0 ? 0 : n - 1;
+    if (cur) stopPick(cur);
     const it = at.s.items[idx];
     const p = {
       key: it.key,
@@ -1118,7 +1189,7 @@
       token: ++pickSeq,
       timer: null,
     };
-    p.timer = setTimeout(() => pollPick(k, p, 0), ITEM_DEBOUNCE);
+    p.timer = setTimeout(() => pollEntry(k, p, p, 0), ITEM_DEBOUNCE);
     picks.set(k, p);
     say(`${at.s.name}: ${it.label}, ${idx + 1} of ${n}. Drawing it.`);
     pickChanged();
@@ -1184,29 +1255,48 @@
     const canPush = !!(d.id && l.actions.push_step_url);
     const n = s.items ? s.items.length : 0;
     const url = p && p.state === "ready" ? p.large_url : largeUrl(s.thumb_url);
-    const it = p ? s.items[p.idx] : null;
+    const drawn = !!p && p.mode === "draw";
+    const it = p && !drawn ? s.items[p.idx] : null;
     let notice = "";
     if (p && p.state === "error") notice = `Could not draw this one: ${p.error}`;
+    const own = picks.get(pickKey(d.id, l.id, s.index));
+    if (!notice && own && own.mode === "draw" && own.note) notice = own.note;
+    const canNav = canPush && !!l.actions.step_item_url;
+    let nav = null;
+    if (canNav && s.draw_items) {
+      const last = p && p.pos === p.of - 1;
+      nav = {
+        text: p ? `Drawn here: ${p.pos + 1} of ${p.of}` : "As last sent",
+        label: `Draw another ${s.name} picture`,
+        prev: "Previous picture",
+        next: "Draw the next picture",
+        hasPrev: !!p,
+        hasNext: !(last && p.state === "loading"),
+      };
+    } else if (canNav && s.pick_items && n > 1) {
+      nav = {
+        text: it
+          ? `${p.idx + 1} of ${n}${s.item_count > n ? ` (first ${n} of ${s.item_count})` : ""} · ${it.label}`
+          : `As last sent · ${s.item_count} items`,
+        label: `Choose which ${s.name} item to push`,
+        hasPrev: true,
+        hasNext: true,
+      };
+    }
     return (zoom.last = {
       ...hooks,
       title: s.name,
       sub: `${d.name} · step ${s.position}${s.conditional ? " · shows only while its conditions pass" : ""}`,
-      img: url ? { src: url, alt: it ? `${s.name}: ${it.label}` : `${s.name}, as last sent` } : null,
+      img: url
+        ? { src: url, alt: it ? `${s.name}: ${it.label}` : drawn ? `${s.name}, picture ${p.pos + 1}` : `${s.name}, as last sent` }
+        : null,
       loading: !!p && p.state === "loading",
       notice,
       aspect: s.aspect,
       orientation: d.orientation || s.orientation,
       gamut: d.gamut,
       greyLevels: d.grey_levels,
-      nav:
-        s.pick_items && canPush && l.actions.step_item_url && n > 1
-          ? {
-              text: it
-                ? `${p.idx + 1} of ${n}${s.item_count > n ? ` (first ${n} of ${s.item_count})` : ""} · ${it.label}`
-                : `As last sent · ${s.item_count} items`,
-              label: `Choose which ${s.name} item to push`,
-            }
-          : null,
+      nav,
       push: canPush
         ? { label: "Push now", title: s.push_title, busy: !!zoom.pushing }
         : null,
@@ -1302,8 +1392,9 @@
   async function doPush(d, l, step, pick) {
     const res = await API.pushStep(l, step, d ? d.id : "", pick ? pick.key : "");
     if (pick) {
-      pick.pushed = true;
-      pick.digest = step.composition_digest || "";
+      const own = pick.owner || pick;
+      own.pushed = true;
+      own.digest = step.composition_digest || "";
     }
     const lands = (res && res.lands) || (d ? d.push_lands : "");
     // A sleeping frame only fetches it at its next check-in: the tile says

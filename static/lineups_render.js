@@ -328,7 +328,8 @@
   function stepHtml(d, l, s, ui) {
     const choice = (ui && ui.itemChoice && ui.itemChoice(d, l, s)) || null;
     const canPush = !!(d.id && l.actions.push_step_url && !s.missing && !s.off_display);
-    const canPick = canPush && !!s.pick_items && !!l.actions.step_item_url;
+    const draw = !!s.draw_items;
+    const canPick = canPush && (!!s.pick_items || draw) && !!l.actions.step_item_url;
     const picked = choice && choice.state === "ready" ? choice.thumb_url : "";
     const cls = s.next
       ? "is-next"
@@ -343,8 +344,10 @@
     const push = canPush
       ? `<form method="post" action="${esc(l.actions.push_step_url)}" class="lu-push-form"><input type="hidden" name="index" value="${s.index}"><input type="hidden" name="display_id" value="${esc(d.id)}"><input type="hidden" name="page_id" value="${esc(s.dashboard_id)}"><input type="hidden" name="composition_digest" value="${esc(choice ? "" : s.composition_digest || "")}">${choice ? `<input type="hidden" name="item" value="${esc(choice.key)}">` : ""}<button type="submit" class="lu-push-ov" data-push="${esc(l.id)}:${s.index}" title="${esc(s.push_title)}" aria-label="${esc(s.push_title)}"><i>${ico("send")}</i><span>Push now</span></button></form>`
         : "";
+    const prevLabel = draw ? "Previous picture" : "Previous item";
+    const nextLabel = draw ? "Draw the next picture" : "Next item";
     const items = canPick
-      ? `<span class="lu-items" role="group" aria-label="Choose which ${esc(s.name)} item to push"><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:-1" aria-label="Previous item" title="Previous item">${ico("chevl")}</button><span class="lu-it-pos" aria-hidden="true">${choice ? `${choice.idx + 1}/${s.items.length}` : ""}</span><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:1" aria-label="Next item" title="Next item">${ico("chev")}</button></span>`
+      ? `<span class="lu-items" role="group" aria-label="${draw ? `Draw another ${esc(s.name)} picture` : `Choose which ${esc(s.name)} item to push`}"><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:-1" aria-label="${prevLabel}" title="${prevLabel}"${draw && !choice ? " disabled" : ""}>${ico("chevl")}</button><span class="lu-it-pos" aria-hidden="true">${choice && !draw ? `${choice.idx + 1}/${s.items.length}` : ""}</span><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:1" aria-label="${nextLabel}" title="${nextLabel}">${ico("chev")}</button></span>`
       : "";
     const count =
       s.item_count > 1

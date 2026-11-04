@@ -3354,9 +3354,12 @@ main.page.lu-page {
   font-size: 13px;
   cursor: pointer;
 }
-.lu .lu-it:hover {
+.lu .lu-it:not(:disabled):hover {
   background: var(--lu-acc);
   color: var(--lu-acc-fg);
+}
+.lu .lu-it:disabled {
+  opacity: 0.35;
 }
 .lu .lu-it:focus-visible {
   outline: 2px solid #fffdf8;

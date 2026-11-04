@@ -2714,18 +2714,15 @@ def test_a_single_photo_or_two_list_widgets_offer_no_choice(
         assert step_choices(twin) is None  # which cell would a pin apply to?
 
 
-def test_comics_and_plain_widgets_report_one_item(app: Flask) -> None:
-    """Comics take turns by a per-placement cursor with no way to name a turn."""
+def test_plain_widgets_report_one_item_and_no_draw(app: Flask) -> None:
     from app.state.page_store import Cell, Page
-    from app.step_items import step_items
+    from app.step_items import step_draws, step_items
 
     page = Page(
-        id="comics",
-        name="Comics",
-        cells=[Cell(id="c", plugin="comics_daily", x=0, y=0, w=10, h=10)],
+        id="clock", name="Clock", cells=[Cell(id="c", plugin="clock_analog", x=0, y=0, w=10, h=10)]
     )
     with app.test_request_context():
-        assert step_items(page) == (1, ())
+        assert step_items(page) == (1, ()) and step_draws(page) is False
 
 
 def _news_page(app: Flask, paper: str = "") -> Any:
@@ -2974,3 +2971,169 @@ def test_item_renders_are_capped_and_bounded(tmp_path: Path) -> None:
     assert len(left) == keep - 1  # room for the one being written
     assert names[-1] in left and names[0] not in left
     assert (tmp_path / "plain__0123456789abcdef.png").exists()
+
+
+# -- "draw next": widgets with no way to name an item ---------------------------------
+
+
+def _draw_page(plugin: str, options: dict[str, Any] | None = None, pid: str = "drawn") -> Any:
+    from app.state.page_store import Page
+
+    return Page.model_validate(
+        {
+            "id": pid,
+            "name": "Drawn",
+            "device_ids": ["panel"],
+            "layout_kind": "canvas",
+            "canvas": {
+                "w": 800,
+                "h": 480,
+                "els": [
+                    {
+                        "id": "w1",
+                        "kind": "widget",
+                        "widget": plugin,
+                        "x": 0,
+                        "y": 0,
+                        "w": 800,
+                        "h": 480,
+                        "options": options or {},
+                    }
+                ],
+            },
+        }
+    )
+
+
+@pytest.mark.parametrize("plugin", ["picture_google_album", "picture_apple_album", "comics_daily"])
+def test_widgets_that_differ_per_render_get_draw_arrows(app: Flask, plugin: str) -> None:
+    from app.step_items import find_item, step_choices, step_draws, step_items
+
+    page = _draw_page(plugin)
+    with app.test_request_context():
+        found = step_choices(page)
+        assert found is not None and found.mode == "draw" and found.cell_id == "w1"
+        assert step_draws(page) is True
+        assert step_items(page) == (1, ())  # no list, no count, no stack
+        assert find_item(page, "draw:0123456789ab:1") is not None
+        for bad in ("draw:xyz:1", "draw:0123456789ab", "draw:0123456789ab:100", "file.jpg", ""):
+            assert find_item(page, bad) is None
+
+
+def test_a_draw_pins_nothing_but_hidden_options_and_never_a_sequential_cursor(app: Flask) -> None:
+    from app.step_items import pin_item
+
+    page = _draw_page("picture_google_album", {"mode": "sequential", "album": "x"})
+    with app.test_request_context():
+        out = pin_item(page, page.model_dump(mode="json"), "draw:0123456789ab:3")
+        assert out is not None
+        opts = out["canvas"]["els"][0]["options"]
+        assert opts["_draw"] == "0123456789ab" and opts["_browse"] == 3
+        assert opts["mode"] == "random", "a preview would move the frame's own album cursor"
+        assert opts["album"] == "x"
+        # Random stays random; the stored page is untouched.
+        rnd = _draw_page("picture_apple_album", {"mode": "random"})
+        again = pin_item(rnd, rnd.model_dump(mode="json"), "draw:0123456789ab:1")
+        assert again is not None and again["canvas"]["els"][0]["options"]["mode"] == "random"
+        assert page.canvas.els[0].options["mode"] == "sequential"
+
+
+def test_news_illustrated_needs_more_than_one_story_to_draw(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.step_items import step_draws
+
+    module = app.config["PLUGIN_REGISTRY"].get("news_illustrated").server_module
+    page = _draw_page("news_illustrated")
+    for stories, want in (([], False), ([{}], False), ([{}, {}], True)):
+        monkeypatch.setattr(module.store, "load_stories", lambda d, s=stories: s)
+        with app.test_request_context():
+            assert step_draws(page) is want
+
+
+def test_pinned_and_named_items_still_win_over_draw_for_galleries_and_papers(app: Flask) -> None:
+    from app.step_items import _PROVIDERS
+
+    assert _PROVIDERS["picture_gallery"].__name__ == "_gallery_items"
+    assert _PROVIDERS["news_front_pages"].__name__ == "_news_items"
+
+
+def test_two_list_widgets_still_offer_no_arrows_even_when_one_draws(app: Flask) -> None:
+    from app.step_items import step_choices
+
+    page = _draw_page("comics_daily")
+    els = page.model_dump(mode="json")["canvas"]["els"]
+    twin = {**els[0], "id": "w2", "widget": "picture_google_album"}
+    both = page.model_validate(
+        {
+            **page.model_dump(mode="json"),
+            "canvas": {**page.model_dump(mode="json")["canvas"], "els": [els[0], twin]},
+        }
+    )
+    with app.test_request_context():
+        assert step_choices(both) is None
+
+
+@pytest.fixture
+def drawn(client: Any, app: Flask) -> Any:
+    from app.state.deck_model import Deck, DeckPage
+
+    app.config["PAGE_STORE"].save(_draw_page("picture_google_album"))
+    app.config["DECK_STORE"].upsert(
+        Deck(
+            id="draws",
+            name="Draws",
+            device_ids=["panel"],
+            pages=[DeckPage(page_id="drawn"), DeckPage(page_id="news")],
+        )
+    )
+    return client
+
+
+def test_view_marks_a_drawing_step_without_a_list(drawn: Any) -> None:
+    data = drawn.get("/decks/view.json").get_json()
+    lineup = next(lu for d in data["displays"] for lu in d["lineups"] if lu["id"] == "draws")
+    step, other = lineup["steps"]
+    assert step["draw_items"] is True and step["pick_items"] is False
+    assert step["item_count"] == 1 and step["items"] == []
+    assert other["draw_items"] is False
+
+
+def test_step_item_reports_a_signature_and_push_sends_exactly_the_drawn_pixels(
+    drawn: Any, app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import preview_cache
+
+    fake = _FakePush()
+    app.config["PUSH_MANAGER"] = fake
+    submitted: list[dict[str, Any]] = []
+    monkeypatch.setattr(preview_cache, "submit", lambda **kw: submitted.append(kw))
+    monkeypatch.setattr(preview_cache, "backlog", lambda: 0)
+    monkeypatch.setattr(preview_cache, "is_pending", lambda p: False)
+    drew: list[Any] = []
+    monkeypatch.setattr(preview_cache, "render_now", lambda **kw: drew.append(kw))
+    key = "draw:0123456789ab:2"
+    url = f"/decks/draws/step-item?index=0&display_id=panel&item={key}"
+    assert drawn.get(url).status_code == 202
+    job = submitted[0]
+    assert job["page_id"] == "drawn" and "item=draw%3A0123456789ab%3A2" in job["query"]
+    # Pushing before it is drawn must not draw a different picture instead.
+    resp = drawn.post(
+        "/decks/draws/push-step", json={"index": 0, "item": key, "display_id": "panel"}
+    )
+    assert resp.status_code == 409 and "Draw another" in resp.get_json()["error"]
+    assert not fake.stored_calls and not drew
+    job["cache_path"].parent.mkdir(parents=True, exist_ok=True)
+    job["cache_path"].write_bytes(b"THE-PIXELS")
+    ready = drawn.get(url).get_json()
+    assert ready["state"] == "ready" and len(ready["sig"]) == 16
+    resp = drawn.post(
+        "/decks/draws/push-step", json={"index": 0, "item": key, "display_id": "panel"}
+    )
+    assert resp.status_code == 200, resp.get_json()
+    assert resp.get_json()["name"] == "Drawn" and resp.get_json()["fresh"] is False
+    assert fake.stored_calls == [(b"THE-PIXELS", {"page_id": "drawn", "device_ids": {"panel"}})]
+    assert not drew, "the picture shown is sent, never drawn again"
+    # A different nonce is a different picture, with its own file and signature.
+    other = drawn.get(url.replace("0123456789ab", "ba9876543210"))
+    assert other.status_code == 202 and submitted[-1]["cache_path"] != job["cache_path"]

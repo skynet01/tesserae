@@ -136,6 +136,8 @@ class DashboardInfo:
     item_count: int = 1
     items: tuple[ItemInfo, ...] = ()
     composition_digest: str | None = None
+    #: the arrows draw it again (a widget that cannot name its items but differs per render)
+    draw: bool = False
     missing: bool = False  # a lineup step still points at a deleted dashboard
     #: displays it is bound to, and "Name (WxH)" for each, for the off-display flag
     bound_ids: tuple[str, ...] = ()
@@ -615,6 +617,8 @@ class StepView(_Dict):
     composition_digest: str | None = None
     #: items can be chosen: each has a ``key`` the preview and Push now accept
     pick_items: bool = False
+    #: "draw next": the arrows render the dashboard again; there is no list to choose from
+    draw_items: bool = False
     missing: bool = False  # its dashboard was deleted; the scheduler cannot show it
     #: its dashboard is bound only to other displays, so this one never shows it
     off_display: bool = False
@@ -2492,6 +2496,7 @@ def _lineup_view(
                 item_count=count,
                 items=[ItemView(it.index, it.label, it.thumb_url, it.key) for it in items],
                 pick_items=not (off_display or scr.missing) and any(it.key for it in items),
+                draw_items=not (off_display or scr.missing) and bool(dash and dash.draw),
                 current=i == intended,
                 next=i == nxt,
                 queued=is_queued,

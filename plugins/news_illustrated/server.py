@@ -88,8 +88,11 @@ RENDER_SAFE_ENDPOINTS: tuple[str, ...] = ("news_illustrated_admin.image",)
 def fetch(
     options: dict[str, Any], settings: dict[str, Any], *, ctx: dict[str, Any]
 ) -> dict[str, Any]:
-    """The story this placement shows now. Never makes stories itself."""
-    del options
+    """The story this placement shows now. Never makes stories itself.
+
+    ``_browse`` (not a manifest option) is the Lineups page's "draw next": a
+    preview render shows the story that many places past the current one and
+    moves nothing, so browsing never costs the frame a story."""
     data_dir = Path(ctx["data_dir"])
     values = config.load(data_dir, _legacy_settings)
     cfg = pipeline.Config.from_settings(merged(values, settings))
@@ -129,6 +132,8 @@ def fetch(
     if not stories:
         return out
     index = store.pick(data_dir, placement, len(stories), advance=not preview, now=time.time())
+    with contextlib.suppress(TypeError, ValueError):
+        index = (index + max(0, int(options.get("_browse") or 0))) % len(stories)
     out.update(story_data(data_dir, stories[index], index, len(stories)))
     return out
 
