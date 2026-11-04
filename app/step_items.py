@@ -1,8 +1,9 @@
 """The items a lineup step's dashboard shows one per visit, and how to ask
 for a particular one.
 
-A dashboard only has choosable items when exactly one of its widgets walks a
-list and that widget can be pinned to one entry through a cell option:
+A dashboard only has choosable items when exactly one of its widgets (a grid
+cell, or a widget element on a canvas) walks a list and that widget can be
+pinned to one entry through an option:
 
 * ``picture_gallery`` walks its folder's photos; ``file`` (not a manifest
   option, read by the widget's ``fetch``) pins a photo by name.
@@ -141,15 +142,32 @@ _PROVIDERS: dict[str, Callable[[Any], StepItems | None]] = {
 }
 
 
-def step_choices(page: Any) -> StepItems | None:
-    """The choosable items of ``page``, or None: exactly one cell may walk a
-    list, otherwise which one a pin would apply to is ambiguous."""
-    cells = [
-        c for c in getattr(page, "cells", []) or [] if getattr(c, "plugin", None) in _PROVIDERS
+def _placements(page: Any) -> list[tuple[str, Any]]:
+    """Every list-walking widget on ``page`` as ``(plugin id, placement)``. Both
+    a grid cell and a canvas element carry the ``id`` and ``options`` a provider
+    reads; a canvas's other element kinds only borrow a widget's data."""
+    found = [
+        (str(c.plugin), c)
+        for c in getattr(page, "cells", None) or []
+        if getattr(c, "plugin", None) in _PROVIDERS
     ]
-    if len(cells) != 1:
+    canvas = getattr(page, "canvas", None)
+    found += [
+        (str(e.widget), e)
+        for e in getattr(canvas, "els", None) or []
+        if getattr(e, "kind", "widget") == "widget" and getattr(e, "widget", None) in _PROVIDERS
+    ]
+    return found
+
+
+def step_choices(page: Any) -> StepItems | None:
+    """The choosable items of ``page``, or None: exactly one placement may walk
+    a list, otherwise which one a pin would apply to is ambiguous."""
+    placements = _placements(page)
+    if len(placements) != 1:
         return None
-    return _PROVIDERS[str(cells[0].plugin)](cells[0])
+    plugin_id, placement = placements[0]
+    return _PROVIDERS[plugin_id](placement)
 
 
 def step_items(page: Any) -> tuple[int, tuple[ItemInfo, ...]]:
@@ -168,14 +186,22 @@ def find_item(page: Any, key: str) -> ItemInfo | None:
 
 
 def pin_item(page: Any, page_dict: dict[str, Any], key: str) -> dict[str, Any] | None:
-    """``page_dict`` with the cell's pin option set to ``key``, or None when
+    """``page_dict`` with the widget's pin option set to ``key``, or None when
     ``key`` is not one of the page's items."""
     found = step_choices(page)
     if found is None or not any(it.key == key for it in found.items):
         return None
-    cells = []
-    for cell in page_dict.get("cells") or []:
-        if str(cell.get("id")) == found.cell_id:
-            cell = {**cell, "options": {**(cell.get("options") or {}), found.option: key}}
-        cells.append(cell)
-    return {**page_dict, "cells": cells}
+
+    def pinned(placements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {**one, "options": {**(one.get("options") or {}), found.option: key}}
+            if str(one.get("id")) == found.cell_id
+            else one
+            for one in placements
+        ]
+
+    out = {**page_dict, "cells": pinned(page_dict.get("cells") or [])}
+    canvas = page_dict.get("canvas")
+    if isinstance(canvas, dict):
+        out["canvas"] = {**canvas, "els": pinned(canvas.get("els") or [])}
+    return out

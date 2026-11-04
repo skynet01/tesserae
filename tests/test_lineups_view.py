@@ -2620,6 +2620,77 @@ def test_gallery_items_carry_the_file_name_as_their_key(
         assert pin_item(page, page.model_dump(mode="json"), "../etc/passwd") is None
 
 
+def _canvas_page(app: Flask, widget: str, options: dict[str, Any], page_id: str = "wall"):
+    from app.state.page_store import Page
+    from app.state.panel_store import CanvasLayout, Element
+
+    els = [Element(id="e1", widget=widget, x=0, y=0, w=100, h=100, options=options)]
+    page = Page(
+        id=page_id,
+        name=page_id,
+        device_ids=["panel"],
+        layout_kind="canvas",
+        cells=[],
+        canvas=CanvasLayout(w=800, h=480, els=els),
+    )
+    app.config["PAGE_STORE"].save(page)
+    return page
+
+
+def test_a_gallery_on_a_canvas_offers_its_photos_and_pins_the_element(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app.step_items import find_item, pin_item, step_choices
+
+    _gallery_page(app, ["a.jpg", "b.jpg"], monkeypatch, tmp_path)  # stubs the folder
+    page = _canvas_page(app, "picture_gallery", {"folder": "art"})
+    with app.test_request_context():
+        found = step_choices(page)
+        assert found is not None and found.option == "file" and found.cell_id == "e1"
+        assert find_item(page, "b.jpg") is not None
+        pinned = pin_item(page, page.model_dump(mode="json"), "b.jpg")
+        assert pinned is not None
+        options = pinned["canvas"]["els"][0]["options"]
+        assert options == {"folder": "art", "file": "b.jpg"}
+        assert page.canvas.els[0].options == {"folder": "art"}  # the saved page is untouched
+
+
+def test_a_newspaper_on_a_canvas_offers_the_rotation(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.step_items import step_choices
+
+    module = app.config["PLUGIN_REGISTRY"].get("news_front_pages").server_module
+    monkeypatch.setattr(module, "rotation_papers", lambda: [("A", "A"), ("B", "B")])
+    with app.test_request_context():
+        found = step_choices(_canvas_page(app, "news_front_pages", {"paper": ""}))
+        assert found is not None and found.option == "paper"
+        assert step_choices(_canvas_page(app, "news_front_pages", {"paper": "A"}, "one")) is None
+
+
+def test_compose_item_reaches_a_canvas_widget(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _gallery_page(app, ["a.jpg", "b.jpg"], monkeypatch, tmp_path)
+    _canvas_page(app, "picture_gallery", {"folder": "art"})
+    seen: list[dict[str, Any]] = []
+    module = app.config["PLUGIN_REGISTRY"].get("picture_gallery").server_module
+    monkeypatch.setattr(
+        module,
+        "fetch",
+        lambda options, settings, ctx: (
+            seen.append(dict(options)) or {"url": "/x.jpg", "filename": options.get("file", "")}
+        ),
+    )
+    c = app.test_client()
+    assert c.get("/compose/wall?item=b.jpg&w=800&h=480").status_code == 200
+    assert seen and seen[-1].get("file") == "b.jpg"
+    assert c.get("/compose/wall?item=nope.jpg&w=800&h=480").status_code == 404
+    seen.clear()
+    assert c.get("/compose/wall?w=800&h=480").status_code == 200
+    assert seen and "file" not in seen[-1]
+
+
 def test_a_single_photo_or_two_list_widgets_offer_no_choice(
     app: Flask, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

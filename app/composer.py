@@ -1770,6 +1770,10 @@ def compose(page_id: str) -> Response:
         if pinned_dict is None:
             abort(404)
         page_dict = pinned_dict
+    # A canvas renders from its layout, not page_dict, so the pin has to reach it.
+    canvas_layout = page.canvas
+    if item_key and page.canvas is not None:
+        canvas_layout = type(page.canvas).model_validate(page_dict["canvas"])
     settings_store = current_app.config["SETTINGS_STORE"]
     devices = current_app.config.get("DEVICE_REGISTRY")
     override = _panel_override(request.args.get("w"), request.args.get("h"))
@@ -1799,14 +1803,14 @@ def compose(page_id: str) -> Response:
     # panel, and share this route so push / scheduler / rotation drive them by
     # page id exactly like a grid page. An unbound, un-overridden canvas renders
     # at its authored size.
-    if page.layout_kind == "canvas" and page.canvas is not None:
+    if page.layout_kind == "canvas" and canvas_layout is not None:
         if override is None and not page.device_ids:
-            target_w, target_h = page.canvas.w, page.canvas.h
+            target_w, target_h = canvas_layout.w, canvas_layout.h
         else:
             target_w, target_h = panel_w, panel_h
         return _uncacheable(
             _render_canvas(
-                page.canvas,
+                canvas_layout,
                 page_id=page.id,
                 target_w=target_w,
                 target_h=target_h,
