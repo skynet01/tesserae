@@ -350,7 +350,7 @@
             {% set _hb_now = (section.state.get('heartbeat_min') or sign.heartbeat_min) if _hb else none %}
             {% if _hb and _hb_now %}{{ config_field(section, dict(_hb, default=_hb_now), _form) }}
             {% elif _sign_interval %}
-            {% call fld(section.id ~ '-sleep-ro', 'Sleep interval', help='Shown once the frame has connected and told Tesserae its interval; then you can change it here.' if _hb else 'This frame sleeps between check-ins on its own interval, set on the frame and read at each check-in.', w='md', label_for=False) %}
+            {% call fld(section.id ~ '-sleep-ro', 'Heart beat interval', help='Shown once the frame has connected and told Tesserae its interval; then you can change it here.' if _hb else 'This frame sleeps between check-ins on its own interval, set on the frame and read at each check-in.', w='md', label_for=False) %}
               <p class="dx-f-value" aria-labelledby="{{ section.id }}-sleep-ro-label">{{ _sign_interval[1] }}{% if not _hb %} <span class="dx-help">· set on the frame</span>{% endif %}</p>
             {% endcall %}
             {% endif %}
