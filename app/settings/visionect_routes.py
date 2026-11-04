@@ -68,6 +68,22 @@ def setup_band(device: Device) -> dict[str, Any] | None:
     return band
 
 
+def _health_text(health: Any) -> str:
+    """The last day of a frame's connections in a line; only what happened."""
+    if not isinstance(health, dict) or not health.get("connections"):
+        return ""
+    parts = [f"{health['connections']} connections"]
+    for key, name in (
+        ("protocol_errors", "protocol errors"),
+        ("connection_errors", "connection errors"),
+        ("reboots", "reboots"),
+    ):
+        if health.get(key):
+            parts.append(f"{health[key]} {name}")
+    parts.append(f"{health.get('pictures', 0)} pictures")
+    return ", ".join(parts)
+
+
 def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
     """The bound sign's own report for the device page: rows of what it
     said in its last status and settings read, the last action asked of it,
@@ -96,6 +112,12 @@ def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
         battery.append(str(st["charging"]))
     if battery:
         rows.append(("Battery", " · ".join(battery)))
+    if st.get("hardware"):
+        rows.append(("Hardware", str(st["hardware"])))
+    if st.get("bootloader"):
+        rows.append(("Bootloader", str(st["bootloader"])))
+    if st.get("connectivity"):
+        rows.append(("Radio", str(st["connectivity"])))
     wifi = [str(view["wifi"])] if view.get("wifi") else []
     if "rssi" in st:
         wifi.append(f"{st['rssi']} dBm")
@@ -129,10 +151,13 @@ def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
         )
     note = ""
     action = view.get("action") or {}
-    if action.get("kind") in ("status", "reboot", "refresh"):
-        what = {"status": "Report in", "reboot": "Reboot", "refresh": "Full refresh"}[
-            action["kind"]
-        ]
+    if action.get("kind") in ("status", "reboot", "refresh", "network"):
+        what = {
+            "status": "Report in",
+            "reboot": "Reboot",
+            "refresh": "Full refresh",
+            "network": "Network details",
+        }[action["kind"]]
         note = f"{what} asked {clock(action.get('at'))}."
     arrows = {"out": "→", "in": "←"}
     log = []
@@ -148,6 +173,9 @@ def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
         "connected": bool(view.get("connected")),
         "heartbeat_min": heartbeat if isinstance(heartbeat, int) else st.get("next_status_min"),
         "settings": dict(view.get("settings") or {}),
+        "health": _health_text(view.get("health")),
+        "stuck": int((view.get("health") or {}).get("stuck") or 0),
+        "network": dict(view.get("network") or {}),
         "note": note,
         "error": str(view.get("param_error") or ""),
     }
@@ -299,6 +327,7 @@ _VISIONECT_ACTION_DONE = {
     "status": "Asked {name} to report in; its status shows here once it does.",
     "reboot": "Sent {name} a reboot. It reconnects in a minute or two and gets the latest picture.",
     "refresh": "{name} repaints its picture from scratch now.",
+    "network": "Asked {name} for its network details. Reload in a few seconds to see them.",
 }
 
 

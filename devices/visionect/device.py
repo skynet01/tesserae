@@ -71,6 +71,11 @@ def validate_config(payload: dict[str, Any]) -> tuple[bool, str | None]:
         isinstance(minutes, bool) or not isinstance(minutes, int) or not 1 <= minutes <= 1440
     ):
         return False, "heart beat interval must be 1 to 1440 minutes"
+    poll = payload.get("status_poll_min")
+    if poll not in (None, "") and (
+        isinstance(poll, bool) or not isinstance(poll, int) or not 5 <= poll <= 1440
+    ):
+        return False, "status check interval must be 5 to 1440 minutes"
     for key, label, low, high in (
         ("wifi_ssid", "Wi-Fi network name", 1, 32),
         ("wifi_psk", "Wi-Fi password", 8, 64),

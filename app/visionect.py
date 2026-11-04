@@ -52,7 +52,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from itertools import pairwise
 from pathlib import Path
@@ -158,6 +158,31 @@ PARAM_WIFI_PSK = 67
 READ_PARAMS = (PARAM_HEARTBEAT, PARAM_SCREENS, PARAM_TOUCH, PARAM_SLEEP_DISABLE, PARAM_WIFI_SSID)
 READ_CHUNK = 5  # ids per settings packet: the Suite's MaxIssuedCommands
 SETTINGS_REREAD_S = 6 * 3600.0
+# Read only when asked from the device page, as the Suite reads them when its
+# Device configuration page opens. Text as the frame sends it: "172.16.3.1".
+NETWORK_INFO: dict[int, str] = {
+    2: "Connection",
+    13: "IP address",
+    14: "Netmask",
+    15: "Gateway",
+    16: "DNS server",
+    17: "IP mode",
+    18: "Server",
+    19: "Server port",
+    30: "Network retry",
+    36: "Battery cut-off",
+}
+# The Suite's Global.DeviceStatePolling: how often the server asks a frame for a
+# status. A frame only sends its own heartbeat after that long without hearing
+# from the server, so this is what sets the real check-in cadence unless the
+# heartbeat is shorter.
+STATUS_POLL_DEFAULT_MINUTES = 15
+# A frame reconnecting this often with no picture taken is stuck, not just having
+# one of the short bursts that clear themselves within a few minutes.
+STUCK_CONNECTIONS = 10
+STUCK_WINDOW_S = 15 * 60.0
+STUCK_RECENT_S = 3 * 60.0
+HEALTH_WINDOW_S = 24 * 3600.0
 # The settings offered under "Advanced", worded and valued as the Suite words
 # them. Config name -> (TCLV id, ((config value, wire value, label), ...)). One
 # the sign answers with a read error (no touch panel) is never offered.
@@ -207,6 +232,54 @@ def text_setting_value(name: str, raw: Any) -> str | None:
     return text if 8 <= len(text) <= 64 else None
 
 
+def network_info_value(pid: int, raw: bytes) -> str:
+    """A NETWORK_INFO setting as the page shows it."""
+    if pid in (13, 14, 15, 16, 18):
+        return _text_value(raw)
+    number = int.from_bytes(raw, "little")
+    if pid == 2:
+        return {6: "Wi-Fi"}.get(number, str(number))
+    if pid == 17:
+        return {0: "Static", 1: "DHCP"}.get(number, str(number))
+    if pid == 30:
+        return f"{number} min"
+    if pid == 36:
+        return f"{number} mV"
+    return str(number)
+
+
+def status_poll_minutes(cfg: dict[str, Any]) -> int:
+    """How often to ask this frame for a status, from its device config."""
+    try:
+        minutes = int(str(cfg.get("status_poll_min") or "").strip())
+    except ValueError:
+        return STATUS_POLL_DEFAULT_MINUTES
+    return minutes if 5 <= minutes <= HEARTBEAT_MAX_MINUTES else STATUS_POLL_DEFAULT_MINUTES
+
+
+def connection_health(
+    connections: Sequence[tuple[float, str]], pictures: Sequence[float], now: float
+) -> dict[str, Any]:
+    """The last 24 hours of a frame's connections and pictures, and whether it
+    looks stuck: reconnecting again and again, still at it now, with no picture
+    taken in that time. Short bursts stop by themselves and don't count."""
+    day = [(at, reason) for at, reason in connections if now - at <= HEALTH_WINDOW_S]
+    recent = [at for at, _reason in day if now - at <= STUCK_WINDOW_S]
+    stuck = (
+        len(recent) >= STUCK_CONNECTIONS
+        and now - recent[-1] <= STUCK_RECENT_S
+        and not any(at >= recent[0] for at in pictures)
+    )
+    return {
+        "connections": len(day),
+        "protocol_errors": sum(reason == "protocol error" for _at, reason in day),
+        "connection_errors": sum(reason == "connection error" for _at, reason in day),
+        "reboots": sum(reason == "reboot" for _at, reason in day),
+        "pictures": sum(now - at <= HEALTH_WINDOW_S for at in pictures),
+        "stuck": len(recent) if stuck else 0,
+    }
+
+
 def _text_value(raw: bytes) -> str:
     return raw.split(b"\0")[0].decode("ascii", "replace")
 
@@ -248,7 +321,7 @@ PARAM_READ = 0
 PARAM_READ_ERROR = 2
 PARAM_WRITE_ERROR = 3
 # What the device page can ask a connected sign to do (request_action).
-ACTIONS = ("status", "reboot", "refresh")
+ACTIONS = ("status", "reboot", "refresh", "network")
 # pyvisionect.imaging.constants Encoding.FOUR_BIT and Dithering.NONE. The
 # renderer has already dithered onto the 16-grey ramp, and NONE keeps n*17
 # levels exact.
@@ -406,6 +479,21 @@ def status_summary(status: Any) -> dict[str, Any]:
         value = fields.get(name)
         if isinstance(value, int) and not isinstance(value, bool):
             out[key] = value
+    for key, name in (("hardware", "Hardware"), ("bootloader", "Bootloader")):
+        version = fields.get(name)
+        if isinstance(version, dict):
+            parts = [
+                str(version[k])
+                for k in ("major", "minor", "revision")
+                if version.get(k) is not None
+            ]
+            if parts:
+                out[key] = ".".join(parts)
+    used = fields.get("ConnectivityUsed")
+    if isinstance(used, dict):
+        used = used.get("name")
+    if used:
+        out["connectivity"] = str(used)
     charging = fields.get("ChargingStatus")
     if isinstance(charging, dict):
         charging = charging.get("name")
@@ -573,6 +661,12 @@ class _Sign:
     # Settings packets waiting to go, one at a time (``_pump_params``): the one
     # out now, and when the sign's settings were last read.
     param_queue: deque[tuple[str, Any]] = field(default_factory=deque)
+    # Connections (when, why) and pictures taken over the last day, and the
+    # network details last read. In memory: they start over with Tesserae.
+    connections: deque[tuple[float, str]] = field(default_factory=lambda: deque(maxlen=4000))
+    pictures: deque[float] = field(default_factory=lambda: deque(maxlen=4000))
+    network: dict[int, str] = field(default_factory=dict)
+    stuck_warned: bool = False
     param_out: str = ""
     settings_read_at: float = 0.0
     # Wall clock times of the sign's recent statuses, newest last. The gap
@@ -1468,6 +1562,19 @@ class VisionectService:
         for start in range(0, len(ids), READ_CHUNK):
             sign.param_queue.append(("read", list(ids[start : start + READ_CHUNK])))
 
+    def _apply_status_poll(self, sign: _Sign, device: Device) -> None:
+        """Keep this connection's status poll at what the device page asks for
+        (the library's connections otherwise share one setting)."""
+        conn = sign.conn
+        config = getattr(conn, "config", None)
+        minutes = status_poll_minutes(self._device_cfg(device.id))
+        if config is None or config.device_state_polling_minutes == minutes:
+            return
+        conn.config = replace(config, device_state_polling_minutes=minutes)
+        logger.info(
+            "visionect %s: asking sign %s for a status every %d min", device.id, sign.uuid, minutes
+        )
+
     async def _pump_params(self, sign: _Sign) -> bool:
         """Send the next settings packet once the last has been answered, the
         way the Suite does. True while one is out (the caller waits for it). A
@@ -1512,6 +1619,7 @@ class VisionectService:
         read them back, one packet at a time. A set of writes goes out at most
         once per connection, so a sign that refuses one doesn't get it every
         pass. True when it sent something (the caller waits for the answer)."""
+        self._apply_status_poll(sign, device)
         if await self._pump_params(sign):
             return True
         if not sign.params_asked:
@@ -1576,6 +1684,10 @@ class VisionectService:
                 )
                 logger.warning("visionect: sign %s refused a write to TCLV %d", sign.uuid, pid)
                 continue
+            if pid in NETWORK_INFO and pid not in READ_PARAMS:
+                if control == PARAM_READ and item.value:
+                    sign.network[pid] = network_info_value(pid, item.value)
+                continue
             if control == PARAM_READ_ERROR and pid in READ_PARAMS:
                 sign.params_unsupported.add(pid)  # this firmware or frame doesn't have it
                 sign.known_params.pop(pid, None)
@@ -1619,6 +1731,10 @@ class VisionectService:
             return
         if action == "refresh":
             sign.force_refresh = True
+            self._schedule(uuid)
+        elif action == "network":
+            self._queue_read(sign, tuple(NETWORK_INFO))
+            self._note(sign, "out", "read network details")
             self._schedule(uuid)
         else:
             try:
@@ -1740,6 +1856,7 @@ class VisionectService:
                     if inflight.resend_stamp:
                         sign.resend_stamp = inflight.resend_stamp
                         self._consume_resend(uuid)
+                    sign.pictures.append(time.time())
                     logger.info("visionect: sign %s acked frame %s", uuid, inflight.digest[:12])
                 else:
                     sign.asleep_until = time.time() + inflight.minutes * 60
@@ -1832,6 +1949,7 @@ class VisionectService:
         sign.asleep_until = 0.0
         sign.connected_at = time.time()
         sign.connect_reason = str(getattr(status, "connect_reason_name", "") or "")
+        sign.connections.append((time.time(), sign.connect_reason))
         self._note(
             sign, "in", f"connected from {remote or '?'} ({sign.connect_reason or 'no reason'})"
         )
@@ -2043,6 +2161,16 @@ class VisionectService:
 
     def _publish(self, sign: _Sign) -> None:
         inflight = sign.inflight
+        health = connection_health(sign.connections, sign.pictures, time.time())
+        if health["stuck"] and not sign.stuck_warned:
+            logger.warning(
+                "visionect: sign %s looks stuck: %d connections in %d min and no picture taken",
+                sign.uuid,
+                health["stuck"],
+                STUCK_WINDOW_S // 60,
+            )
+            self._note(sign, "note", "looks stuck: reconnecting and taking no pictures")
+        sign.stuck_warned = bool(health["stuck"])
         view = {
             "uuid": sign.uuid,
             "connected": self._alive(sign),
@@ -2061,6 +2189,8 @@ class VisionectService:
             or (sign.known_interval_min * 60 if sign.known_interval_min else None),
             "sleep_disabled": sign.params.get(PARAM_SLEEP_DISABLE),
             "settings": sign_setting_labels(sign.known_params),
+            "health": health,
+            "network": {NETWORK_INFO[pid]: v for pid, v in sign.network.items()},
             "wifi": sign.params.get(PARAM_WIFI_SSID),
             "param_error": sign.param_error,
             "action": dict(sign.action) if sign.action else None,

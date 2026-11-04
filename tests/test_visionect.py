@@ -869,6 +869,7 @@ def test_the_device_kind_offers_the_sleep_interval_and_sign_settings() -> None:
     assert set(schema) == {
         "uuid",
         "heartbeat_min",
+        "status_poll_min",
         *visionect.SIGN_SETTINGS,
         *visionect.TEXT_SETTINGS,
     }
@@ -2448,6 +2449,103 @@ def test_a_reconnect_doesnt_read_settings_again_but_a_reboot_does(tmp_path: Path
             assert rebooted.wait_for(lambda s: len(_params(s)) == 1)
         finally:
             rebooted.close()
+    finally:
+        h.svc.stop()
+
+
+def test_connection_health_counts_the_day_and_spots_a_stuck_frame() -> None:
+    now = 100_000.0
+    loop = [(now - 35 * n, "protocol error") for n in range(12, -1, -1)]
+    stuck = visionect.connection_health(loop, [now - 2000], now)
+    assert stuck["stuck"] == 13 and stuck["protocol_errors"] == 13
+    assert stuck["pictures"] == 1
+    # A picture taken during the run means it isn't stuck.
+    assert visionect.connection_health(loop, [now - 60], now)["stuck"] == 0
+    # A burst that stopped ten minutes ago has cleared.
+    burst = [(at - 600, reason) for at, reason in loop]
+    assert visionect.connection_health(burst, [], now)["stuck"] == 0
+    # The short bursts seen on a healthy frame: 8 in four minutes.
+    short = [(now - 30 * n, "connection error") for n in range(7, -1, -1)]
+    assert visionect.connection_health(short, [], now)["stuck"] == 0
+    # Older than a day isn't counted.
+    old = visionect.connection_health([(now - 90_000, "reboot")], [now - 90_000], now)
+    assert old["connections"] == 0 and old["pictures"] == 0
+
+
+@pytest.mark.parametrize(
+    ("cfg", "want"),
+    [
+        ({}, 15),
+        ({"status_poll_min": ""}, 15),
+        ({"status_poll_min": 60}, 60),
+        ({"status_poll_min": "4"}, 15),
+        ({"status_poll_min": "nope"}, 15),
+    ],
+)
+def test_status_poll_minutes(cfg: dict[str, Any], want: int) -> None:
+    assert visionect.status_poll_minutes(cfg) == want
+
+
+def test_a_connection_polls_at_the_devices_status_check_interval(tmp_path: Path) -> None:
+    h = Harness(tmp_path, uuid=UUID)
+    h.settings.sections["devices"]["lobby"].update(status_poll_min=60)
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            conn = h.svc._signs[UUID].conn
+            assert conn.config.device_state_polling_minutes == 60
+            # Only this connection's copy: the server's own setting is untouched.
+            assert h.svc._server.config.device_state_polling_minutes == 15
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_network_details_are_read_only_when_asked_five_at_a_time(tmp_path: Path) -> None:
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            _answer(sign, BASE)
+            sign.wait_for(lambda s: len(_params(s)) > 1, timeout=0.5)
+            assert len(_params(sign)) == 1  # nothing until asked
+            assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("connected"))
+            assert h.svc.request_action("lobby", "network") is None
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            assert [i[0] for i in _params(sign)[1]] == [2, 13, 14, 15, 16]
+            _answer(sign, {2: _u32(6), 13: b"172.16.3.151", 14: b"255.255.255.0"})
+            assert sign.wait_for(lambda s: len(_params(s)) == 3)
+            assert [i[0] for i in _params(sign)[2]] == [17, 18, 19, 30, 36]
+            _answer(
+                sign,
+                {
+                    17: _u32(0),
+                    18: b"172.16.3.2",
+                    19: (11113).to_bytes(2, "little"),
+                    30: _u32(1),
+                    36: (3500).to_bytes(2, "little"),
+                },
+            )
+            want = {
+                "Connection": "Wi-Fi",
+                "IP address": "172.16.3.151",
+                "Netmask": "255.255.255.0",
+                "IP mode": "Static",
+                "Server": "172.16.3.2",
+                "Server port": "11113",
+                "Network retry": "1 min",
+                "Battery cut-off": "3500 mV",
+            }
+            assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("network") == want)
+        finally:
+            sign.close()
     finally:
         h.svc.stop()
 

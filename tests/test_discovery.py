@@ -553,6 +553,15 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
             "connect_reason": "wakeup",
             "status": {"firmware": "6.17.4168", "battery_pct": 61, "rssi": -53},
             "heartbeat_min": 5,
+            "health": {
+                "connections": 40,
+                "protocol_errors": 39,
+                "connection_errors": 0,
+                "reboots": 0,
+                "pictures": 1,
+                "stuck": 25,
+            },
+            "network": {"IP address": "172.16.3.151"},
             "settings": {
                 "touch_mode": "On",
                 "frame_sleep": "CLI and CPU always on",
@@ -589,6 +598,11 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
     assert 'name="touch_mode"' in page and "The frame is set to On." in page
     assert 'name="frame_sleep"' in page
     assert 'name="wifi_region"' not in page and 'name="charging_mode"' not in page
+    assert "40 connections, 39 protocol errors, 1 pictures" in page
+    assert "This frame looks stuck" in page and "reconnected 25 times" in page
+    assert "172.16.3.151" in page
+    assert "/settings/devices/hall/visionect/network" in page
+    assert 'name="status_poll_min"' in page
     # Network settings sit behind a USB-cable warning, and only offered ones show.
     assert "Advanced: network" in page and "DownloadConfigurator.html" in page
     assert 'name="wifi_ssid"' in page and "The frame is set to home-wifi." in page

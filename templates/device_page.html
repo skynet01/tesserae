@@ -636,6 +636,7 @@
             {% elif not sign.connected %}<span class="dx-help">The frame takes these while it's connected.</span>{% endif %}
             <span class="dx-btn-row">
               {% for action, icon, label, title in [
+                  ('network', 'wifi-high', 'Network details', 'Read the frame\'s IP settings and server now'),
                   ('refresh', 'arrows-clockwise', 'Full refresh', 'Repaint the picture it shows from scratch, to clear ghosting'),
                   ('reboot', 'power', 'Reboot', 'Restart the frame; it reconnects in a minute or two'),
                   ('status', 'heartbeat', 'Report in', 'Ask the frame for its battery, signal and state now')] %}
@@ -650,6 +651,15 @@
           </div>
           {% if sign.error %}
           <div class="dx-band is-warn"><i class="ph ph-warning" aria-hidden="true"></i><div class="dx-band-text"><p>{{ sign.error }}</p></div></div>
+          {% endif %}
+          {% if sign.stuck %}
+          <div class="dx-band is-warn" data-frame-stuck><i class="ph ph-warning" aria-hidden="true"></i><div class="dx-band-text"><p class="dx-band-title">This frame looks stuck</p><p class="dx-help">It has reconnected {{ sign.stuck }} times in 15 minutes without taking a picture. Try Reboot. If it doesn't restart, reboot it over USB with Visionect's Configurator.</p></div></div>
+          {% endif %}
+          {% if sign.health or sign.network %}
+          <dl class="dx-kv">
+            {% if sign.health %}<div><dt>Last 24 hours</dt><dd>{{ sign.health }}</dd></div>{% endif %}
+            {% for label, value in sign.network.items() %}<div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>{% endfor %}
+          </dl>
           {% endif %}
           {% endif %}
 
