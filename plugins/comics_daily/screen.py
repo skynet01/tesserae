@@ -6,7 +6,10 @@ portrait panel everything fits. On a small or landscape screen it can't, and
 a strip drawn smaller than the screen's width would be too small to read, so
 the comics take turns instead: each render shows the next ones that fit
 whole, and the following render moves on (at most once per HOLD_S, so a
-send prepared ahead of time and its follow-ups show the same comics).
+send prepared ahead of time and its follow-ups show the same comics). A page
+only a little too tall is not that case: one unusually tall strip (a two-row
+Sunday Dilbert) shouldn't send a big panel into turns, so everything is drawn
+slightly narrower instead, down to SHRINK_FLOOR of the width.
 
 ``plan()`` decides from the cell's size and the pictures' sizes, estimating
 the heights the way client.js draws them; client.js still measures, so an
@@ -28,6 +31,9 @@ REF_WIDTH = 1408
 MIN_PANEL_PX = 260
 SAFETY_PX = 16
 HOLD_S = 4 * 60
+# The most a whole page is shrunk to keep every comic on it rather than take
+# turns. client.js allows a little more, as these heights are estimates.
+SHRINK_FLOOR = 0.92
 
 # The screens the admin page previews: name, width, height.
 SCREENS: tuple[tuple[str, int, int], ...] = (
@@ -122,8 +128,8 @@ def plan(
     start: int = 0,
 ) -> Plan:
     """What to show on a ``cell_w`` x ``cell_h`` cell, from ``start`` (the
-    placement's turn). Everything when it all fits (or the size is unknown);
-    else the items from ``start`` on that fit whole (at least one: a single
+    placement's turn). Everything when it all fits, or nearly (SHRINK_FLOOR),
+    or the size is unknown; else the items from ``start`` on that fit whole (at least one: a single
     item too tall is drawn smaller, never cut), or one, taking turns."""
     total = len(items)
     if not total or not cell_w or not cell_h or cell_w <= 0 or cell_h <= 0:
@@ -131,7 +137,8 @@ def plan(
     hs = heights(cell_w, items, far_side_count, captions)
     room = available_height(cell_w, cell_h, note)
     gap = gap_min * min(1.0, (cell_w - 2 * _clamp(4, 0.011 * cell_w, 24)) / REF_WIDTH)
-    if sum(hs) + gap * (total - 1) <= room:
+    content = sum(hs)
+    if content > 0 and (room - gap * (total - 1)) / content >= SHRINK_FLOOR:
         return Plan(tuple(range(total)), False, total)
     start %= total
     show = [start]

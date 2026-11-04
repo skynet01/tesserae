@@ -5,8 +5,10 @@
 // Fitting is measured, not estimated: the page is drawn, each row's height
 // read back, and planRows() keeps as many rows as fit. It tries the
 // standard gap first, then squeezes the gaps down to the smallest, and only
-// then leaves the last row out, so no strip is ever cut off. Leftover height
-// widens the gaps (up to the largest) and the rest centres the page.
+// then, when the whole page is only a little too tall, draws every row slightly
+// narrower (MIN_PAGE_SHRINK at most). Only past that does it leave the last row
+// out, so no strip is ever cut off. Leftover height widens the gaps (up to the
+// largest) and the rest centres the page.
 //
 // The page's styles are inline rather than in the shared stylesheet: a
 // <link> applies a tick after innerHTML, and measuring before it lands would
@@ -66,6 +68,22 @@ export const MIN_ZOOM = 0.15;
 export function shrinkFor(height, available) {
   if (!(height > 0) || !(available > 0) || height <= available) return 1;
   return Math.floor((available / height) * 1000) / 1000;
+}
+
+// The narrowest a whole page is drawn to keep every row on it. screen.py's
+// SHRINK_FLOOR is a little above this: its heights are estimates, these measured.
+export const MIN_PAGE_SHRINK = 0.9;
+
+// How much narrower to draw every row so they all fit at the smallest gap:
+// 1 when they already fit, 0 when it would take more than MIN_PAGE_SHRINK.
+// Rows scale with their width, so the shrink is the ratio of the heights.
+export function pageShrinkFor(heights, available, gaps) {
+  const content = heights.reduce((sum, h) => sum + h, 0);
+  if (!(content > 0) || !Number.isFinite(content)) return 0;
+  const room = available - gaps.min * Math.max(0, heights.length - 1);
+  if (content <= room) return 1;
+  const shrink = Math.floor((room / content) * 1000) / 1000;
+  return shrink >= MIN_PAGE_SHRINK ? shrink : 0;
 }
 
 // Which rows to keep and the gap between them, given each row's height and
@@ -211,9 +229,44 @@ function fit(shadow, opts, wantedPanels, tooSmall) {
   }
 
   const rows = [...box.querySelectorAll(".row")];
-  rows.forEach((row) => { row.hidden = false; row.style.zoom = ""; });
-  const heights = rows.map((row) => (unreadable.has(row) ? Infinity : row.getBoundingClientRect().height));
-  const plan = planRows(heights, available, gapsFor(opts, scaleFor(width)));
+  rows.forEach((row) => {
+    row.hidden = false;
+    row.style.zoom = "";
+    row.style.width = "";
+    row.style.marginInline = "";
+  });
+  const measure = () => rows.map((row) => (unreadable.has(row) ? Infinity : row.getBoundingClientRect().height));
+  const gaps = gapsFor(opts, scaleFor(width));
+  const heights = measure();
+
+  // Only a little too tall: narrow every row and measure again (a caption can
+  // reflow), rather than lose a comic.
+  let shrink = pageShrinkFor(heights, available, gaps);
+  if (shrink > 0 && shrink < 1) {
+    let total = 1;
+    while (shrink > 0 && shrink < 1) {
+      total *= shrink;
+      if (total < MIN_PAGE_SHRINK) { shrink = 0; break; }
+      for (const row of rows) {
+        row.style.width = `${total * 100}%`;
+        row.style.marginInline = "auto";
+      }
+      shrink = pageShrinkFor(measure(), available, gaps);
+    }
+    if (shrink === 1) {
+      const final = measure();
+      const content = final.reduce((sum, h) => sum + h, 0);
+      const between = Math.max(1, rows.length - 1);
+      box.style.gap = `${Math.max(gaps.min, Math.floor((available - content) / between))}px`;
+      return;
+    }
+    for (const row of rows) {
+      row.style.width = "";
+      row.style.marginInline = "";
+    }
+  }
+
+  const plan = planRows(heights, available, gaps);
   let keep = plan.keep;
   if (!keep.length) {
     // Nothing fits whole (one comic a turn on a small screen, still too

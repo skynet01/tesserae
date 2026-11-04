@@ -3,11 +3,18 @@
 //
 // The layout maths behind the comics page: which rows fit, and the gap.
 import assert from "node:assert/strict";
-import { farSideColumns, gapsFor, noteText, planRows, scaleFor, shrinkFor, MIN_ZOOM } from "../client.js";
+import { farSideColumns, gapsFor, MIN_PAGE_SHRINK, noteText, pageShrinkFor, planRows, scaleFor, shrinkFor, MIN_ZOOM } from "../client.js";
 
 const gaps = { gap: 32, min: 6, max: 48 };
 
 // Everything fits at the standard gap; spare height widens it to the max.
+// Everything fits at the smallest gap: nothing to shrink.
+assert.equal(pageShrinkFor([500, 300, 300], 2000, { gap: 32, min: 6, max: 48 }), 1);
+// A Sunday Dilbert: 31 px over on a 1440 x 2560 page, so a hair narrower.
+assert.equal(pageShrinkFor([516, 687, 404, 449, 463], 2512, { gap: 32, min: 6, max: 48 }), 0.987);
+// Far too tall (a small screen) is not for shrinking: that's what turns are for.
+assert.equal(pageShrinkFor([580, 150, 150, 150], 770, { gap: 32, min: 6, max: 48 }), 0);
+assert.ok(MIN_PAGE_SHRINK > 0.5);
 assert.deepEqual(planRows([500, 300, 300], 2000, gaps), { keep: [0, 1, 2], gap: 48 });
 // Spare height between standard and max is shared out evenly.
 assert.deepEqual(planRows([500, 300, 300], 1180, gaps), { keep: [0, 1, 2], gap: 40 });

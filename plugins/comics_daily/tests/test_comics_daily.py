@@ -2714,6 +2714,34 @@ def test_add_strip_box_and_gap_inputs_use_the_apps_styles(client: FlaskClient) -
 # -- packing on a small portrait screen ---------------------------------------------
 
 
+def test_a_page_only_a_little_too_tall_shrinks_instead_of_taking_turns() -> None:
+    """A two-row Sunday Dilbert puts a 1440 x 2560 page 31 px over. Dropping a
+    comic and reshuffling the order for that is wrong: all five stay, in order."""
+    items = [
+        screen.Item(
+            "farside",
+            ((950, 1077), (950, 1071), (950, 1061), (950, 1061)),
+            ("x" * 122, "", "y" * 45, "z" * 48),
+        ),
+        *[
+            screen.Item("strip", (size,))
+            for size in ((900, 439), (900, 258), (900, 287), (900, 296))
+        ],
+    ]
+    kwargs: dict[str, Any] = {
+        "far_side_count": 4,
+        "captions": True,
+        "note": False,
+        "gap_min": 6,
+        "one_at_a_time": False,
+    }
+    assert sum(screen.heights(1440, items, 4, True)) > screen.available_height(1440, 2560, False)
+    chosen = screen.plan(1440, 2560, items, **kwargs)
+    assert chosen.show == (0, 1, 2, 3, 4) and not chosen.rotating
+    # Much too tall still takes turns, rather than shrinking past reading size.
+    assert screen.plan(1440, 1800, items, **kwargs).rotating
+
+
 def test_a_480x800_portrait_screen_packs_what_fits_and_previews_what_it_draws() -> None:
     kwargs: dict[str, Any] = {
         "far_side_count": 4,
