@@ -2192,6 +2192,32 @@ def test_a_long_run_of_render_failures_doesnt_overflow_the_backoff() -> None:
 # -- the sign's own settings and actions ---------------------------------------
 
 
+@pytest.fixture
+def extra_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(visionect, "READ_EXTRA_SETTINGS", True)
+
+
+def test_only_the_settings_proven_on_hardware_are_read_by_default(tmp_path: Path) -> None:
+    """The second read sent a real frame into a reconnect loop."""
+    assert visionect.READ_EXTRA_SETTINGS is False
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            assert {i[0] for i in _params(sign)[0]} == set(visionect.READ_PARAMS)
+            _answer(sign, {29: _u32(30), 52: _u32(0)})
+            sign.wait_for(lambda s: len(_params(s)) > 1, timeout=1.5)
+            assert len(_params(sign)) == 1
+            assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("heartbeat_min") == 30)
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
 def _params(sign: FakeSign) -> list[list[tuple[int, int, bytes]]]:
     """Each PARAM packet the server sent, as (id, control, value) items."""
     from pyvisionect.packets import decode_payload
@@ -2261,7 +2287,7 @@ def _answer_extras(
     _answer(sign, second)
 
 
-def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path) -> None:
+def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path, extra_settings: None) -> None:
     h = Harness(tmp_path, uuid=UUID)
     h.settings.sections["devices"]["lobby"].update(
         heartbeat_min="5",
@@ -2344,7 +2370,7 @@ def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path)
         h.svc.stop()
 
 
-def test_a_refused_setting_is_reported_and_not_written_again(tmp_path: Path) -> None:
+def test_a_refused_setting_is_reported_and_not_written_again(tmp_path: Path, extra_settings: None) -> None:
     h = Harness(tmp_path, uuid=UUID)
     h.settings.sections["devices"]["lobby"].update(heartbeat_min="5")
     try:
@@ -2369,7 +2395,7 @@ def test_a_refused_setting_is_reported_and_not_written_again(tmp_path: Path) -> 
         h.svc.stop()
 
 
-def test_a_setting_the_frame_lacks_is_skipped_not_blocking(tmp_path: Path) -> None:
+def test_a_setting_the_frame_lacks_is_skipped_not_blocking(tmp_path: Path, extra_settings: None) -> None:
     h = Harness(tmp_path, uuid=UUID)
     h.settings.sections["devices"]["lobby"].update(heartbeat_min="5", wifi_region="1")
     try:
@@ -2393,7 +2419,7 @@ def test_a_setting_the_frame_lacks_is_skipped_not_blocking(tmp_path: Path) -> No
         h.svc.stop()
 
 
-def test_blank_settings_leave_the_sign_alone(tmp_path: Path) -> None:
+def test_blank_settings_leave_the_sign_alone(tmp_path: Path, extra_settings: None) -> None:
     h = Harness(tmp_path, uuid=UUID)
     try:
         assert h.svc.start()

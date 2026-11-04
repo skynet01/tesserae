@@ -225,6 +225,12 @@ EXTRA_PARAMS = tuple(
     )
 )
 ALL_READ_PARAMS = READ_PARAMS + EXTRA_PARAMS
+# The second settings read is off: on a real 32" (firmware 6.17) it was followed
+# by the frame reconnecting every 35 s with "protocol error", never sleeping and
+# never taking another picture. Until that is understood only READ_PARAMS, which
+# has run on hardware for weeks, goes out. With this off "Advanced" offers only
+# what those report, and nothing else can be written.
+READ_EXTRA_SETTINGS = False
 READ_CHUNK = 6  # ids per read packet; the one capture of the vendor server sent six
 
 
@@ -1531,7 +1537,7 @@ class VisionectService:
             self._await_params(sign)
             await self._write(conn, writer)
             return True
-        if not sign.extras_asked:
+        if READ_EXTRA_SETTINGS and not sign.extras_asked:
             sign.extras_asked = True
             try:
                 self._read_settings(sign, EXTRA_PARAMS)
@@ -1576,7 +1582,8 @@ class VisionectService:
             conn.write_params(dict(change), allow_read_only=True)
             conn.write_params({PARAM_FLASH_SAVE: 1})
             self._read_settings(sign, READ_PARAMS)
-            self._read_settings(sign, EXTRA_PARAMS)
+            if READ_EXTRA_SETTINGS:
+                self._read_settings(sign, EXTRA_PARAMS)
         except Exception as exc:
             sign.param_error = f"Tesserae couldn't write the frame's settings: {exc}"
             logger.warning("visionect: writing %s's settings failed: %s", sign.uuid, exc)
@@ -2082,7 +2089,7 @@ class VisionectService:
             "refused": dict(sign.refused) if sign.refused else None,
             "connect_reason": sign.connect_reason,
             "status": status_summary(sign.status),
-            "heartbeat_min": sign.params.get(PARAM_HEARTBEAT),
+            "heartbeat_min": sign.params.get(PARAM_HEARTBEAT, sign.known_interval_min),
             "checkin_gap_s": observed_status_gap_s(sign.status_times)
             or (sign.known_interval_min * 60 if sign.known_interval_min else None),
             "sleep_disabled": sign.params.get(PARAM_SLEEP_DISABLE),

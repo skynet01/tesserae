@@ -144,7 +144,7 @@ def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
         "rows": rows,
         "log": log,
         "connected": bool(view.get("connected")),
-        "heartbeat_min": heartbeat if isinstance(heartbeat, int) else None,
+        "heartbeat_min": heartbeat if isinstance(heartbeat, int) else st.get("next_status_min"),
         "settings": dict(view.get("settings") or {}),
         "note": note,
         "error": str(view.get("param_error") or ""),
