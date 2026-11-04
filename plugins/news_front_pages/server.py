@@ -2132,6 +2132,30 @@ def _plugin_config() -> dict[str, Any]:
     return load_config(Path(plugin.data_dir)) if plugin is not None else _config({})
 
 
+def rotation_papers() -> list[tuple[str, str]]:
+    """``(code, label)`` for each paper in the rotation, in list order; the
+    Lineups page's per-item Push offers these (a cell pinned to ``paper`` shows
+    one). Names come from the cached directory, never the network."""
+    plugin = _plugin()
+    if plugin is None:
+        return []
+    data_dir = Path(plugin.data_dir)
+    cached = _read_json(data_dir / DIRECTORY_FILE).get("papers")
+    names = {**FALLBACK_DIRECTORY, **(cached if isinstance(cached, dict) else {})}
+    out: list[tuple[str, str]] = []
+    for paper in parse_papers(load_config(data_dir)["papers"]):
+        if paper.enabled:
+            name = names.get(paper.code)
+            out.append((paper.code, f"{name} ({paper.code})" if name else paper.code))
+    return out
+
+
+def edition_stamp() -> str:
+    """The edition day papers are drawn from today (US Eastern), so a cached
+    per-paper preview is thrown away when the day turns."""
+    return _edition_today().isoformat()
+
+
 def scrape_directory() -> dict[str, str]:
     """Code → name for every paper in Freedom Forum's sitemap. Its paper URLs
     read ``/newspapers/<code>-<Name_With_Underscores>``."""

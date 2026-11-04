@@ -1759,6 +1759,17 @@ def compose(page_id: str) -> Response:
     # wins (the editor's per-aspect previews and the per-panel push render
     # at a specific size); otherwise fall back to the page's primary panel.
     page_dict = page.model_dump(mode="json", exclude_none=True)
+    # ``?item=<key>`` renders the dashboard with its list widget pinned to one
+    # item (the Lineups page's per-item preview and push); a key the dashboard
+    # does not list is a 404, so nothing else can be written into a cell.
+    item_key = request.args.get("item")
+    if item_key:
+        from app.step_items import pin_item
+
+        pinned_dict = pin_item(page, page_dict, item_key)
+        if pinned_dict is None:
+            abort(404)
+        page_dict = pinned_dict
     settings_store = current_app.config["SETTINGS_STORE"]
     devices = current_app.config.get("DEVICE_REGISTRY")
     override = _panel_override(request.args.get("w"), request.args.get("h"))
@@ -1925,7 +1936,7 @@ def page_preview_token(page: Page, dims: tuple[int, int]) -> str:
 def lineup_thumbnail(kind: str, key: str, ext: str) -> WerkzeugResponse:
     from app.lineup_thumbs import serve
 
-    return serve(kind, key, ext)
+    return serve(kind, key, ext, large=request.args.get("lg") == "1")
 
 
 @bp.get("/compose/<page_id>/preview.png")
