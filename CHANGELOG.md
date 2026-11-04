@@ -14,6 +14,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.
 - Device batteries: each chart has its own 12h / 24h / 7d / 30d range, remembered per device, and drag-to-zoom.
 - Collapsible sections on the Server, System, About, Stats, Widgets, Companion, Generative AI, Cloud relay, calendar-feed and gallery pages, remembered per page; `section_card` takes `collapsible=False` to opt out.
+- Lineups: a sleeping display in quiet hours now counts its next update to when it wakes, not to the nominal advance.
+
 - Paper's phone shell. The four places you go most (Send, Dashboards,
   Lineups, History) sit in a tab bar along the bottom and More lifts the
   rest up as a sheet, in place of the hamburger drawer. Once a page's title
