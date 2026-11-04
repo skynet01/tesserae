@@ -14,6 +14,21 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.
 - Device batteries: each chart has its own 12h / 24h / 7d / 30d range, remembered per device, and drag-to-zoom.
 - Collapsible sections on the Server, System, About, Stats, Widgets, Companion, Generative AI, Cloud relay, calendar-feed and gallery pages, remembered per page; `section_card` takes `collapsible=False` to opt out.
+- Paper's phone shell. The four places you go most (Send, Dashboards,
+  Lineups, History) sit in a tab bar along the bottom and More lifts the
+  rest up as a sheet, in place of the hamburger drawer. Once a page's title
+  scrolls under the top bar, the bar turns into the page bar: the title
+  where the brand name was, and the notices that scrolled away (restart
+  required, an update, new devices, a low battery) as chips. Those notices
+  sit in a band at the top of the page rather than the drawer. The battery
+  pill leaves the top bar; the charge list lives in the sheet. Desktop and
+  the classic design are unchanged.
+
+- A `select` cell option's choice can list `aliases`, the values an earlier
+  manifest used for it. A cell that still holds one shows the choice it
+  became rather than "Unavailable: <value>", `show_if` reads it the same way,
+  and the next save writes the current value, so a widget can rename a value
+  without stranding every cell set up before the rename.
 - Lineups redesign, part 1 of 3: a view model for the Lineups page and the
   endpoints the new page edits through. `GET /decks/view.json` describes every
   display (what is on screen, what is queued and when a sleeping frame picks it
