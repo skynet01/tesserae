@@ -814,6 +814,8 @@
 .dx-dp .dx-empty-title { font-weight: 700; }
 
 .dx-dp .dx-frame-actions { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; margin-top: 12px; }
+.dx-dp .dx-sec-foot { display: flex; align-items: center; justify-content: flex-end; gap: 10px 16px; flex-wrap: wrap; margin-top: var(--t-gap-title); padding-top: var(--t-gap-title); border-top: 1px solid var(--t-border); }
+.dx-dp .dx-sec-foot > .dx-help { margin-right: auto; }
 .dx-dp .dx-collect { display: flex; align-items: flex-start; gap: 12px 20px; flex-wrap: wrap; padding: 4px 0 12px; }
 .dx-dp .dx-collect-text { flex: 1; min-width: 220px; }
 .dx-dp .dx-collect-text .dx-help { margin-top: 2px; }

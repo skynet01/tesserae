@@ -1740,7 +1740,7 @@ def _device_overview(device: Device, section: dict[str, Any]) -> dict[str, Any]:
             "value": fw_value,
             "sub": fw_sub,
             "muted": not fw_current,
-            "update": fw_update,
+            "has_update": fw_update,
         },
         "next_wake": next_wake,
     }
