@@ -83,6 +83,8 @@ def _health_text(health: Any) -> str:
             parts.append(f"{health[key]} {name}")
     parts.append(f"{health.get('pictures', 0)} pictures")
     return ", ".join(parts)
+
+
 _FLASH_PHASE_TEXT = {
     "pending": "Waiting for the frame to restart into its bootloader.",
     "verifying": "Firmware written. Waiting for the frame to restart on it.",
