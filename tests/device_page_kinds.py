@@ -17,7 +17,6 @@ colour-depth prompt, and a mains Pi with a pushed render and a queued one.
 from __future__ import annotations
 
 import io
-import json
 import time
 from pathlib import Path
 from types import SimpleNamespace

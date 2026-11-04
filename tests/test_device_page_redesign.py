@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from tests.device_page_kinds import KINDS, build_app, fake_visionect_service
 
 BASELINE = Path(__file__).parent / "fixtures" / "device_page_inventory.json"
