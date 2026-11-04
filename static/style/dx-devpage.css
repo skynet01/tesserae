@@ -948,3 +948,6 @@
 .dx-devpage .dx-dp .dx-btn.is-primary { background: oklch(from var(--t-accent) calc(l - 0.04) c h); border-color: oklch(from var(--t-accent) calc(l - 0.04) c h); }
 .dx-devpage .dx-dp .dx-btn.is-primary:hover { background: oklch(from var(--t-accent) calc(l - 0.09) c h); border-color: oklch(from var(--t-accent) calc(l - 0.09) c h); }
 :root:not([data-theme="dark"]):not([data-ui="paper"]) .dx-devpage .dx-dp :is(.dx-link-btn, .dx-callout > a, .dx-subnav-link.is-active) { color: var(--t-accent-hover); }
+
+/* Visionect firmware: progress of a flash. */
+.dx-devpage .dx-dp .dx-progress { display: block; width: 100%; max-width: 420px; height: 8px; margin: 6px 0; accent-color: var(--t-accent); }

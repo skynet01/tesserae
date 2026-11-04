@@ -1682,7 +1682,16 @@ def _device_overview(device: Device, section: dict[str, Any]) -> dict[str, Any]:
     fw_value = str(fw_current) if fw_current else "Unknown"
     if fw_value[:1].isdigit():
         fw_value = f"v{fw_value}"
-    if fw.get("state") == "outdated" and fw.get("latest"):
+    # A Visionect sign's firmware comes from Visionect's own repository, not
+    # Tesserae's: its "update available" is the newest build for its hardware.
+    vs_fw = ((section.get("visionect_setup") or {}).get("firmware")) or {}
+    fw_update = bool(vs_fw.get("update_available"))
+    if vs_fw.get("installed") and not fw_current:
+        fw_value = f"v{vs_fw['installed']}"
+        fw_current = vs_fw["installed"]
+    if fw_update:
+        fw_sub = f"v{vs_fw['latest']} available"
+    elif fw.get("state") == "outdated" and fw.get("latest"):
         fw_sub = f"v{fw['latest']} available"
     elif fw.get("state") == "current":
         fw_sub = "up to date"
@@ -1727,7 +1736,12 @@ def _device_overview(device: Device, section: dict[str, Any]) -> dict[str, Any]:
             "low": battery_low,
             "muted": power.get("label") == "Mains",
         },
-        "firmware": {"value": fw_value, "sub": fw_sub, "muted": not fw_current},
+        "firmware": {
+            "value": fw_value,
+            "sub": fw_sub,
+            "muted": not fw_current,
+            "update": fw_update,
+        },
         "next_wake": next_wake,
     }
 
