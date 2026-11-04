@@ -60,8 +60,15 @@ from typing import Any
 
 from flask import Flask
 
-from app import background_loops, device_service
+from app import background_loops, device_service, visionect_flash
 from app.device_loader import Device, DeviceRegistry
+from app.visionect_bootloader import BootloaderError, parse_hello
+from app.visionect_firmware import (
+    Build,
+    FirmwareRepository,
+    RepositoryError,
+    compatible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +144,11 @@ AUTO_BIND_KEY = "uuid_armed_at"
 MAX_UNKNOWN_SIGNS = 16
 MAX_DISCOVERED = 8
 MAX_WARNED_UNBOUND = 64
+# A firmware update is refused below this battery level (an interrupted flash
+# is not something anyone has seen recover).
+FLASH_MIN_BATTERY_PCT = 30
+# Longest to wait for a bootloader's complete hello once it has connected.
+HELLO_READ_S = 10.0
 # The sign's own settings (TCLV parameters), shown on the device page and set
 # from it. This follows what Visionect's own Software Suite does on the wire:
 # at most five ids to a packet, and never a second settings packet until the
@@ -502,6 +514,37 @@ def status_summary(status: Any) -> dict[str, Any]:
     return out
 
 
+def firmware_identity(status: Any) -> dict[str, Any]:
+    """What a status packet says about the sign's firmware and hardware: the
+    fields firmware is matched on. Anything the sign didn't report is None."""
+    if status is None:
+        return {}
+    try:
+        fields = status.fields()
+    except Exception:
+        return {}
+
+    def _num(value: Any) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value == 0xFFFFFFFF:
+            return None
+        return value
+
+    def _triple(name: str) -> tuple[int, int, int] | None:
+        raw = fields.get(name)
+        if not isinstance(raw, dict):
+            return None
+        nums = [_num(raw.get(k)) for k in ("major", "minor", "revision")]
+        return (nums[0], nums[1], nums[2]) if all(n is not None for n in nums) else None  # type: ignore[return-value]
+
+    return {
+        "firmware": _triple("Firmware"),
+        "hardware": _triple("Hardware"),
+        "hw_name_id": _num(fields.get("HardwareNameID")),
+        "display_id": _num(fields.get("DisplayType")),
+        "checksum": _num(fields.get("FirmwareID")),
+    }
+
+
 def status_line(status: Any) -> str:
     """A status packet as one exchange-log line."""
     st = status_summary(status)
@@ -737,6 +780,12 @@ class VisionectService:
         self._warned_unbound: dict[str, None] = {}  # insertion-ordered, capped
         self._discovered: dict[str, None] = {}  # discovery ids we listed, oldest first
         self._retry_timer: threading.Timer | None = None
+        # Firmware flashes, one job per UUID (the newest; a finished one stays
+        # for the device page). Guarded by _flash_lock: request threads create
+        # jobs, the loop thread runs them.
+        self._flash_lock = threading.Lock()
+        self._flash_jobs: dict[str, visionect_flash.FlashJob] = {}
+        self.firmware_repo: FirmwareRepository | None = None
         # Read by Flask request threads; written on the loop thread.
         self._snapshot_lock = threading.Lock()
         self._snapshot: dict[str, dict[str, Any]] = {}
@@ -914,6 +963,8 @@ class VisionectService:
         )
         server.keep_identity = self._keeps_identity
         server.trusted_peer = self._trusted_peer
+        server.bootloader_wants = self._flash_wants
+        server.bootloader_handler = self._flash_connection
         self._stop_event, self._store, self._server = stop_event, store, server
         await server.start()
         logger.info("visionect: listening for signs on %s:%d", self.host, self.port)
@@ -1267,6 +1318,8 @@ class VisionectService:
         if ctx is None or device is None or self._server is None:
             return
         loop = asyncio.get_running_loop()
+        if self._flash_active(sign.uuid):
+            return  # no pictures to a frame that is being flashed
         self._expire(sign)
         status = sign.status  # from the sign's own connection only
         panel = sign_panel(status) if status is not None else None
@@ -1953,6 +2006,7 @@ class VisionectService:
         self._note(
             sign, "in", f"connected from {remote or '?'} ({sign.connect_reason or 'no reason'})"
         )
+        self._flash_reconnected(sign, status)
         # What was read earlier still stands unless the frame rebooted or it's
         # been a while (a USB console may have changed it). A new connection may
         # write again, and anything queued on the old one is gone.
@@ -2195,6 +2249,7 @@ class VisionectService:
             "param_error": sign.param_error,
             "action": dict(sign.action) if sign.action else None,
             "exchanges": list(sign.exchanges),
+            "identity": firmware_identity(sign.status),
         }
         with self._snapshot_lock:
             self._snapshot[sign.uuid] = view
@@ -2203,6 +2258,371 @@ class VisionectService:
         with self._snapshot_lock:
             view = self._snapshot.get(normalise_uuid(uuid))
             return dict(view) if view is not None else None
+
+    # -- firmware flashing -------------------------------------------------
+    #
+    # Only ever on an explicit request (request_firmware_update). The frame is
+    # told to reboot; its bootloader then dials this listener on a new
+    # connection and opens with a hello (app.visionect_bootloader). The
+    # listener hands that connection here only while a flash is pending for
+    # the address, and only a hello from the frame the flash is for, on
+    # matching hardware, is answered. Everything else is as it always was.
+
+    def _repo(self) -> FirmwareRepository | None:
+        if self.firmware_repo is None:
+            ctx = self._ctx
+            root = ctx.app.config.get("DATA_ROOT") if ctx is not None else None
+            if root:
+                self.firmware_repo = FirmwareRepository(Path(root) / "visionect_firmware")
+        return self.firmware_repo
+
+    def _flash_active(self, uuid: str) -> bool:
+        job = self._flash_jobs.get(uuid)
+        return job is not None and job.active
+
+    def _flash_any_active(self) -> bool:
+        return any(job.active for job in list(self._flash_jobs.values()))
+
+    def flash_job(self, device_id: str) -> visionect_flash.FlashJob | None:
+        uuid = self.device_uuid(device_id)
+        return self._flash_jobs.get(uuid) if uuid else None
+
+    def firmware_token(self, device_id: str) -> str:
+        """Changes whenever what the page shows about firmware does (a flash
+        step, a new list); empty when there is nothing to show. The device
+        page polls it with its other live regions."""
+        uuid = self.device_uuid(device_id)
+        if not uuid:
+            return ""
+        job = self._flash_jobs.get(uuid)
+        repo = self.firmware_repo
+        parts = []
+        if job is not None:
+            parts.append(f"{job.phase}{job.version}")
+        if repo is not None and repo.generation:
+            parts.append(f"g{repo.generation}")
+        return ".".join(parts)
+
+    def _flash_blocked(self, view: dict[str, Any] | None) -> str:
+        """Why a flash can't start now (plain words), or ""."""
+        if not self.running:
+            return "Tesserae isn't listening for Visionect frames right now."
+        if view is None or not view.get("connected"):
+            return "The frame isn't connected right now (asleep, or between connections)."
+        if self._flash_any_active():
+            return "A firmware update is already running."
+        battery = (view.get("status") or {}).get("battery_pct")
+        if not isinstance(battery, int):
+            return "The frame hasn't reported its battery level, so it isn't safe to update."
+        if battery < FLASH_MIN_BATTERY_PCT:
+            return (
+                f"The frame's battery is at {battery}%. Charge it above "
+                f"{FLASH_MIN_BATTERY_PCT}% before updating its firmware."
+            )
+        return ""
+
+    def _compatible_builds(self, view: dict[str, Any] | None) -> list[Build] | None:
+        """Builds for exactly this frame's hardware and display, newest first,
+        from the cached list; None when the list or what the frame reports
+        doesn't allow telling."""
+        repo = self._repo()
+        ident = (view or {}).get("identity") or {}
+        if repo is None:
+            return None
+        builds = repo.builds()
+        hardware, name_id, display = (
+            ident.get("hardware"),
+            ident.get("hw_name_id"),
+            ident.get("display_id"),
+        )
+        if builds is None or hardware is None or name_id is None or display is None:
+            return None
+        return compatible(builds, hardware=hardware, hardware_name_id=name_id, display_id=display)
+
+    def firmware_view(self, device_id: str) -> dict[str, Any] | None:
+        """What the device page shows about the sign's firmware, from the
+        cache and the last status only (never the network: a stale list
+        triggers a background refresh). None for a device with no sign."""
+        uuid = self.device_uuid(device_id)
+        if not uuid:
+            return None
+        view = self.sign_view(uuid)
+        job = self._flash_jobs.get(uuid)
+        repo = self._repo()
+        if repo is not None:
+            repo.refresh_in_background()
+        ident = (view or {}).get("identity") or {}
+        installed = ident.get("firmware")
+        checksum = ident.get("checksum")
+        builds = self._compatible_builds(view)
+        rows: list[dict[str, Any]] = []
+        for i, b in enumerate(builds or []):
+            is_installed = (
+                b.checksum == checksum if checksum is not None else b.version == installed
+            )
+            rows.append(
+                {
+                    "checksum": b.checksum_hex,
+                    "version": b.version_text,
+                    "installed": is_installed,
+                    "newest": i == 0,
+                    "downgrade": installed is not None and b.version < installed,
+                }
+            )
+        latest = builds[0] if builds else None
+        update = bool(
+            latest is not None
+            and installed is not None
+            and latest.version > installed
+            and (checksum is None or latest.checksum != checksum)
+        )
+        return {
+            "installed": ".".join(map(str, installed)) if installed else "",
+            "latest": latest.version_text if latest is not None else "",
+            "update_available": update,
+            "builds": rows,
+            "blocked": self._flash_blocked(view),
+            "flash": job.view() if job is not None else None,
+            "list_known": builds is not None,
+            "min_battery": FLASH_MIN_BATTERY_PCT,
+        }
+
+    def request_firmware_update(self, device_id: str, checksum_hex: str) -> str | None:
+        """Flash the chosen build onto the device's sign, from a request
+        thread. Returns why it can't, or None once the reboot is queued.
+
+        Order: validate, download (a file that doesn't walk cleanly is never
+        used), re-check that the frame is connected, charged and not already
+        being flashed, mark the flash pending, then reboot the frame."""
+        uuid = self.device_uuid(device_id)
+        if not uuid:
+            return "No frame is bound to this device yet."
+        view = self.sign_view(uuid)
+        blocked = self._flash_blocked(view)
+        if blocked:
+            return blocked
+        text = str(checksum_hex or "").strip().lower()
+        try:
+            wanted = int(text, 16)
+        except ValueError:
+            return "Unknown firmware build."
+        builds = self._compatible_builds(view)
+        if builds is None:
+            return "The list of firmware builds for this frame isn't available."
+        chosen = next((b for b in builds if b.checksum == wanted), None)
+        if chosen is None:
+            return "That build isn't for this frame's hardware and display."
+        ident = (view or {}).get("identity") or {}
+        if ident.get("checksum") == chosen.checksum or ident.get("firmware") == chosen.version:
+            return "The frame already runs that firmware."
+        repo = self._repo()
+        assert repo is not None
+        try:
+            data = repo.fetch(chosen)
+        except RepositoryError as exc:
+            return str(exc)
+        view = self.sign_view(uuid)
+        job = visionect_flash.FlashJob(
+            uuid=uuid,
+            device_id=device_id,
+            build=chosen,
+            data=data,
+            peer_ip=str((view or {}).get("remote") or ""),
+            from_version=".".join(map(str, ident.get("firmware") or ())),
+            from_checksum=ident.get("checksum"),
+        )
+        with self._flash_lock:
+            blocked = self._flash_blocked(view)
+            if blocked:
+                return blocked
+            self._flash_jobs[uuid] = job
+        logger.info(
+            "visionect: firmware %s (%s) requested for sign %s, now %s",
+            chosen.version_text,
+            chosen.checksum_hex,
+            uuid,
+            job.from_version or "unknown",
+        )
+        self._call_soon(functools.partial(self._flash_begin, job))
+        return None
+
+    def _flash_note(self, job: visionect_flash.FlashJob, text: str, way: str = "note") -> None:
+        logger.info("visionect: firmware flash of sign %s: %s", job.uuid, text)
+        sign = self._signs.get(job.uuid)
+        if sign is not None:
+            self._note(sign, way, f"firmware: {text}")
+            self._publish(sign)
+
+    def _flash_end(self, job: visionect_flash.FlashJob, ok: bool, message: str) -> None:
+        """Record how a flash ended, and let pictures resume."""
+        if job.timer is not None:
+            job.timer.cancel()
+            job.timer = None
+        job.phase = visionect_flash.DONE if ok else visionect_flash.FAILED
+        job.message = message
+        job.finished_at = time.time()
+        job.touch()
+        if ok:
+            self._flash_note(job, message)
+        else:
+            logger.warning("visionect: firmware flash of sign %s failed: %s", job.uuid, message)
+            sign = self._signs.get(job.uuid)
+            if sign is not None:
+                self._note(sign, "note", f"firmware: {message}")
+                self._publish(sign)
+        self._schedule(job.uuid)
+
+    def _flash_arm(self, job: visionect_flash.FlashJob, seconds: float) -> None:
+        if job.timer is not None:
+            job.timer.cancel()
+        loop = asyncio.get_running_loop()
+        job.timer = loop.call_later(seconds, self._flash_timeout, job, job.phase)
+
+    def _flash_timeout(self, job: visionect_flash.FlashJob, phase: str) -> None:
+        job.timer = None
+        if job.phase != phase or not job.active:
+            return
+        if phase == visionect_flash.PENDING:
+            self._flash_end(
+                job,
+                False,
+                "The frame didn't contact its bootloader within "
+                f"{visionect_flash.PENDING_TIMEOUT_S / 60:.0f} minutes of the reboot, so nothing "
+                "was flashed. It may still be restarting; check it, then try again.",
+            )
+        elif phase == visionect_flash.VERIFYING:
+            self._flash_end(
+                job,
+                False,
+                "The flash finished but the frame hasn't reconnected within "
+                f"{visionect_flash.VERIFY_TIMEOUT_S / 60:.0f} minutes. Power-cycle it. "
+                + visionect_flash.USB_HINT,
+            )
+
+    def _flash_begin(self, job: visionect_flash.FlashJob) -> None:
+        """On the loop: send the reboot and wait for the bootloader."""
+        sign = self._signs.get(job.uuid)
+        if sign is None or not self._alive(sign) or self._flash_jobs.get(job.uuid) is not job:
+            self._flash_end(job, False, "The frame disconnected before it could be rebooted.")
+            return
+        try:
+            sign.conn.reboot()
+        except Exception as exc:
+            logger.warning("visionect: reboot for a firmware flash failed", exc_info=True)
+            self._flash_end(job, False, f"Couldn't send the reboot command: {exc}")
+            return
+        job.peer_ip = job.peer_ip or sign.remote
+        self._spawn(self._write(sign.conn, sign.writer))
+        sign.inflight = None
+        self._flash_arm(job, visionect_flash.PENDING_TIMEOUT_S)
+        self._flash_note(
+            job, f"reboot sent; waiting for the bootloader to offer {job.build.version_text}", "out"
+        )
+
+    def _flash_wants(self, ip: str) -> bool:
+        """Listener hook: a flash is waiting for a bootloader from ``ip``."""
+        return any(
+            job.phase == visionect_flash.PENDING and (not job.peer_ip or job.peer_ip == ip)
+            for job in list(self._flash_jobs.values())
+        )
+
+    async def _flash_connection(
+        self, reader: Any, writer: Any, head: bytes, on_claim: Callable[[], None]
+    ) -> bytes | None:
+        """Listener hook: a connection opened like a bootloader hello. Take it
+        over when it is the pending frame's; otherwise give the bytes back."""
+        from app.visionect_listener import abort, peer_ip
+
+        ip = peer_ip(writer)
+        data = await visionect_flash.read_hello(reader, head, timeout=HELLO_READ_S)
+        try:
+            hello = parse_hello(data)
+        except BootloaderError:
+            logger.info("visionect: %s opened like a bootloader but sent no valid hello", ip or "?")
+            return data
+        uuid = normalise_uuid(hello.device_id.hex())
+        job = self._flash_jobs.get(uuid)
+        if (
+            job is None
+            or job.phase != visionect_flash.PENDING
+            or (job.peer_ip and job.peer_ip != ip)
+        ):
+            logger.info(
+                "visionect: bootloader hello from %s (%s), no flash pending for it; "
+                "handled as before",
+                ip or "?",
+                uuid,
+            )
+            return data
+        on_claim()
+        job.phase = visionect_flash.RUNNING
+        job.touch()
+        if job.timer is not None:
+            job.timer.cancel()
+            job.timer = None
+        loop = asyncio.get_running_loop()
+        try:
+            await visionect_flash.run_session(
+                reader,
+                writer,
+                data,
+                job,
+                on_change=lambda text: self._flash_note(job, text, "in"),
+                abort=abort,
+                clock=loop.time,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # never leave a job stuck running
+            logger.exception("visionect: the firmware flash crashed")
+            abort(writer)
+            job.wrote_records = job.wrote_records or job.blocks_done > 0
+            self._flash_end(
+                job, False, visionect_flash.failure_message(str(exc), job.wrote_records)
+            )
+            return None
+        if job.phase == visionect_flash.VERIFYING:
+            self._flash_arm(job, visionect_flash.VERIFY_TIMEOUT_S)
+            self._flash_note(
+                job, "all blocks written; waiting for the frame to restart on the new firmware"
+            )
+        else:
+            self._flash_end(job, False, job.message)
+        return None
+
+    def _flash_reconnected(self, sign: _Sign, status: Any) -> None:
+        """A sign connected normally: it is either the flashed frame back on
+        its new firmware, or one that rebooted without calling the bootloader."""
+        job = self._flash_jobs.get(sign.uuid)
+        if job is None or not job.active:
+            return
+        reason = sign.connect_reason
+        try:
+            if job.phase == visionect_flash.VERIFYING:
+                reported = firmware_identity(status).get("firmware")
+                shown = ".".join(map(str, reported)) if reported else "no version"
+                if reported == job.build.version:
+                    self._flash_end(
+                        job,
+                        True,
+                        f"The frame restarted ({reason or 'no reason'}) on firmware {shown}, "
+                        "as requested.",
+                    )
+                else:
+                    self._flash_end(
+                        job,
+                        False,
+                        f"The frame came back reporting firmware {shown}, not the "
+                        f"{job.build.version_text} that was flashed.",
+                    )
+            elif job.phase == visionect_flash.PENDING and reason == "reboot":
+                self._flash_end(
+                    job,
+                    False,
+                    "The frame restarted without calling its bootloader, so nothing was flashed.",
+                )
+        except Exception:
+            logger.exception("visionect: checking a flashed frame failed")
 
 
 def is_visionect_device(device: Any) -> bool:

@@ -65,6 +65,7 @@ def setup_band(device: Device) -> dict[str, Any] | None:
     uuid = svc.device_uuid(device.id)
     if uuid:
         band["sign"] = _visionect_sign(svc.sign_view(uuid) or {})
+        band["firmware"] = _visionect_firmware(svc, device)
     return band
 
 
@@ -82,6 +83,64 @@ def _health_text(health: Any) -> str:
             parts.append(f"{health[key]} {name}")
     parts.append(f"{health.get('pictures', 0)} pictures")
     return ", ".join(parts)
+_FLASH_PHASE_TEXT = {
+    "pending": "Waiting for the frame to restart into its bootloader.",
+    "verifying": "Firmware written. Waiting for the frame to restart on it.",
+}
+
+
+def _visionect_firmware(svc: Any, device: Device) -> dict[str, Any] | None:
+    """The sign's firmware for the device page: installed and latest versions,
+    the builds it could be flashed with (newest first; downgrades labelled),
+    and the state of a flash that is running or just ended. Built from the
+    cache only, so a repository that can't be reached just means no builds."""
+    try:
+        fv = svc.firmware_view(device.id)
+    except Exception:  # never break the page over firmware
+        current_app.logger.debug("visionect: firmware view failed", exc_info=True)
+        return None
+    if fv is None:
+        return None
+    options = []
+    for b in fv["builds"]:
+        tags = [t for t, on in (("installed", b["installed"]), ("newest", b["newest"])) if on]
+        if b["downgrade"]:
+            tags.append("downgrade")
+        label = b["version"] + (f" ({', '.join(tags)})" if tags else "")
+        options.append({"value": b["checksum"], "label": label, "installed": b["installed"]})
+    flash = fv["flash"]
+    flash_view = None
+    if flash:
+        phase = flash["phase"]
+        if phase == "running":
+            text = (
+                f"Block {flash['blocks_done']} of {flash['blocks_total']} ({flash['percent']}%)"
+                if flash["blocks_total"]
+                else "Starting the transfer."
+            )
+        else:
+            text = flash["message"] or _FLASH_PHASE_TEXT.get(phase, "")
+        flash_view = {
+            "active": flash["active"],
+            "phase": phase,
+            "ok": flash["ok"],
+            "failed": phase == "failed",
+            "percent": flash["percent"],
+            "text": text,
+            "target": flash["target"],
+        }
+    return {
+        "installed": fv["installed"],
+        "latest": fv["latest"],
+        "update_available": fv["update_available"],
+        "options": options,
+        "can_flash": not fv["blocked"] and any(not o["installed"] for o in options),
+        "blocked": fv["blocked"],
+        "flash": flash_view,
+        "list_known": fv["list_known"],
+        "min_battery": fv["min_battery"],
+        "endpoint": url_for("auth.devices_visionect_firmware", instance_id=device.id),
+    }
 
 
 def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
@@ -350,4 +409,33 @@ def devices_visionect_action(instance_id: str, action: str) -> Response:
         flash(problem, "error")
     else:
         flash(_VISIONECT_ACTION_DONE[action].format(name=device.name), "ok")
+    return redirect_to
+
+
+@bp.post("/settings/devices/<instance_id>/visionect-firmware")
+def devices_visionect_firmware(instance_id: str) -> Response:
+    """Flash a chosen firmware build onto a Visionect sign (the device page's
+    Troubleshooting section). Explicit only: the build is validated and
+    downloaded, then the sign is rebooted into its bootloader."""
+    redirect_to = redirect(
+        url_for("auth.device_page", instance_id=instance_id, _anchor="connection")
+    )
+    device = devices().get(instance_id)
+    if device is None or not visionect.is_visionect_device(device):
+        flash(f"Unknown Visionect device {instance_id!r}.", "error")
+        return redirect_to
+    svc = visionect.service()
+    problem = (
+        svc.request_firmware_update(device.id, request.form.get("checksum", ""))
+        if svc is not None
+        else "Tesserae isn't listening for Visionect frames right now."
+    )
+    if problem:
+        flash(problem, "error")
+    else:
+        flash(
+            f"Updating {device.name}: it restarts into its bootloader and takes the new "
+            "firmware, about a minute in all. Progress shows below; don't power it off.",
+            "ok",
+        )
     return redirect_to

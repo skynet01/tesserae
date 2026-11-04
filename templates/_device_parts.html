@@ -317,7 +317,7 @@
   <li><a class="dx-vital" href="#connection"{% if ov.firmware.sub %} title="{{ ov.firmware.sub }}"{% endif %}>
     <span class="dx-vital-k">Firmware</span>
     <span class="dx-vital-v{% if ov.firmware.muted %} is-muted{% endif %}">{{ ov.firmware.value }}
-      {%- if fw.state == 'outdated' and fw.latest %}<span class="tg tg--warn dx-v-badge">update</span>{% endif %}</span>
+      {%- if (fw.state == 'outdated' and fw.latest) or ov.firmware.update %}<span class="tg tg--warn dx-v-badge">update</span>{% endif %}</span>
     {%- if ov.firmware.sub %}<span class="sr-only">, {{ ov.firmware.sub }}</span>{% endif %}</a></li>
   {%- set h = st.health %}
   <li><a class="dx-vital" href="#connection" title="{% if h == 'ok' %}Online{% elif h == 'warn' %}Quiet{% elif h == 'stale' %}Stale{% else %}No heartbeat yet{% endif %}">
