@@ -48,6 +48,7 @@ import json
 import logging
 import math
 import os
+import re
 import threading
 import time
 from collections import deque
@@ -150,15 +151,14 @@ PARAM_SLEEP_DISABLE = 52
 PARAM_FLASH_SAVE = 53
 PARAM_WIFI_SSID = 65
 READ_PARAMS = (PARAM_HEARTBEAT, PARAM_SLEEP_DISABLE, PARAM_WIFI_SSID)
-# The sign's other plain settings, offered under "Advanced: frame settings" on
-# the device page. Config name -> (TCLV id, ((config value, wire value, label),
+# The sign's other settings, offered under "Advanced: frame settings" on the
+# device page. Config name -> (TCLV id, ((config value, wire value, label),
 # ...)); the ids and meanings are the vendor's parameter table as pyvisionect
 # lists it. They are read once per connection in a second read, and a setting
 # the sign answers with a read error (or not at all) is never offered, so each
-# frame shows what its own firmware has. Network identity (server, SSID,
-# password, Wi-Fi band), encryption, panel geometry and shipping mode are left
-# out on purpose: a wrong value there loses or bricks the sign.
-SIGN_SETTINGS: dict[str, tuple[int, tuple[tuple[str, int, str], ...]]] = {
+# frame shows what its own firmware has. Wire values are ints, except the Wi-Fi
+# security mode, which is text.
+SIGN_SETTINGS: dict[str, tuple[int, tuple[tuple[str, int | str, str], ...]]] = {
     "frame_sleep": (
         PARAM_SLEEP_DISABLE,
         (("sleep", 0, "Sleep between check-ins"), ("awake", 1, "Stay awake (drains the battery)")),
@@ -185,20 +185,92 @@ SIGN_SETTINGS: dict[str, tuple[int, tuple[tuple[str, int, str], ...]]] = {
     "epd_border": (109, (("0", 0, "From the server"), ("1", 1, "White"), ("2", 2, "Black"))),
     "charging_mode": (172, (("0", 0, "Normal"), ("1", 1, "Charging off"))),
     "ble_mode": (155, (("0", 0, "Off"), ("1", 1, "On"))),
+    # Network settings: a wrong value can cut the frame off from Tesserae, and
+    # only the USB cable and Visionect's configurator bring it back. The vendor
+    # marks these ids as not writable over the network, so a frame may refuse.
+    "wifi_security": (
+        66,
+        (
+            ("none", "none", "None (open)"),
+            ("wpa2", "wpa2", "WPA2"),
+            ("wpa2e", "wpa2e", "WPA2 Enterprise"),
+        ),
+    ),
+    "wifi_band": (68, (("0", 0, "Dual band"), ("1", 1, "2.4 GHz"), ("2", 2, "5 GHz"))),
 }
-EXTRA_PARAMS = tuple(pid for pid, _ in SIGN_SETTINGS.values() if pid not in READ_PARAMS)
+# Free-text settings: config name -> (TCLV id written, TCLV id whose answer
+# shows the frame has it). The password can't be read back; the server address
+# is written as "host:port" through the vendor's change-server setting (166)
+# and shown from the server ip / port (18, 19) the frame reports.
+PARAM_WIFI_PSK = 67
+PARAM_SERVER_IP = 18
+PARAM_SERVER_PORT = 19
+PARAM_SERVER_ADDRESS = 166
+TEXT_SETTINGS: dict[str, tuple[int, int]] = {
+    "wifi_ssid": (PARAM_WIFI_SSID, PARAM_WIFI_SSID),
+    "wifi_psk": (PARAM_WIFI_PSK, PARAM_WIFI_SSID),
+    "server_address": (PARAM_SERVER_ADDRESS, PARAM_SERVER_PORT),
+}
+# Settings the device page puts behind the USB-cable warning.
+NETWORK_SETTINGS = ("wifi_ssid", "wifi_psk", "wifi_security", "wifi_band", "server_address")
+TEXT_PARAMS = frozenset({PARAM_WIFI_SSID, 66, PARAM_SERVER_IP})
+# Written ids that can't be read back, and the id whose answer lets them be offered.
+WRITE_GATE = {PARAM_WIFI_PSK: PARAM_WIFI_SSID, PARAM_SERVER_ADDRESS: PARAM_SERVER_PORT}
+WRITE_ONLY = frozenset(WRITE_GATE)
+_SERVER_ADDRESS_RE = re.compile(r"^[A-Za-z0-9._-]{1,253}:(\d{1,5})$")
+EXTRA_PARAMS = tuple(
+    dict.fromkeys(
+        [pid for pid, _ in SIGN_SETTINGS.values() if pid not in READ_PARAMS]
+        + [PARAM_SERVER_IP, PARAM_SERVER_PORT]
+    )
+)
 ALL_READ_PARAMS = READ_PARAMS + EXTRA_PARAMS
+READ_CHUNK = 6  # ids per read packet; the one capture of the vendor server sent six
 
 
-def sign_setting_labels(known: dict[int, int]) -> dict[str, str]:
-    """The settings the sign has answered, config name -> what it is set to."""
+def text_setting_value(name: str, raw: Any) -> str | None:
+    """A free-text setting's config value if it is one the sign could take
+    (SSID 1-32 characters, password 8-64, server "host:port"), else None."""
+    text = str(raw or "")
+    if not text.strip() or not text.isascii() or not text.isprintable():
+        return None
+    if name == "wifi_ssid":
+        return text if len(text) <= 32 else None
+    if name == "wifi_psk":
+        return text if 8 <= len(text) <= 64 else None
+    match = _SERVER_ADDRESS_RE.match(text.strip())
+    if match and 1 <= int(match.group(1)) <= 65535:
+        return text.strip()
+    return None
+
+
+def _text_value(pid: int, raw: bytes) -> str:
+    """A text setting as the frame reported it; the server ip comes as four
+    bytes on some firmware and as text on others."""
+    if pid == PARAM_SERVER_IP and len(raw) == 4 and not all(0x20 <= b < 0x7F for b in raw):
+        return ".".join(str(b) for b in raw)
+    return raw.split(b"\0")[0].decode("ascii", "replace")
+
+
+def sign_setting_labels(known: dict[int, Any]) -> dict[str, str]:
+    """The settings the sign has answered, config name -> what it is set to
+    (empty when it can't be read back, like the Wi-Fi password)."""
     out: dict[str, str] = {}
     for name, (pid, choices) in SIGN_SETTINGS.items():
         if pid not in known:
             continue
         label = next((lab for _cv, wire, lab in choices if wire == known[pid]), None)
         out[name] = label or f"{known[pid]}"
+    for name, (_write_pid, gate) in TEXT_SETTINGS.items():
+        if gate in known:
+            out[name] = (
+                str(known.get(PARAM_SERVER_ADDRESS, ""))
+                if name == "server_address"
+                else (str(known[PARAM_WIFI_SSID]) if name == "wifi_ssid" else "")
+            )
     return out
+
+
 HEARTBEAT_MAX_MINUTES = 24 * 60
 # Gaps between consecutive statuses that count as a check-in cadence (see
 # ``observed_status_gap_s``), and how many status times are kept to measure it.
@@ -215,6 +287,7 @@ PARAM_NAMES = {
     PARAM_FLASH_SAVE: "flash save",
 }
 PARAM_NAMES.update({pid: name.replace("_", " ") for name, (pid, _c) in SIGN_SETTINGS.items()})
+PARAM_NAMES.update({pid: name.replace("_", " ") for name, (pid, _g) in TEXT_SETTINGS.items()})
 # pyvisionect.devices.enums.ParamControl.
 PARAM_READ = 0
 PARAM_READ_ERROR = 2
@@ -331,12 +404,12 @@ def observed_status_gap_s(times: Sequence[float]) -> float | None:
     return usable[mid] if len(usable) % 2 else (usable[mid - 1] + usable[mid]) / 2
 
 
-def desired_params(cfg: dict[str, Any]) -> dict[int, int]:
+def desired_params(cfg: dict[str, Any]) -> dict[int, int | str]:
     """The sign settings a device's config asks for, as TCLV id to value:
     ``heartbeat_min`` (minutes between check-ins) and the ``SIGN_SETTINGS``
     choices (``frame_sleep`` is "sleep" or "awake"). Blank, absent or junk
     leaves the sign's own setting."""
-    out: dict[int, int] = {}
+    out: dict[int, int | str] = {}
     try:
         minutes = int(str(cfg.get("heartbeat_min") or "").strip())
     except ValueError:
@@ -348,6 +421,10 @@ def desired_params(cfg: dict[str, Any]) -> dict[int, int]:
         for config_value, wire, _label in choices:
             if chosen == config_value:
                 out[pid] = wire
+    for name, (pid, _gate) in TEXT_SETTINGS.items():
+        text = text_setting_value(name, cfg.get(name))
+        if text is not None:
+            out[pid] = text
     return out
 
 
@@ -407,9 +484,8 @@ def params_line(packet: Any) -> str:
         name = names.get(pid, f"TCLV {pid}")
         if control in (PARAM_READ_ERROR, PARAM_WRITE_ERROR):
             parts.append(f"{name}: {'read' if control == PARAM_READ_ERROR else 'write'} refused")
-        elif pid == PARAM_WIFI_SSID:
-            ssid = item.value.split(b"\0")[0].decode("ascii", "replace")
-            parts.append(f"{name} {ssid}")
+        elif pid in TEXT_PARAMS:
+            parts.append(f"{name} {_text_value(pid, item.value)}")
         elif item.value:
             parts.append(f"{name} {int.from_bytes(item.value, 'little')}")
         else:
@@ -536,8 +612,10 @@ class _Sign:
     # Every setting the sign has answered (id -> value), and the ids it
     # refused to read. Both outlive the connection so the device page keeps
     # offering what the frame supports while it sleeps.
-    known_params: dict[int, int] = field(default_factory=dict)
+    known_params: dict[int, Any] = field(default_factory=dict)
     params_unsupported: set[int] = field(default_factory=set)
+    known_written: dict[int, Any] = field(default_factory=dict)  # write-only settings sent
+    params_pending: int = 0  # read packets sent and not yet answered
     extras_asked: bool = False  # the second read (EXTRA_PARAMS) went out this connection
     # Wall clock times of the sign's recent statuses, newest last. The gap
     # between them is its real check-in cadence, which the configured interval
@@ -1428,6 +1506,13 @@ class VisionectService:
 
     # -- the sign's own settings and actions ---------------------------------
 
+    def _read_settings(self, sign: _Sign, ids: Sequence[int]) -> None:
+        """Queue reads of ``ids`` in packets of READ_CHUNK; each is answered
+        by one packet, and the wait for them ends with the last answer."""
+        for start in range(0, len(ids), READ_CHUNK):
+            sign.conn.read_params(list(ids[start : start + READ_CHUNK]))
+            sign.params_pending += 1
+
     async def _sync_params(self, sign: _Sign, device: Device) -> bool:
         """Read the sign's settings once per connection; once they're in,
         write the ones the device's config sets differently, save them to
@@ -1438,7 +1523,7 @@ class VisionectService:
         if not sign.params_asked:
             sign.params_asked = True
             try:
-                conn.read_params(list(READ_PARAMS))
+                self._read_settings(sign, READ_PARAMS)
             except Exception:
                 logger.debug("visionect: reading %s's settings failed", sign.uuid, exc_info=True)
                 return False
@@ -1449,54 +1534,55 @@ class VisionectService:
         if not sign.extras_asked:
             sign.extras_asked = True
             try:
-                conn.read_params(list(EXTRA_PARAMS))
+                self._read_settings(sign, EXTRA_PARAMS)
             except Exception:
-                logger.debug("visionect: reading %s's extra settings failed", sign.uuid, exc_info=True)
+                logger.debug(
+                    "visionect: reading %s's extra settings failed", sign.uuid, exc_info=True
+                )
                 return False
             self._note(sign, "out", "read more settings")
             self._await_params(sign)
             await self._write(conn, writer)
             return True
-        # Only settings this sign has answered are written: one it doesn't
-        # have (or didn't answer) is skipped, not allowed to hold up the rest.
-        want = {
-            pid: v for pid, v in desired_params(self._device_cfg(device.id)).items()
-            if pid in sign.params
-        }
+        # Only settings this sign has answered are written (the password and
+        # server address by the setting that shows the frame has them): one it
+        # doesn't have is skipped, not allowed to hold up the rest.
+        change = []
+        for pid, v in desired_params(self._device_cfg(device.id)).items():
+            if WRITE_GATE.get(pid, pid) not in sign.params:
+                continue
+            if sign.params.get(pid) == v or (pid, v) in sign.params_written:
+                continue
+            if pid in WRITE_ONLY and sign.known_written.get(pid) == v:
+                continue  # can't be read back: written once, not on every connection
+            change.append((pid, v))
         # A (setting, value) pair goes out once per connection, so a stale
         # value still showing while a read back is in flight isn't rewritten.
-        change = tuple(
-            sorted(
-                (pid, v)
-                for pid, v in want.items()
-                if sign.params[pid] != v and (pid, v) not in sign.params_written
-            )
-        )
+        change = tuple(sorted(change, key=lambda item: item[0]))
         if not change:
             return False
-        sign.params_written = tuple(sorted({*sign.params_written, *change}))
+        sign.params_written = tuple(sorted({*sign.params_written, *change}, key=lambda i: i[0]))
+        for pid, v in change:
+            if pid in WRITE_ONLY:
+                sign.known_written[pid] = v
+        shown = ", ".join(
+            f"{PARAM_NAMES.get(pid, pid)}={'(hidden)' if pid == PARAM_WIFI_PSK else v}"
+            for pid, v in change
+        )
         try:
-            conn.write_params(dict(change))
+            # The Wi-Fi and server ids are ones the vendor's own admin UI
+            # won't write over the network; the library only guards them, and
+            # only ids from the tables above ever get here.
+            conn.write_params(dict(change), allow_read_only=True)
             conn.write_params({PARAM_FLASH_SAVE: 1})
-            conn.read_params(list(READ_PARAMS))
-            conn.read_params(list(EXTRA_PARAMS))
+            self._read_settings(sign, READ_PARAMS)
+            self._read_settings(sign, EXTRA_PARAMS)
         except Exception as exc:
             sign.param_error = f"Tesserae couldn't write the frame's settings: {exc}"
             logger.warning("visionect: writing %s's settings failed: %s", sign.uuid, exc)
             return False
-        logger.info(
-            "visionect %s: setting sign %s %s",
-            device.id,
-            sign.uuid,
-            ", ".join(f"{PARAM_NAMES.get(pid, pid)}={v}" for pid, v in change),
-        )
-        self._note(
-            sign,
-            "out",
-            "write "
-            + ", ".join(f"{PARAM_NAMES.get(pid, pid)} = {v}" for pid, v in change)
-            + ", save to flash, read back",
-        )
+        logger.info("visionect %s: setting sign %s %s", device.id, sign.uuid, shown)
+        self._note(sign, "out", f"write {shown}, save to flash, read back")
         self._await_params(sign)
         await self._write(conn, writer)
         return True
@@ -1506,12 +1592,14 @@ class VisionectService:
         self._schedule(sign.uuid, delay=PARAM_WAIT_S + 0.05)
 
     def _params_received(self, sign: _Sign, packet: Any) -> None:
-        """The sign's answer to a settings read or write. A read answer ends
-        the wait for it (a write is followed by a read back)."""
+        """The sign's answer to a settings read or write. The last read
+        answer ends the wait for them (a write is followed by a read back)."""
         if any(
             int(i.control) in (PARAM_READ, PARAM_READ_ERROR) for i in getattr(packet, "items", ())
         ):
-            sign.params_wait_until = 0.0
+            sign.params_pending = max(0, sign.params_pending - 1)
+            if sign.params_pending == 0:
+                sign.params_wait_until = 0.0
         for item in getattr(packet, "items", ()):
             pid, control = int(item.id), int(item.control)
             if control == PARAM_WRITE_ERROR:
@@ -1527,15 +1615,20 @@ class VisionectService:
             if control != PARAM_READ or pid not in ALL_READ_PARAMS or not item.value:
                 continue  # a write's echo, an error, or nothing to read
             sign.params_unsupported.discard(pid)
-            if pid == PARAM_WIFI_SSID:
-                sign.params[pid] = item.value.split(b"\0")[0].decode("ascii", "replace")
+            if pid in TEXT_PARAMS:
+                sign.params[pid] = _text_value(pid, item.value)
             else:
                 sign.params[pid] = int.from_bytes(item.value, "little")
-                sign.known_params[pid] = sign.params[pid]
                 if pid == PARAM_HEARTBEAT:
                     sign.known_interval_min = sign.params[pid]
                 elif pid == PARAM_SLEEP_DISABLE:
                     sign.known_sleep_disabled = bool(sign.params[pid])
+            sign.known_params[pid] = sign.params[pid]
+        if PARAM_SERVER_IP in sign.params and PARAM_SERVER_PORT in sign.params:
+            sign.params[PARAM_SERVER_ADDRESS] = (
+                f"{sign.params[PARAM_SERVER_IP]}:{sign.params[PARAM_SERVER_PORT]}"
+            )
+            sign.known_params[PARAM_SERVER_ADDRESS] = sign.params[PARAM_SERVER_ADDRESS]
 
     def request_action(self, device_id: str, action: str) -> str | None:
         """Ask the device's sign, from a request thread, to report its status
@@ -1779,7 +1872,7 @@ class VisionectService:
         # Read the sign's settings afresh on every connection (a reboot or a
         # USB console may have changed them); a new connection may write again.
         sign.params, sign.params_asked, sign.params_wait_until = {}, False, 0.0
-        sign.extras_asked = False
+        sign.extras_asked, sign.params_pending = False, 0
         sign.params_written, sign.param_error = (), ""
         device = device or self._bind(uuid)
         self._check_glass(sign, status)

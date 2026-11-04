@@ -866,15 +866,23 @@ def test_the_device_kind_offers_the_sleep_interval_and_sign_settings() -> None:
         (Path(visionect.__file__).parent.parent / "devices/visionect/device.json").read_text()
     )
     schema = kind["config_schema"]
-    assert set(schema) == {"uuid", "heartbeat_min", *visionect.SIGN_SETTINGS}
+    assert set(schema) == {
+        "uuid",
+        "heartbeat_min",
+        *visionect.SIGN_SETTINGS,
+        *visionect.TEXT_SETTINGS,
+    }
     assert (schema["heartbeat_min"]["min"], schema["heartbeat_min"]["max"]) == (
         1,
         visionect.HEARTBEAT_MAX_MINUTES,
     )
     assert "default" not in schema["heartbeat_min"]
+    for name in visionect.TEXT_SETTINGS:
+        assert schema[name]["type"] == "string" and schema[name]["group"] == "sign_net"
     for name, (_pid, choices) in visionect.SIGN_SETTINGS.items():
         spec = schema[name]
-        assert spec["type"] == "select" and spec["group"] == "sign"
+        assert spec["type"] == "select"
+        assert spec["group"] == ("sign_net" if name in visionect.NETWORK_SETTINGS else "sign")
         assert [c["value"] for c in spec["choices"]] == ["", *(cv for cv, _w, _l in choices)]
     assert visionect.desired_params({"uuid": UUID}) == {}
 
@@ -2195,11 +2203,16 @@ def _params(sign: FakeSign) -> list[list[tuple[int, int, bytes]]]:
     return out
 
 
-def _answer(sign: FakeSign, values: dict[int, bytes], control: int = 0) -> None:
-    """The sign's answer to a settings read (or, with control 3, a refused write)."""
+def _answer(
+    sign: FakeSign, values: dict[int, bytes], control: int = 0, refused: tuple[int, ...] = ()
+) -> None:
+    """The sign's answer to a settings read (or, with control 3, a refused
+    write); ``refused`` ids come back as read errors in the same packet."""
     from pyvisionect.packets import ParamItem, ParamPacket
 
-    payload = ParamPacket(items=[ParamItem(k, control, v) for k, v in values.items()]).encode()
+    items = [ParamItem(k, control, v) for k, v in values.items()]
+    items += [ParamItem(k, 2, _u32(0x580000)) for k in refused]
+    payload = ParamPacket(items=items).encode()
     sign.sock.sendall(device_frame(sign.uuid, PacketType.PARAM, payload, sign.next_id))
     sign.next_id += 1
 
@@ -2226,10 +2239,37 @@ def test_desired_params(cfg: dict[str, Any], want: dict[int, int]) -> None:
     assert visionect.desired_params(cfg) == want
 
 
+def _u16(n: int) -> bytes:
+    return n.to_bytes(2, "little")
+
+
+# The first read (3 ids), the second read in two packets, and after a write a
+# read back of both.
+READS = 3
+AFTER_WRITE = READS + 2 + 3  # write, flash save, then the three read-back packets
+
+
+def _answer_extras(
+    sign: FakeSign,
+    first: dict[int, bytes],
+    second: dict[int, bytes],
+    refused: tuple[int, ...] = (),
+) -> None:
+    """The sign's answers to the two packets of the second read, in order
+    (``refused`` ids are read errors in the first)."""
+    _answer(sign, first, refused=refused)
+    _answer(sign, second)
+
+
 def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path) -> None:
     h = Harness(tmp_path, uuid=UUID)
     h.settings.sections["devices"]["lobby"].update(
-        heartbeat_min="5", frame_sleep="awake", touch_mode="3", wifi_region="2"
+        heartbeat_min="5",
+        frame_sleep="awake",
+        touch_mode="3",
+        wifi_region="2",
+        wifi_psk="hunter22xx",
+        server_address="10.0.0.5:11113",
     )
     try:
         assert h.svc.start()
@@ -2241,26 +2281,40 @@ def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path)
             assert {i[0] for i in _params(sign)[0]} == set(visionect.READ_PARAMS)
             assert all(control == 0 for _, control, _ in _params(sign)[0])
             _answer(sign, {29: _u32(1), 52: _u32(0), 65: b"home-wifi"})
-            # Then the second read, for the plain settings.
-            assert sign.wait_for(lambda s: len(_params(s)) == 2)
-            assert {i[0] for i in _params(sign)[1]} == set(visionect.EXTRA_PARAMS)
-            # The frame has touch (off) and a region, but none of the rest.
-            _answer(sign, {50: _u32(0), 144: _u32(0)})
-            _answer(sign, {49: _u32(0x580000)}, control=2)
+            # Then the second read, in packets of six.
+            assert sign.wait_for(lambda s: len(_params(s)) == 3)
+            second = [{i[0] for i in p} for p in _params(sign)[1:3]]
+            assert second == [
+                set(visionect.EXTRA_PARAMS[:6]),
+                set(visionect.EXTRA_PARAMS[6:]),
+            ]
+            # The frame has touch (off), a region, security, band and its server,
+            # but not the other settings.
+            _answer_extras(
+                sign,
+                {50: _u32(0), 144: _u32(0)},
+                {66: b"wpa2", 68: _u32(0), 18: bytes([10, 0, 0, 9]), 19: _u16(11113)},
+                refused=(49,),
+            )
             # Then the changed settings, a flash save, and a read back of both sets.
-            assert sign.wait_for(lambda s: len(_params(s)) == 6)
-            write, save, reread, reread_extra = _params(sign)[2:]
-            assert sorted((i[0], i[1], int.from_bytes(i[2], "little")) for i in write) == [
-                (29, 1, 5),
-                (50, 1, 3),
-                (52, 1, 1),
-                (144, 1, 2),
+            assert sign.wait_for(lambda s: len(_params(s)) == AFTER_WRITE)
+            write, save = _params(sign)[3:5]
+            assert [(i[0], i[1], i[2]) for i in write] == [
+                (29, 1, _u32(5)),
+                (50, 1, _u32(3)),
+                (52, 1, _u32(1)),
+                (67, 1, b"hunter22xx"),
+                (144, 1, _u32(2)),
+                (166, 1, b"10.0.0.5:11113"),
             ]
             assert [(i[0], i[1]) for i in save] == [(53, 1)]
-            assert {i[0] for i in reread} == set(visionect.READ_PARAMS)
-            assert {i[0] for i in reread_extra} == set(visionect.EXTRA_PARAMS)
+            assert {i[0] for i in _params(sign)[5]} == set(visionect.READ_PARAMS)
             _answer(sign, {29: _u32(5), 52: _u32(1), 65: b"home-wifi"})
-            _answer(sign, {50: _u32(3), 144: _u32(2)})
+            _answer_extras(
+                sign,
+                {50: _u32(3), 144: _u32(2)},
+                {66: b"wpa2", 68: _u32(0), 18: bytes([10, 0, 0, 5]), 19: _u16(11113)},
+            )
             assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("heartbeat_min") == 5)
             view = h.svc.sign_view(UUID) or {}
             assert view["sleep_disabled"] == 1 and view["wifi"] == "home-wifi"
@@ -2269,12 +2323,21 @@ def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path)
                 "frame_sleep": "Stay awake (drains the battery)",
                 "touch_mode": "On with beep",
                 "wifi_region": "Europe",
+                "wifi_security": "WPA2",
+                "wifi_band": "Dual band",
+                "wifi_ssid": "home-wifi",
+                "wifi_psk": "",
+                "server_address": "10.0.0.5:11113",
             }
-            assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("settings") == expected)
-            # In step now: nothing more is written.
+            _wait(lambda: (h.svc.sign_view(UUID) or {}).get("settings") == expected)
+            assert (h.svc.sign_view(UUID) or {}).get("settings") == expected
+            # The password is never logged.
+            assert "hunter22xx" not in " ".join(line[2] for line in view["exchanges"])
+            # In step now: nothing more is written, and the password isn't
+            # sent again on the next connection.
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > 6, timeout=1.5)
-            assert len(_params(sign)) == 6
+            sign.wait_for(lambda s: len(_params(s)) > AFTER_WRITE, timeout=1.5)
+            assert len(_params(sign)) == AFTER_WRITE
         finally:
             sign.close()
     finally:
@@ -2291,15 +2354,15 @@ def test_a_refused_setting_is_reported_and_not_written_again(tmp_path: Path) -> 
             sign.status()
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
             _answer(sign, {29: _u32(1), 52: _u32(0)})
-            assert sign.wait_for(lambda s: len(_params(s)) == 2)
-            _answer(sign, {50: _u32(0)})
-            assert sign.wait_for(lambda s: len(_params(s)) == 6)
+            assert sign.wait_for(lambda s: len(_params(s)) == 3)
+            _answer_extras(sign, {50: _u32(0)}, {19: _u16(11113)})
+            assert sign.wait_for(lambda s: len(_params(s)) == AFTER_WRITE)
             _answer(sign, {29: _u32(0x005A0000)}, control=3)
             _answer(sign, {29: _u32(1), 52: _u32(0)})  # the read back: unchanged
             assert _wait(lambda: "refused" in (h.svc.sign_view(UUID) or {}).get("param_error", ""))
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > 6, timeout=1.5)
-            assert len(_params(sign)) == 6
+            sign.wait_for(lambda s: len(_params(s)) > AFTER_WRITE, timeout=1.5)
+            assert len(_params(sign)) == AFTER_WRITE
         finally:
             sign.close()
     finally:
@@ -2316,10 +2379,12 @@ def test_a_setting_the_frame_lacks_is_skipped_not_blocking(tmp_path: Path) -> No
             sign.status()
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
             _answer(sign, {29: _u32(1), 52: _u32(0)})
-            assert sign.wait_for(lambda s: len(_params(s)) == 2)
-            _answer(sign, {144: _u32(0x580000)}, control=2)  # no Wi-Fi region on this firmware
-            assert sign.wait_for(lambda s: len(_params(s)) == 6)
-            write = _params(sign)[2]
+            assert sign.wait_for(lambda s: len(_params(s)) == 3)
+            # No Wi-Fi region on this firmware.
+            _answer(sign, {}, refused=(144,))
+            _answer(sign, {19: _u16(11113)})
+            assert sign.wait_for(lambda s: len(_params(s)) == AFTER_WRITE)
+            write = _params(sign)[3]
             assert [(i[0], int.from_bytes(i[2], "little")) for i in write] == [(29, 5)]
             assert "wifi_region" not in (h.svc.sign_view(UUID) or {}).get("settings", {})
         finally:
@@ -2337,11 +2402,11 @@ def test_blank_settings_leave_the_sign_alone(tmp_path: Path) -> None:
             sign.status()
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
             _answer(sign, {29: _u32(1), 52: _u32(0)})
-            assert sign.wait_for(lambda s: len(_params(s)) == 2)
-            _answer(sign, {50: _u32(1)})
+            assert sign.wait_for(lambda s: len(_params(s)) == 3)
+            _answer_extras(sign, {50: _u32(1)}, {19: _u16(11113)})
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > 2, timeout=1.5)
-            assert len(_params(sign)) == 2  # reads only
+            sign.wait_for(lambda s: len(_params(s)) > READS, timeout=1.5)
+            assert len(_params(sign)) == READS  # reads only
         finally:
             sign.close()
     finally:

@@ -125,7 +125,36 @@ def test_only_the_place_and_play_32_declares_no_buttons(tmp_path) -> None:
 
 @pytest.mark.parametrize(
     ("minutes", "ok"),
-    [(None, True), ("", True), (30, True), (1, True), (1440, True), (0, False), (1441, False), (True, False), ("5", False)],
+    [
+        (None, True),
+        ("", True),
+        (30, True),
+        (1, True),
+        (1440, True),
+        (0, False),
+        (1441, False),
+        (True, False),
+        ("5", False),
+    ],
 )
 def test_validate_config_checks_the_sleep_interval(visionect, minutes: object, ok: bool) -> None:
     assert visionect.validate_config({"heartbeat_min": minutes})[0] is ok
+
+
+@pytest.mark.parametrize(
+    ("payload", "ok"),
+    [
+        ({"wifi_ssid": "home"}, True),
+        ({"wifi_ssid": "x" * 33}, False),
+        ({"wifi_psk": "short"}, False),
+        ({"wifi_psk": "longenough"}, True),
+        ({"wifi_psk": "caf\u00e9caf\u00e9"}, False),
+        ({"server_address": "192.168.1.10:11113"}, True),
+        ({"server_address": "tesserae.local:11113"}, True),
+        ({"server_address": "192.168.1.10"}, False),
+        ({"server_address": "host:99999"}, False),
+        ({"server_address": ""}, True),
+    ],
+)
+def test_validate_config_checks_the_network_settings(visionect, payload: dict, ok: bool) -> None:
+    assert visionect.validate_config(payload)[0] is ok

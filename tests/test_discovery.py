@@ -553,7 +553,12 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
             "connect_reason": "wakeup",
             "status": {"firmware": "6.17.4168", "battery_pct": 61, "rssi": -53},
             "heartbeat_min": 5,
-            "settings": {"touch_mode": "On", "frame_sleep": "Stay awake (drains the battery)"},
+            "settings": {
+                "touch_mode": "On",
+                "frame_sleep": "Stay awake (drains the battery)",
+                "wifi_ssid": "home-wifi",
+                "wifi_psk": "",
+            },
             "sleep_disabled": 1,
             "wifi": "home-wifi",
             "param_error": "",
@@ -584,6 +589,13 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
     assert 'name="touch_mode"' in page and "The frame is set to On." in page
     assert 'name="frame_sleep"' in page
     assert 'name="wifi_region"' not in page and 'name="charging_mode"' not in page
+    # Network settings sit behind a USB-cable warning, and only offered ones show.
+    assert "Advanced: network" in page and "DownloadConfigurator.html" in page
+    assert 'name="wifi_ssid"' in page and "The frame is set to home-wifi." in page
+    assert 'name="wifi_psk"' in page and 'type="password"' in page
+    assert 'name="server_address"' not in page and 'name="wifi_band"' not in page
+    # ...and none of them leaks into the Identity group.
+    assert page.count('name="wifi_ssid"') == 1
     for action in ("status", "refresh", "reboot"):
         assert f"/settings/devices/hall/visionect/{action}" in page
     # The frame log replaces the diagnostics that only repeated the report.

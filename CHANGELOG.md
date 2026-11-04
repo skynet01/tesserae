@@ -8,7 +8,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
-- Visionect frames: set the sleep interval and other frame settings (touch, Wi-Fi, charging and more, only those the frame supports) from the device page.
+- Visionect frames: set the sleep interval and other frame settings (touch, Wi-Fi, server, charging and more, only those the frame supports) from the device page.
 - Device batteries: dots on the chart show each wake-up and why it happened (lineup, Home Assistant, button, manual push, reconnect, restart or scheduled check-in), each ringed so overlapping dots stay apart.
 - Device batteries: a Wakes / day tile with a breakdown by cause.
 - Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.

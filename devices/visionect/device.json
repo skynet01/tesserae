@@ -144,6 +144,76 @@
         {"value": "1", "label": "On"}
       ],
       "help": "Whether the frame's Bluetooth radio is on."
+    },
+    "wifi_security": {
+      "type": "select",
+      "group": "sign_net",
+      "label": "Wi-Fi security",
+      "choices": [
+        {
+          "value": "",
+          "label": "Leave as the frame has it"
+        },
+        {
+          "value": "none",
+          "label": "None (open)"
+        },
+        {
+          "value": "wpa2",
+          "label": "WPA2"
+        },
+        {
+          "value": "wpa2e",
+          "label": "WPA2 Enterprise"
+        }
+      ],
+      "help": "The security mode of the network the frame joins. A wrong mode leaves it offline until it is fixed over USB."
+    },
+    "wifi_band": {
+      "type": "select",
+      "group": "sign_net",
+      "label": "Wi-Fi band",
+      "choices": [
+        {
+          "value": "",
+          "label": "Leave as the frame has it"
+        },
+        {
+          "value": "0",
+          "label": "Dual band"
+        },
+        {
+          "value": "1",
+          "label": "2.4 GHz"
+        },
+        {
+          "value": "2",
+          "label": "5 GHz"
+        }
+      ],
+      "help": "Which band the frame may join. Leave it on dual band unless you know why."
+    },
+    "wifi_ssid": {
+      "type": "string",
+      "group": "sign_net",
+      "label": "Wi-Fi network",
+      "placeholder": "Leave blank to keep the frame's",
+      "help": "The network name the frame joins. A wrong name leaves it offline until it is fixed over USB."
+    },
+    "wifi_psk": {
+      "type": "string",
+      "group": "sign_net",
+      "label": "Wi-Fi password",
+      "secret": true,
+      "placeholder": "Leave blank to keep the frame's",
+      "help": "8 to 64 characters. The frame never reports it back, so Tesserae sends it once for each value you save."
+    },
+    "server_address": {
+      "type": "string",
+      "group": "sign_net",
+      "label": "Server address",
+      "placeholder": "192.168.1.10:11113",
+      "help": "Where the frame connects, as host:port. Point it anywhere but this Tesserae and the frame stops checking in."
     }
   }
 }

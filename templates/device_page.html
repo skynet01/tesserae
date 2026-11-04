@@ -163,7 +163,7 @@
               <input class="dx-in dx-mono" type="text" id="{{ section.id }}-device-id" name="device_id_readonly"
                      value="{{ section.device_id }}" readonly>
             {% endcall %}
-            {% for field in id_fields %}{{ config_field(section, field, _form) }}{% endfor %}
+            {% for field in id_fields if not field.get('group') %}{{ config_field(section, field, _form) }}{% endfor %}
           </div>
         </div>
 
@@ -273,7 +273,7 @@
             {% endcall %}
             {% endif %}
             {% endif %}
-            {% for field in (section.fields or []) if field.type == 'select' and field.get('group') != 'sign' %}{{ config_field(section, field, _form) }}{% endfor %}
+            {% for field in (section.fields or []) if field.type == 'select' and not field.get('group') %}{{ config_field(section, field, _form) }}{% endfor %}
             {% for pq in section.picture_quality %}
             {% for field in pq.fields %}
               {% set fid = section.id ~ '-pq-' ~ pq.base_id ~ '-' ~ field.name %}
@@ -290,15 +290,35 @@
           </div>
         </div>
 
-        {#- The frame's own plain settings (Visionect): only the ones this
-            frame answered when it last connected are offered. -#}
+        {#- The frame's own settings (Visionect): only the ones this frame
+            answered when it last connected are offered. Network settings sit
+            apart, behind a warning. -#}
         {% set _sign_fields = (section.fields or [])|selectattr('group', 'equalto', 'sign')|list %}
+        {% set _net_fields = (section.fields or [])|selectattr('group', 'equalto', 'sign_net')|list %}
         {% if sign and _sign_fields %}
         {% set _offered = _sign_fields|selectattr('name', 'in', sign.settings.keys()|list)|list %}
         <details class="dx-adv" id="frame-settings">
           <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Advanced: frame settings</span></summary>
           <div class="dx-fg dx-adv-body">
-            {% for field in _offered %}{{ config_field(section, dict(field, help=(field.help ~ ' The frame is set to ' ~ sign.settings[field.name] ~ '.')), _form) }}{% else %}
+            {% for field in _offered %}{{ config_field(section, dict(field, help=(field.help ~ (' The frame is set to ' ~ sign.settings[field.name] ~ '.' if sign.settings[field.name] else ''))), _form) }}{% else %}
+            <p class="dx-help">Shown once the frame has connected and told Tesserae which of its settings it has.</p>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
+        {% if sign and _net_fields %}
+        {% set _net_offered = _net_fields|selectattr('name', 'in', sign.settings.keys()|list)|list %}
+        <details class="dx-adv" id="frame-network">
+          <summary><i class="ph ph-caret-right" aria-hidden="true"></i><span>Advanced: network</span></summary>
+          <div class="dx-band is-warn">
+            <i class="ph ph-warning" aria-hidden="true"></i>
+            <div class="dx-band-text">
+              <p class="dx-band-title">A wrong value here can cut the frame off</p>
+              <p class="dx-help">If the frame can no longer reach Tesserae, the only fix is its USB cable and Visionect's configurator. <a href="https://docs.visionect.com/PlaceAndPlay/DeviceConfiguration/DownloadConfigurator.html" target="_blank" rel="noopener noreferrer">Download the configurator</a>. Visionect's own server marks these settings as not changeable over the network, so a frame may simply refuse them.</p>
+            </div>
+          </div>
+          <div class="dx-fg dx-adv-body">
+            {% for field in _net_offered %}{{ config_field(section, dict(field, help=(field.help ~ (' The frame is set to ' ~ sign.settings[field.name] ~ '.' if sign.settings[field.name] else ''))), _form) }}{% else %}
             <p class="dx-help">Shown once the frame has connected and told Tesserae which of its settings it has.</p>
             {% endfor %}
           </div>
