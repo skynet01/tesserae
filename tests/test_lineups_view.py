@@ -3137,3 +3137,190 @@ def test_step_item_reports_a_signature_and_push_sends_exactly_the_drawn_pixels(
     # A different nonce is a different picture, with its own file and signature.
     other = drawn.get(url.replace("0123456789ab", "ba9876543210"))
     assert other.status_code == 202 and submitted[-1]["cache_path"] != job["cache_path"]
+
+
+# -- what counts as live: a step pushed from a lineup, a hand-sent frame ----------------
+
+
+def _status_of(client: Any, deck_id: str) -> str:
+    data = client.get("/decks/view.json").get_json()
+    return str(
+        next(lu for d in data["displays"] for lu in d["lineups"] if lu["id"] == deck_id)["status"]
+    )
+
+
+@pytest.fixture
+def other_day(client: Any, app: Flask) -> Any:
+    """A lineup that does not run today at all."""
+    from app.state.deck_model import Deck, DeckPage
+    from app.tz_resolve import app_timezone
+
+    today = datetime.now(app_timezone()).weekday()
+    app.config["DECK_STORE"].upsert(
+        Deck(
+            id="elsewhen",
+            name="Elsewhen",
+            device_ids=["panel"],
+            pages=[DeckPage(page_id="news"), DeckPage(page_id="art")],
+            advance="timer",
+            advance_interval_minutes=30,
+            advance_anchor="00:00",
+            advance_end_at="23:00",
+            advance_days_of_week=[(today + 3) % 7],
+        )
+    )
+    return client
+
+
+def test_a_lineup_the_display_is_playing_is_live_whatever_its_schedule() -> None:
+    from app.lineups_view import SAMPLE_NOW
+
+    displays, dashboards = sample_inputs()
+    d = displays[1]
+    night = next(lu for lu in d.lineups if lu.kind == "cycle")
+    idle = replace(
+        night, days=tuple(i for i in range(7) if i != SAMPLE_NOW.weekday()), playing=False
+    )
+    off_day = build_view([replace(d, lineups=(idle,))], dashboards, now=SAMPLE_NOW).displays[0]
+    assert off_day.lineups[0].status == "not_today"
+    forced = replace(idle, playing=True)
+    view = build_view([replace(d, lineups=(forced,))], dashboards, now=SAMPLE_NOW).displays[0]
+    assert view.lineups[0].status == "live" and view.lineups[0].status_label == "Live"
+    # A switched-off lineup stays off.
+    off = replace(forced, enabled=False)
+    assert (
+        build_view([replace(d, lineups=(off,))], dashboards, now=SAMPLE_NOW)
+        .displays[0]
+        .lineups[0]
+        .status
+        == "off"
+    )
+
+
+def test_pushing_a_step_from_a_lineup_marks_that_lineup_live_even_from_another_day(
+    other_day: Any, app: Flask
+) -> None:
+    fake = _FakePush()
+    app.config["PUSH_MANAGER"] = fake
+    assert _status_of(other_day, "elsewhen") != "live"
+    resp = other_day.post("/decks/elsewhen/push-step", json={"index": 1, "display_id": "panel"})
+    assert resp.status_code == 200, resp.get_json()
+    rec = app.config["DECK_NAV_STORE"].get("panel")
+    assert rec and rec["deck_id"] == "elsewhen" and rec["page_id"] == "art"
+    assert _status_of(other_day, "elsewhen") == "live"
+    # ... and only that lineup.
+    lineups = {
+        lu["id"]: lu["status"]
+        for d in other_day.get("/decks/view.json").get_json()["displays"]
+        for lu in d["lineups"]
+    }
+    assert lineups["elsewhen"] == "live"
+    assert lineups["weekend"] != "live" and lineups["night"] != "live"
+
+
+def test_a_failed_step_push_marks_nothing(other_day: Any, app: Flask) -> None:
+    class _Failing(_FakePush):
+        def push(self, page_id: str, **kw: Any) -> Any:
+            return type("R", (), {"status": "failed"})()
+
+    app.config["PUSH_MANAGER"] = _Failing()
+    other_day.post("/decks/elsewhen/push-step", json={"index": 0})
+    assert app.config["DECK_NAV_STORE"].get("panel") is None
+    assert _status_of(other_day, "elsewhen") != "live"
+
+
+def test_sending_something_by_hand_marks_no_lineup_live_and_ends_a_forced_turn(
+    other_day: Any, app: Flask
+) -> None:
+    app.config["PUSH_MANAGER"] = _FakePush()
+    # A send from the Send page on a quiet display: no lineup is live because of it.
+    app.config["EVENT_LOG"].record(
+        type="push", source="page", target="sky", status="sent", extra={"device_ids": ["panel"]}
+    )
+    assert _status_of(other_day, "elsewhen") != "live"
+    other_day.post("/decks/elsewhen/push-step", json={"index": 1, "display_id": "panel"})
+    assert _status_of(other_day, "elsewhen") == "live"
+    time.sleep(0.02)
+    # The Send page sends something else to the same display afterwards.
+    app.config["EVENT_LOG"].record(
+        type="push", source="page", target="sky", status="sent", extra={"device_ids": ["panel"]}
+    )
+    assert _status_of(other_day, "elsewhen") != "live"
+    # A hand-sent frame to a different display does not touch this one.
+    other_day.post("/decks/elsewhen/push-step", json={"index": 0, "display_id": "panel"})
+    time.sleep(0.02)
+    app.config["EVENT_LOG"].record(
+        type="push",
+        source="file",
+        target="x.png",
+        status="sent",
+        extra={"device_ids": ["elsewhere"]},
+    )
+    assert _status_of(other_day, "elsewhen") == "live"
+    # A failed hand-send did not reach the glass, so it ends nothing.
+    app.config["EVENT_LOG"].record(
+        type="push", source="page", target="sky", status="failed", extra={"device_ids": ["panel"]}
+    )
+    assert _status_of(other_day, "elsewhen") == "live"
+
+
+def test_a_stale_by_hand_record_no_longer_reads_as_playing_after_a_manual_send(
+    client: Any, app: Flask
+) -> None:
+    """The same rule covers by-hand decks, which used to stay "playing" after a Send page push."""
+    app.config["DECK_NAV_STORE"].set("panel", "night", "news")
+    assert _status_of(client, "night") == "live"
+    time.sleep(0.02)
+    app.config["EVENT_LOG"].record(
+        type="push", source="note", target="n", status="sent", extra={"device_ids": ["panel"]}
+    )
+    assert _status_of(client, "night") != "live"
+
+
+def test_the_next_scheduled_step_takes_the_display_back_from_a_forced_lineup(
+    other_day: Any, app: Flask
+) -> None:
+    """The scheduler records the lineup it fires on the display (the same nav
+    record), so when its next step lands the forced lineup stops being live and
+    the scheduled one is: the force holds until then, and only then."""
+    app.config["PUSH_MANAGER"] = _FakePush()
+    other_day.post("/decks/elsewhen/push-step", json={"index": 1, "display_id": "panel"})
+    assert _status_of(other_day, "elsewhen") == "live"
+    app.config["DECK_NAV_STORE"].set("panel", "morning", "news")  # what a scheduled advance writes
+    assert _status_of(other_day, "elsewhen") != "live"
+    assert _status_of(other_day, "morning") == "live"
+
+
+def test_pushing_a_chosen_item_from_a_lineup_also_marks_it_live(
+    other_day: Any, app: Flask, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app import preview_cache
+    from app.state.deck_model import Deck, DeckPage
+
+    _gallery_page(app, [f"p{i}.jpg" for i in range(4)], monkeypatch, tmp_path)
+    app.config["DECK_STORE"].upsert(
+        Deck(
+            id="album2",
+            name="Album2",
+            device_ids=["panel"],
+            pages=[DeckPage(page_id="photos")],
+            advance="timer",
+            advance_interval_minutes=30,
+            advance_anchor="00:00",
+            advance_end_at="01:00",
+            advance_days_of_week=[0],
+        )
+    )
+    app.config["PUSH_MANAGER"] = _FakePush()
+
+    def render_now(**kw: Any) -> None:
+        kw["cache_path"].parent.mkdir(parents=True, exist_ok=True)
+        kw["cache_path"].write_bytes(b"PNG")
+
+    monkeypatch.setattr(preview_cache, "render_now", render_now)
+    resp = other_day.post(
+        "/decks/album2/push-step", json={"index": 0, "item": "p2.jpg", "display_id": "panel"}
+    )
+    assert resp.status_code == 200
+    rec = app.config["DECK_NAV_STORE"].get("panel")
+    assert rec and rec["deck_id"] == "album2" and rec["page_id"] == "photos"
