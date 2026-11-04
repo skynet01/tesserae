@@ -140,6 +140,30 @@ def test_dithering_pixel_results(newspaper_live, mode, expected):
         browser.close()
 
 
+def test_dithering_samples_differ_by_method(newspaper_live):
+    from playwright.sync_api import sync_playwright
+
+    base, _ = newspaper_live
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            executable_path=os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE")
+        )
+        page = browser.new_page()
+        page.goto(base + "/plugins/news_front_pages/", wait_until="networkidle")
+        page.wait_for_function("document.querySelector('[data-nx-preview=dithering][data-ready]')")
+        after = page.locator('[data-nx-preview="dithering"] > div:last-child canvas')
+        before = page.locator('[data-nx-preview="dithering"] > div:first-child canvas')
+        shots = {}
+        for mode in ("display", "none", "floyd-steinberg", "atkinson"):
+            page.select_option('select[name="dithering"]', mode)
+            page.wait_for_timeout(100)
+            shots[mode] = after.evaluate("el => el.toDataURL()")
+        original = before.evaluate("el => el.toDataURL()")
+        assert shots["display"] == original
+        assert len(set(shots.values())) == 4
+        browser.close()
+
+
 def test_fetches_toggles_when_storage_is_blocked(newspaper_live):
     from playwright.sync_api import sync_playwright
 

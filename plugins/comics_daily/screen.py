@@ -65,6 +65,15 @@ class Plan:
         return math.ceil(self.total / max(1, len(self.show))) if self.rotating else 1
 
 
+def farside_columns(cell_w: float, wanted: int, pictures: int) -> int:
+    """How many Far Side panels the row carries at this cell width, as
+    client.js's farSideColumns: as many as wanted (and there are), but
+    none narrower than MIN_PANEL_PX; at least one."""
+    pad = _clamp(4, 0.011 * cell_w, 24)
+    width = max(1.0, cell_w - 2 * pad)
+    return max(1, min(min(wanted, pictures), int(width // MIN_PANEL_PX)))
+
+
 def heights(
     cell_w: float, items: Sequence[Item], far_side_count: int, captions: bool
 ) -> list[float]:
@@ -74,8 +83,7 @@ def heights(
     out = []
     for item in items:
         if item.kind == "farside":
-            want = min(far_side_count, len(item.sizes))
-            cols = max(1, min(want, int(width // MIN_PANEL_PX)))
+            cols = farside_columns(cell_w, far_side_count, len(item.sizes))
             gap = _clamp(4, 0.0055 * cell_w, 12)
             panel_pad = _clamp(4, 0.0105 * cell_w, 20)
             side = _clamp(2, 0.0035 * cell_w, 8)

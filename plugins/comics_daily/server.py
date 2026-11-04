@@ -2048,7 +2048,7 @@ def preview_screens(pages: list[Any], devices: list[Any]) -> tuple[list[dict[str
     own: list[dict[str, Any]] = []
     shown_on = {s.get("device") for s in showing}
     others = [
-        {"name": name, "w": w, "h": h}
+        {"name": name, "w": w, "h": h, "device": device_id}
         for device_id, (name, w, h) in panels.items()
         if device_id not in shown_on
     ]
@@ -2056,7 +2056,15 @@ def preview_screens(pages: list[Any], devices: list[Any]) -> tuple[list[dict[str
         key = (entry["name"], entry["w"], entry["h"])
         if key not in seen and len(own) < MAX_OWN_SCREENS:
             seen.add(key)
-            own.append({"name": entry["name"], "w": entry["w"], "h": entry["h"], "group": MINE})
+            own.append(
+                {
+                    "name": entry["name"],
+                    "w": entry["w"],
+                    "h": entry["h"],
+                    "group": MINE,
+                    "device": entry.get("device"),
+                }
+            )
     reference = [{"name": n, "w": w, "h": h, "group": REFERENCE} for n, w, h in screen.SCREENS]
     return own + reference, 0 if showing else len(own)
 
@@ -2076,6 +2084,34 @@ def _your_screens() -> tuple[list[dict[str, Any]], int]:
     except Exception:
         logger.warning("comics_daily: couldn't list the user's screens", exc_info=True)
         return preview_screens([], [])
+
+
+def _screen_colour(device_id: str | None) -> tuple[str, int]:
+    """How the display ``device_id`` paints, for the preview: ``("color", 0)``,
+    ``("grey16", 16)`` (any grey ramp) or ``("mono", 2)``. The app's own
+    answer (app.display_color.display_color_mode, which the thumbnails
+    elsewhere use); colour for a reference screen or when it can't tell.
+    Black and white is always the hard threshold here: a dithered 1-bit
+    panel is still 1-bit, and the thumbnails' grey average is no preview of
+    a comic."""
+    if not device_id:
+        return "color", 0
+    try:
+        from app.display_color import display_color_mode
+
+        device = current_app.config["DEVICE_REGISTRY"].get(device_id)
+        mode = display_color_mode(
+            device,
+            current_app.config.get("RENDERER_REGISTRY"),
+            current_app.config.get("SETTINGS_STORE"),
+        )
+    except Exception:
+        return "color", 0
+    if mode.gamut.startswith("mono"):
+        return "mono", 2
+    if mode.gamut.startswith("grey") and mode.levels > 1:
+        return mode.gamut, mode.levels
+    return "color", 0
 
 
 def screens_view(
@@ -2124,16 +2160,29 @@ def screens_view(
         else:
             steps = [" and ".join(pictures[i][0] for i in turn.show) for turn in turns]
             text = f"Takes turns, one refresh each: {'; then '.join(steps)}."
+        gamut, levels = _screen_colour(sc.get("device"))
         out.append(
             {
                 "id": n,
                 "name": name,
                 "group": sc.get("group", REFERENCE),
+                "gamut": gamut,
+                "levels": levels,
                 "w": width,
                 "h": height,
                 "text": text,
                 "shown": [
-                    {"label": label, "pictures": pics, "farside": label == "The Far Side"}
+                    {
+                        "label": label,
+                        "pictures": (
+                            # The row carries as many panels as the cell is wide
+                            # enough for (screen.farside_columns), as the page draws it.
+                            pics[: screen.farside_columns(width, config.far_side_count, len(pics))]
+                            if label == "The Far Side"
+                            else pics
+                        ),
+                        "farside": label == "The Far Side",
+                    }
                     for label, pics in shown
                 ],
             }
@@ -2220,9 +2269,13 @@ def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
                 "text": str(entry["text"]),
             }
         )
+    shown_screens = screens_view(config, farside, preview, screens)
     return {
         "lede": " ".join(lede),
-        "screens": screens_view(config, farside, preview, screens),
+        "screens": shown_screens,
+        "grey_levels": sorted(
+            {s["levels"] for s in shown_screens if s["gamut"].startswith("grey")}
+        ),
         "screen_default": default_screen,
         "cookies": cookie_view(store, tz, today),
         "session": session_view(store, tz, today),

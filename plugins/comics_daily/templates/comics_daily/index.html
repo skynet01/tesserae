@@ -75,9 +75,28 @@
         <noscript><button type="submit" class="dx-btn-ghost-sm">Show</button></noscript>
       </div>
     </form>
+    {#- How each display paints: a grey one previews in its own grey levels
+        (the filters below), a black-and-white one through the app's
+        threshold filter (#tess-mono, templates/_preview_filters.html). -#}
+    <svg class="cx-grey-filters" width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute;pointer-events:none">
+      <defs>
+        {%- for levels in view.grey_levels %}
+        <filter id="cx-grey-{{ levels }}" color-interpolation-filters="sRGB">
+          <feColorMatrix type="saturate" values="0"/>
+          <feComponentTransfer>
+            {%- set steps = [] %}
+            {%- for i in range(levels) %}{% set _ = steps.append('%.4f' | format(i / (levels - 1))) %}{% endfor %}
+            {%- for channel in ['R', 'G', 'B'] %}
+            <feFunc{{ channel }} type="discrete" tableValues="{{ steps | join(' ') }}"/>
+            {%- endfor %}
+          </feComponentTransfer>
+        </filter>
+        {%- endfor %}
+      </defs>
+    </svg>
     {%- for sc in view.screens %}
     <figure class="cx-screen" data-screen="{{ sc.id }}"{% if sc.id != default %} hidden{% endif %}>
-      <div class="cx-screen-frame" style="--sw: {{ sc.w }}; --sh: {{ sc.h }}">
+      <div class="cx-screen-frame" style="--sw: {{ sc.w }}; --sh: {{ sc.h }}" data-paint="{{ sc.gamut }}">
         {%- for item in sc.shown %}
           {%- if item.farside %}
           <div class="cx-screen-panels">{% for p in item.pictures[:4] %}<img src="{{ request.script_root }}{{ p.src }}" alt="" loading="lazy">{% endfor %}</div>
@@ -210,9 +229,11 @@
   {%- if rows | length < max_strips %}
   <form method="post" action="{{ url_for('comics_daily_media.add_strip') }}" class="cx-add">
     <label class="sr-only" for="cx-add-input">GoComics address or strip name</label>
-    <input type="text" id="cx-add-input" name="strip" required
-           placeholder="https://www.gocomics.com/peanuts, peanuts, or xkcd"
-           autocomplete="off" autocapitalize="off" spellcheck="false">
+    <div class="field cx-add-field">
+      <input type="text" id="cx-add-input" name="strip" required
+             placeholder="https://www.gocomics.com/peanuts, peanuts, or xkcd"
+             autocomplete="off" autocapitalize="off" spellcheck="false">
+    </div>
     <button type="submit" class="dx-btn-ghost-sm"><i class="ph ph-plus" aria-hidden="true"></i><span>Add strip</span></button>
   </form>
   {%- else %}
@@ -264,9 +285,12 @@
     <fieldset class="cx-space">
       <legend class="cx-space-legend">Space between comics <span class="cx-unit">px</span>{{ info_pop("The empty space between one comic and the next, in pixels on a 1440 px wide screen; narrower cells scale it down. It sits at Usual, grows toward Largest when there's height to spare, and shrinks toward Smallest to fit one more comic.") }}</legend>
       <div class="cx-gaps">
-        {%- for name, short in [('gap_min', 'Smallest'), ('gap', 'Usual'), ('gap_max', 'Largest')] %}
+        {%- for name, short, tip in [
+              ('gap_min', 'Smallest', "The least empty space allowed between two comics, in pixels. When the comics are tight on height, the space shrinks down to this to fit one more."),
+              ('gap', 'Usual', "The empty space between two comics when nothing needs adjusting, in pixels."),
+              ('gap_max', 'Largest', "The most empty space allowed between two comics, in pixels. When there's height to spare, the space grows up to this, and the rest is left empty above and below.")] %}
         {%- set _, _, lo, hi = numbers[name] %}
-        {{ number_input('cx-' ~ name, name, short, value=values[name], min=lo, max=hi, step=1) }}
+        {{ number_input('cx-' ~ name, name, short, value=values[name], min=lo, max=hi, step=1, help=tip) }}
         {%- endfor %}
       </div>
     </fieldset>
@@ -305,6 +329,10 @@
   .cx-screen { margin: 0; }
   /* The screen at its own shape, as tall as the window allows. */
   .cx-screen-frame { --fit: min(62vh, 560px); box-sizing: border-box; aspect-ratio: var(--sw) / var(--sh); width: min(100%, calc(var(--fit) * var(--sw) / var(--sh))); margin: 0 auto; padding: 4px; overflow: hidden; display: flex; flex-direction: column; justify-content: center; gap: 4px; background: #fff; border: 1px solid var(--t-border-strong); }
+  .cx-screen-frame[data-paint="mono"] img { filter: url("#tess-mono"); }
+  {%- for levels in view.grey_levels %}
+  .cx-screen-frame[data-paint="{{ 'grey%d' | format(levels) }}"] img { filter: url("#cx-grey-{{ levels }}"); }
+  {%- endfor %}
   .cx-screen-panels { display: flex; gap: 2px; }
   .cx-screen-panels img { flex: 1 1 0; min-width: 0; height: auto; }
   .cx-screen-strip { display: block; width: 100%; height: auto; min-height: 0; object-fit: contain; }
@@ -361,7 +389,7 @@
   .dx-section-body .cx-tools input.cx-file { width: auto; max-width: 100%; height: auto; min-height: 0; padding: 0; border: 0; background: none; font-size: 12.5px; }
   .cx-tools-help { margin: 6px 0 0; }
   .cx-add { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; }
-  .cx-add input { flex: 1 1 auto; min-width: 0; }
+  .cx-add-field { flex: 1 1 auto; min-width: 0; }
   .cx-add-full { margin: 14px 0 0; }
   .cx-cookies { margin-top: 20px; padding-top: 4px; border-top: 1px solid var(--t-border); }
   .cx-subhead { margin: 14px 0 0; }

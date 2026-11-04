@@ -165,8 +165,8 @@
     </select>
     <p class="field-help">Deepen dark text and shadows without changing midtones.</p>
     <figure class="nx-preview" hidden data-nx-preview="text_blackness">
-      <div><span>Before</span><canvas width="120" height="60" role="img" aria-label="Text blackness: before processing">Original newspaper letters.</canvas></div>
-      <div><span>After</span><canvas width="120" height="60" role="img" aria-label="Text blackness: selected setting">Letters with the selected setting.</canvas></div>
+      <div><span>Before</span><canvas width="180" height="60" role="img" aria-label="Text blackness: before processing">Original newspaper letters.</canvas></div>
+      <div><span>After</span><canvas width="180" height="60" role="img" aria-label="Text blackness: selected setting">Letters with the selected setting.</canvas></div>
     </figure>
   </div>
 
@@ -180,8 +180,8 @@
     </select>
     <p class="field-help">Sharpen letter edges; Strong can add a light rim.</p>
     <figure class="nx-preview" hidden data-nx-preview="text_sharpness">
-      <div><span>Before</span><canvas width="120" height="60" role="img" aria-label="Text sharpness: before processing">Original newspaper letters.</canvas></div>
-      <div><span>After</span><canvas width="120" height="60" role="img" aria-label="Text sharpness: selected setting">Letters with the selected setting.</canvas></div>
+      <div><span>Before</span><canvas width="180" height="60" role="img" aria-label="Text sharpness: before processing">Original newspaper letters.</canvas></div>
+      <div><span>After</span><canvas width="180" height="60" role="img" aria-label="Text sharpness: selected setting">Letters with the selected setting.</canvas></div>
     </figure>
   </div>
 
@@ -194,8 +194,8 @@
     </select>
     <p class="field-help">Whiten pale text edges and photo highlights.</p>
     <figure class="nx-preview" hidden data-nx-preview="clean_white">
-      <div><span>Before</span><canvas width="120" height="60" role="img" aria-label="Clean white text edges: before processing">Original newspaper letters.</canvas></div>
-      <div><span>After</span><canvas width="120" height="60" role="img" aria-label="Clean white text edges: selected setting">Letters with the selected setting.</canvas></div>
+      <div><span>Before</span><canvas width="180" height="60" role="img" aria-label="Clean white text edges: before processing">Original newspaper letters.</canvas></div>
+      <div><span>After</span><canvas width="180" height="60" role="img" aria-label="Clean white text edges: selected setting">Letters with the selected setting.</canvas></div>
     </figure>
   </div>
 
@@ -209,11 +209,11 @@
     </select>
     <p class="field-help">Preprocess to 16 greys; the display still applies its settings.</p>
     <figure class="nx-preview" hidden data-nx-preview="dithering">
-      <div><span>Before</span><canvas width="120" height="60" role="img" aria-label="Dithering: before processing">Original newspaper letters.</canvas></div>
-      <div><span>After</span><canvas width="120" height="60" role="img" aria-label="Dithering: selected setting">Letters with the selected setting.</canvas></div>
+      <div><span>Before</span><canvas width="180" height="60" role="img" aria-label="Dithering: before processing">Original newspaper letters.</canvas></div>
+      <div><span>After</span><canvas width="180" height="60" role="img" aria-label="Dithering: selected setting">Letters with the selected setting.</canvas></div>
     </figure>
   </div>
-  <p class="field-help">Samples show letters at 2x zoom, before display processing.</p>
+  <p class="field-help">Samples show letters and a soft grey tone at 2x zoom, before display processing.</p>
 
   <div class="nx-save">
     <button type="reset" class="dx-btn-ghost-sm" data-nx-discard>Discard changes</button>
@@ -402,7 +402,7 @@
   .nx-preview[hidden] { display: none; }
   .nx-preview > div { display: grid; gap: 4px; }
   .nx-preview span { font-size: 12px; color: var(--t-muted); }
-  .nx-preview canvas { width: 120px; height: 60px; border: 1px solid var(--t-border); image-rendering: pixelated; }
+  .nx-preview canvas { width: 180px; height: 60px; border: 1px solid var(--t-border); image-rendering: pixelated; }
   .nx-fetches > summary { cursor: pointer; justify-content: space-between; }
   .nx-fetch-chevron { flex: none; color: var(--t-muted); }
   .nx-fetches[open] .nx-fetch-chevron { transform: rotate(90deg); }

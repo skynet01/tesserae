@@ -2656,3 +2656,96 @@ def test_the_layout_card_names_the_space_between_comics(client: FlaskClient) -> 
     assert "Out-of-date note" in layout
     for old in ("When they don", "Smallest gap", "Usual gap", "Largest gap", "Status note"):
         assert old not in layout
+
+
+def _frames_app(tmp_path: Path, panels: dict[str, dict[str, Any]]) -> Any:
+    from app.main import REPO_ROOT, create_app
+
+    (tmp_path / "devices").mkdir(parents=True, exist_ok=True)
+    for device_id, panel in panels.items():
+        (tmp_path / "devices" / f"{device_id}.json").write_text(
+            json.dumps(
+                {"id": device_id, "kind": "esp32_client", "name": device_id.title(), "panel": panel}
+            )
+        )
+    return create_app(testing=True, data_root=tmp_path, plugins_dir=REPO_ROOT / "plugins")
+
+
+def test_the_preview_honours_the_displays_colour(tmp_path: Path) -> None:
+    app = _frames_app(
+        tmp_path,
+        {
+            "grey": {"w": 1440, "h": 2560, "gamut": "gray_16"},
+            "mono": {"w": 400, "h": 300, "gamut": "mono"},
+            "colour": {"w": 800, "h": 480},
+        },
+    )
+    body = app.test_client().get("/plugins/comics_daily/").get_data(as_text=True)
+    frames = re.findall(r'<div class="cx-screen-frame"[^>]*data-paint="(\w+)"', body)
+    # Our three displays (the order the picker lists them), then the reference screens.
+    assert sorted(frames[:3]) == ["color", "grey16", "mono"]
+    assert frames[3:] == ["color"] * len(screen.SCREENS)
+    # Grey is quantised to the display's 16 levels; mono uses the app's threshold filter.
+    assert 'id="cx-grey-16"' in body
+    assert len(re.search(r'id="cx-grey-16".*?tableValues="([^"]+)"', body, re.S)[1].split()) == 16
+    assert '[data-paint="grey16"] img { filter: url("#cx-grey-16"); }' in body
+    assert '[data-paint="mono"] img { filter: url("#tess-mono"); }' in body
+
+
+def test_the_preview_colour_comes_from_the_apps_display_colour(tmp_path: Path) -> None:
+    app = _frames_app(tmp_path, {"g4": {"w": 480, "h": 800, "gamut": "gray_4"}})
+    with app.test_request_context("/"):
+        assert srv._screen_colour("g4") == ("grey4", 4)
+        assert srv._screen_colour("nope") == ("color", 0)
+        assert srv._screen_colour(None) == ("color", 0)
+
+
+def test_add_strip_box_and_gap_inputs_use_the_apps_styles(client: FlaskClient) -> None:
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    # In a .field, like every other input on the page (static/style/forms.css).
+    assert re.search(r'<div class="field cx-add-field">\s*<input[^>]*id="cx-add-input"', body)
+    layout = body[body.index('id="layout"') : body.index('id="log"')]
+    for name in ("gap_min", "gap", "gap_max"):
+        label = re.search(rf'<label for="cx-{name}">.*?</label>', layout, re.S)[0]
+        assert 'class="info-pop"' in label and 'role="tooltip"' in label
+    assert "least empty space" in layout and "most empty space" in layout
+
+
+# -- packing on a small portrait screen ---------------------------------------------
+
+
+def test_a_480x800_portrait_screen_packs_what_fits_and_previews_what_it_draws() -> None:
+    kwargs: dict[str, Any] = {
+        "far_side_count": 4,
+        "captions": True,
+        "note": True,
+        "gap_min": 6,
+        "one_at_a_time": False,
+    }
+    # 480 px holds one Far Side panel of at least 260 px, not four across.
+    assert screen.farside_columns(480, 4, 4) == 1
+    heights = screen.heights(480, ALL_ITEMS, 4, True)
+    room = screen.available_height(480, 800, True)
+    # The Far Side's one tall panel plus two strips fits ...
+    assert heights[0] + heights[1] <= room
+    # ... but a third row would not, even with no space between them at all
+    # (shrinking it would take the comics below reading size).
+    assert heights[0] + heights[1] + heights[2] > room
+    turns = screen.turns(480, 800, ALL_ITEMS, **kwargs)
+    assert [t.show for t in turns] == [(0, 1), (2, 3, 4)]
+    # The preview draws the one panel the page draws, not all four.
+    config = srv.Config(strips=())
+    far = {"pictures": [{"src": f"/p{n}", "w": 950, "h": 1123, "caption": ""} for n in range(4)]}
+    strips = [
+        {"label": f"S{n}", "pictures": [{"src": f"/s{n}", "w": 1200, "h": 380}]} for n in range(4)
+    ]
+    view = srv.screens_view(
+        config, far, strips, [{"name": "Frame", "w": 480, "h": 800, "group": srv.MINE}]
+    )
+    first = view[0]["shown"]
+    assert [i["label"] for i in first] == ["The Far Side", "S0"]
+    assert len(first[0]["pictures"]) == 1
+    wide = srv.screens_view(
+        config, far, strips, [{"name": "Big", "w": 1440, "h": 2560, "group": srv.MINE}]
+    )
+    assert len(wide[0]["shown"][0]["pictures"]) == 4
