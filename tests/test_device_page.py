@@ -271,7 +271,7 @@ def test_display_fields_are_compact_rows_with_their_actions(app: Flask) -> None:
 def test_rail_vitals_link_to_the_settings_behind_them(app: Flask) -> None:
     client, dev = _full_device(app)
     rail = _rail_html(client.get(f"/settings/devices/{dev}").get_data(as_text=True))
-    assert re.search(r'<a class="dx-now" href="#lineups"', rail)
+    assert re.search(r'<a class="dx-now-link" href="#lineups"', rail)
     for label, anchor in (
         ("Battery", "#power"),
         ("Next update", "#timing"),

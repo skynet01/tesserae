@@ -74,7 +74,6 @@
   {# ================= SUMMARY RAIL ================= #}
   <aside class="dx-rail" id="overview" aria-label="Summary">
     <header class="dx-rail-head">
-      <span class="dx-rail-icon" aria-hidden="true"><i class="ph ph-{{ section.icon or 'device-mobile' }}" data-device-head-icon></i></span>
       <div class="dx-rail-titles">
         <h1 class="dx-rail-name" data-device-head-name>{{ _name }}</h1>
         <div class="dx-rail-meta">
@@ -88,11 +87,9 @@
     {{ rail_now(section) }}
     {{ rail_vitals(section) }}
 
-    {% set env = section.status.tiles.environment %}
     {% set mo = section.mode_observation %}
-    {% if env or (mo and mo.mode != 'bluetooth') %}
+    {% if mo and mo.mode != 'bluetooth' %}
     <p class="dx-rail-aside">
-      {%- if env %}<span>{{ env.value }}{% if env.sub %} · {{ env.sub }}{% endif %} at the display</span>{% endif %}
       {%- if mo and mo.mode != 'bluetooth' %}<span class="dx-mode-observation" data-device-mode-observation>Phone last confirmed {{ mo.label }} · <time datetime="{{ mo.observed_at }}">{{ mo.observed_label }}</time></span>{% endif -%}
     </p>
     {% endif %}
