@@ -676,7 +676,7 @@
               <div><dt>Installed firmware</dt><dd>{{ _fwv.installed or 'Unknown' }}</dd></div>
               <div><dt>Latest available</dt><dd>
                 {%- if _fwv.latest %}{{ _fwv.latest }}{% if _fwv.update_available %} <span class="tg tg--warn">Update available</span>{% endif %}
-                {%- else %}<span class="dx-help">Not known right now (Visionect's firmware list can't be reached)</span>{% endif -%}
+                {%- else %}<span class="dx-help">{{ _fwv.unknown_because or 'Not known right now' }}</span>{% endif -%}
               </dd></div>
             </dl>
             {% if _fl %}

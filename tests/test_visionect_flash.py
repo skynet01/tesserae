@@ -9,6 +9,7 @@ repository is a cache seeded on disk, so nothing touches the network.
 
 from __future__ import annotations
 
+import dataclasses
 import socket
 import time
 from collections.abc import Iterator
@@ -112,6 +113,8 @@ class Bootloader:
 @pytest.fixture(autouse=True)
 def _fast(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(visionect, "PARAM_WAIT_S", 0.2)
+    # FakeSign doesn't ack pictures; only the test of the wait itself waits.
+    monkeypatch.setattr(visionect, "FLASH_REBOOT_WAIT_S", 0.0)
     monkeypatch.setattr(
         visionect_flash,
         "SESSION_CONFIG",
@@ -675,14 +678,21 @@ def test_the_page_degrades_when_the_repository_is_unreachable(
     client_app, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _app, client = client_app
-    fake = fake_service([], latest="", update_available=False, builds=[], list_known=False)
+    fake = fake_service(
+        [],
+        latest="",
+        update_available=False,
+        builds=[],
+        list_known=False,
+        unknown_because="Visionect's firmware list can't be reached",
+    )
     monkeypatch.setattr(visionect, "service", lambda: fake)
     resp = client.get("/settings/devices/hall")
     assert resp.status_code == 200
     page = resp.get_data(as_text=True)
     assert "Installed firmware" in page and "7.4.4407" in page
     assert "Update available" not in page and "Update firmware" not in page
-    assert "firmware list can't be reached" in page
+    assert "firmware list can&#39;t be reached" in page or "firmware list can't be reached" in page
     # A service that raises never breaks the page either.
     broken = fake_service([])
     broken.firmware_view = lambda _d: (_ for _ in ()).throw(RuntimeError("boom"))
@@ -797,3 +807,144 @@ def test_the_route_needs_a_login_and_the_same_origin(
     )
     assert resp.status_code == 403
     assert asked == []
+
+
+@pytest.mark.parametrize(
+    ("hello", "word"),
+    [
+        ({"device_id": b"\x01" * 16}, "not this frame"),
+        ({"hardware": (1, 2, 0)}, "hardware"),
+        ({"hardware": (1, 1, 1)}, "hardware"),
+        ({"hardware_name_id": 9}, "name id"),
+        ({"bootloader": (6, 4, 0)}, "bootloader"),
+        ({"display_id": 7}, "display"),
+    ],
+)
+def test_hello_refusal_covers_each_identity_field(hello: dict[str, Any], word: str) -> None:
+    real = bl.parse_hello(REAL_HELLO)
+    build = fwrepo.Build(
+        checksum=0xA529A106,
+        checksum_text="a529a106",
+        version=(7, 3, 4358),
+        hardware=real.hardware,
+        hardware_name_id=real.hardware_name_id,
+        display_id=real.display_id,
+    )
+    j = visionect_flash.FlashJob(
+        uuid=real.uuid,
+        device_id="lobby",
+        build=build,
+        data=b"",
+        peer_ip="",
+        from_version="",
+        from_checksum=None,
+    )
+    assert visionect_flash.hello_refusal(j, real) is None
+    refused = visionect_flash.hello_refusal(j, dataclasses.replace(real, **hello))
+    assert refused is not None and word in refused
+
+
+def test_the_last_ack_closes_with_a_reset_as_the_suite_did(h: Harness) -> None:
+    sign = connect(h)
+    start_flash(h, sign)
+    boot = Bootloader(h.svc.port, REAL_HELLO)
+    try:
+        boot.offer()
+        for rec in bl.walk_firmware(FIRMWARE):
+            boot.record()
+            boot.ack(rec.index)
+        boot.sock.settimeout(3.0)
+        with pytest.raises(ConnectionResetError):
+            while boot.sock.recv(65536):
+                pass
+    finally:
+        boot.close()
+    assert _wait(lambda: job(h).phase == visionect_flash.VERIFYING)
+
+
+def test_a_record_sent_but_never_acked_counts_as_started(h: Harness) -> None:
+    sign = connect(h)
+    start_flash(h, sign)
+    boot = Bootloader(h.svc.port, REAL_HELLO)
+    try:
+        boot.offer()
+        boot.record()  # block 1 went out, the frame says nothing
+        assert boot.closed(timeout=4.0)
+    finally:
+        boot.close()
+    assert _wait(lambda: job(h).phase == visionect_flash.FAILED)
+    assert job(h).wrote_records and job(h).blocks_done == 0
+    assert "not flashed" not in job(h).message and "USB" in job(h).message
+
+
+def test_a_pending_job_past_its_time_is_never_claimed_even_with_no_timer(h: Harness) -> None:
+    sign = connect(h)
+    start_flash(h, sign)
+    j = job(h)
+    assert _wait(lambda: j.timer is not None)
+    assert h.svc._flash_wants("127.0.0.1")
+    j.timer.cancel()
+    j.timer = None
+    j.requested_at -= visionect_flash.PENDING_TIMEOUT_S + visionect_flash.PENDING_GRACE_S + 1
+    assert not h.svc._flash_wants("127.0.0.1")
+    assert not h.svc._flash_active(UUID)
+    assert not h.svc._flash_any_active()
+
+
+def test_stopping_ends_a_pending_flash(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, uuid=UUID)
+    repo = fwrepo.FirmwareRepository(tmp_path / "fw", base_url="http://127.0.0.1:9", timeout=0.5)
+    repo._loaded = True
+    repo._builds = fwrepo.parse_list(LIST)
+    repo._checked_at = time.time()
+    build = next(b for b in repo._builds if b.checksum_hex == TARGET_HEX)
+    repo._write_atomic(repo._file_path(build), FIRMWARE)
+    harness.svc.firmware_repo = repo
+    assert harness.svc.start()
+    sign = connect(harness)
+    start_flash(harness, sign)
+    j = job(harness)
+    harness.svc.stop()
+    assert j.phase == visionect_flash.FAILED and j.finished_at
+    assert "nothing was flashed" in j.message
+
+
+def test_the_reboot_waits_for_an_unanswered_picture_or_settings_packet(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(visionect, "FLASH_REBOOT_WAIT_S", 30.0)
+    sign = connect(h)
+    try:
+        s = h.svc._signs[UUID]
+        assert _wait(lambda: not s.param_out and s.inflight is None)
+        s.param_out = "read"
+        s.params_wait_until = time.monotonic() + 30
+        assert h.svc.request_firmware_update("lobby", TARGET_HEX) is None
+        assert not sign.wait_for(
+            lambda x: any(int.from_bytes(f.payload[:4], "little") == 1 for f in x.commands()),
+            timeout=0.5,
+        )
+        s.param_out = ""  # the frame answered
+        s.inflight = None
+        assert sign.wait_for(
+            lambda x: any(int.from_bytes(f.payload[:4], "little") == 1 for f in x.commands()),
+            timeout=4.0,
+        )
+    finally:
+        sign.close()
+
+
+def test_a_reboot_for_a_flash_goes_out_anyway_past_the_wait(h: Harness) -> None:
+    sign = connect(h)
+    try:
+        s = h.svc._signs[UUID]
+        assert _wait(lambda: not s.param_out and s.inflight is None)
+        s.param_out = "read"
+        s.params_wait_until = time.monotonic() + 30
+        assert h.svc.request_firmware_update("lobby", TARGET_HEX) is None
+        assert sign.wait_for(
+            lambda x: any(int.from_bytes(f.payload[:4], "little") == 1 for f in x.commands()),
+            timeout=4.0,
+        )
+    finally:
+        sign.close()

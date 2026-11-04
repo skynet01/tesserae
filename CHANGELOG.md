@@ -11,7 +11,6 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Visionect frames: set the heart beat interval, power saving mode, touch mode and system screens from the device page, only those the frame supports; settings go one packet at a time, as Visionect's own server sends them.
 - Visionect frames: a Status check interval, the last day's connections and errors, a warning when a frame looks stuck, hardware and radio details, and network details on request.
 - Visionect frames: update the frame's firmware from the device page, from Visionect's own firmware list.
-- Visionect frames: set the heart beat interval and other frame settings (touch, Wi-Fi, server, charging and more, only those the frame supports) from the device page.
 - Device batteries: dots on the chart show each wake-up and why it happened (lineup, Home Assistant, button, manual push, reconnect, restart or scheduled check-in), each ringed so overlapping dots stay apart.
 - Device batteries: a Wakes / day tile with a breakdown by cause.
 - Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.

@@ -140,6 +140,7 @@ def _visionect_firmware(svc: Any, device: Device) -> dict[str, Any] | None:
         "blocked": fv["blocked"],
         "flash": flash_view,
         "list_known": fv["list_known"],
+        "unknown_because": fv.get("unknown_because", ""),
         "min_battery": fv["min_battery"],
         "endpoint": url_for("auth.devices_visionect_firmware", instance_id=device.id),
     }
@@ -353,6 +354,8 @@ def visionect_port_save() -> Response:
     try:
         port = visionect.validate_port(request.form.get("port", ""))
         svc = visionect.service()
+        if svc is not None and svc.firmware_update_running():
+            raise ValueError("A firmware update is running; change the port after it ends.")
         # An unchanged, live listener already owns this socket. Otherwise
         # probe before saving, so an occupied port leaves settings untouched.
         if svc is None or not svc.running or svc.port != port:

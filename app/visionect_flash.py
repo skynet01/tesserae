@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
+import socket
+import struct
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -37,11 +40,15 @@ logger = logging.getLogger(__name__)
 
 # From the reboot command to the bootloader's call (observed: about 12 s).
 PENDING_TIMEOUT_S = 180.0
+# How far past that a pending job counts as expired even if its timer never ran.
+PENDING_GRACE_S = 60.0
 # From the last ack to the frame's reconnect on the new firmware (about 10 s).
 VERIFY_TIMEOUT_S = 300.0
 # The Suite closed the socket 4.6 ms after the last ack; a little longer here.
 CLOSE_GAP_S = 0.05
 TICK_S = 0.05
+# Bootloader versions (major, minor) a flash has been measured on.
+MEASURED_BOOTLOADERS = {(6, 3)}
 USB_HINT = (
     "If the frame doesn't come back after a power cycle, reconnect it with the USB cable "
     "and use Visionect's Configurator to flash it."
@@ -75,7 +82,7 @@ class FlashJob:
     blocks_total: int = 0
     message: str = ""
     finished_at: float = 0.0
-    wrote_records: bool = False
+    wrote_records: bool = False  # an offer or a record went out: the frame may be mid-flash
     timer: Any = field(default=None, repr=False)  # the loop's TimerHandle for the phase's timeout
     version: int = 0  # bumped on every change; the page polls it
 
@@ -113,6 +120,11 @@ def hello_refusal(job: FlashJob, hello: Hello) -> str | None:
     b = job.build
     if hello.device_id.hex() != job.uuid.replace("-", ""):
         return f"the bootloader that called is not this frame ({hello.uuid})"
+    if hello.bootloader[:2] not in MEASURED_BOOTLOADERS:
+        return (
+            f"the frame's bootloader is {'.'.join(map(str, hello.bootloader))}, and a flash has "
+            "only been measured on 6.3"
+        )
     if hello.hardware != b.hardware:
         return (
             f"the frame's hardware is {'.'.join(map(str, hello.hardware))} but the chosen "
@@ -184,7 +196,14 @@ async def run_session(
             if isinstance(event, HelloReceived):
                 on_change(f"bootloader hello: {event.hello.describe()}")
             elif isinstance(event, OfferSent):
-                on_change(f"offered firmware {job.build.version_text} ({event.checksum:08x})")
+                digest = hashlib.sha256(job.data).hexdigest()
+                on_change(
+                    f"offered firmware {job.build.version_text} ({event.checksum:08x}), "
+                    f"file sha256 {digest}"
+                )
+                # What a bootloader does after an offer has only been seen when
+                # the flash went on, so from here it may need a power cycle.
+                job.wrote_records = True
                 job.phase = RUNNING
                 job.touch()
             elif isinstance(event, BlockAcked):
@@ -196,12 +215,13 @@ async def run_session(
             elif isinstance(event, Finished):
                 on_change(f"all {event.blocks} blocks acknowledged")
             elif isinstance(event, Failed):
-                job.wrote_records = event.sent_any_record
+                job.wrote_records = job.wrote_records or event.sent_any_record
 
     async def flush() -> bool:
         data = session.drain()
         if not data:
             return True
+        job.wrote_records = job.wrote_records or session.sent_any_record
         try:
             writer.write(data)
             await writer.drain()
@@ -247,7 +267,9 @@ async def run_session(
         job.touch()
         await asyncio.sleep(CLOSE_GAP_S)
         # The Suite ended the connection with a reset a few ms after the last
-        # ack, and so do we.
+        # ack, and so do we. abort() alone sends a FIN; a zero linger makes the
+        # close a reset.
+        send_reset_on_close(writer)
         abort(writer)
         return
     job.phase = FAILED
@@ -256,6 +278,14 @@ async def run_session(
     job.message = failure_message(session.error, job.wrote_records)
     with contextlib.suppress(Exception):
         abort(writer)
+
+
+def send_reset_on_close(writer: Any) -> None:
+    """Make closing this connection send a TCP reset rather than a FIN."""
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
 
 
 def failure_message(reason: str, wrote: bool) -> str:

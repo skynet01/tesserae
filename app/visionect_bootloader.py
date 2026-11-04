@@ -1,6 +1,6 @@
 """The Visionect bootloader's firmware-update conversation, sans-io.
 
-A Visionect frame dials the server on every boot, *before* its application
+A Visionect frame told to reboot dials the server *before* its application
 runs, and speaks a different protocol from the one ``pyvisionect`` handles. Left
 unanswered it gives up and boots; answered with an offer and a firmware file it
 flashes the file. This module is that conversation and nothing else: bytes in,
@@ -33,6 +33,7 @@ __all__ = [
     "ACK_SIZE",
     "FLAGS_LAST",
     "FLAGS_MORE",
+    "FLAGS_MORE_ALT",
     "HELLO_SIZE",
     "MAGIC",
     "MAGIC_BYTES",
@@ -73,9 +74,12 @@ _KIND_RECORD = 2
 _NO_BLOCK = 0xFFFF  # the constant that follows the block index in an offer or ack
 
 FLAGS_MORE = 0x0009
-"""Record flags word on every record but the last (observed on all 183)."""
+"""Record flags word on nearly every record but the last."""
+FLAGS_MORE_ALT = 0x0008
+"""Also seen mid-file: once in most builds, never in others (7.4.4407 block 130).
+Its meaning isn't known; the file is relayed unchanged either way."""
 FLAGS_LAST = 0x000D
-"""Record flags word on the last record (observed on the 184th)."""
+"""Record flags word on the last record."""
 
 
 class BootloaderError(ValueError):
@@ -259,8 +263,9 @@ def walk_firmware(data: bytes) -> list[Record]:
     with a 24-byte header, followed by ``length`` payload bytes; the next record
     starts right after. The payload is opaque (it looks encrypted), so the magic
     is never searched for. The walk is checked, not trusted: it must start at
-    byte 0, number the blocks 1..N with no gap, carry the flags word seen in the
-    capture (9, and 13 on the last), and land exactly on the end of the file.
+    byte 0, number the blocks 1..N with no gap, carry the flags words every
+    published build for this hardware uses (8 or 9, and 13 on the last), and
+    land exactly on the end of the file.
 
     Raises ``BootloaderError`` with the offset and the reason otherwise.
     """
@@ -289,7 +294,7 @@ def walk_firmware(data: bytes) -> list[Record]:
             )
         last = end == total
         want = FLAGS_LAST if last else FLAGS_MORE
-        if flags != want:
+        if flags != want and (last or flags != FLAGS_MORE_ALT):
             note = (
                 " (last block)"
                 if last
@@ -324,8 +329,9 @@ class SessionConfig:
     """Pause between the offer and the first record. The Suite's was 1.3 s while
     it downloaded the file; whether the frame needs any is not known, so it is
     kept."""
-    ack_timeout_s: float = 10.0
-    """Longest to wait for one ack. The slowest observed was 1.2 s."""
+    ack_timeout_s: float = 30.0
+    """Longest to wait for one ack. The slowest observed was 1.2 s, on one build;
+    waiting costs little next to stopping a flash part way."""
 
 
 class Event:
@@ -405,6 +411,11 @@ class BootloaderSession:
     @property
     def finished(self) -> bool:
         return self.state in (State.DONE, State.FAILED)
+
+    @property
+    def sent_any_record(self) -> bool:
+        """Whether a firmware record has been queued to go out."""
+        return self._sent > 0
 
     def drain(self) -> bytes:
         data = bytes(self._out)

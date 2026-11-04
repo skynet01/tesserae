@@ -389,3 +389,22 @@ def test_data_after_the_last_ack_fails() -> None:
 def test_a_session_refuses_a_file_that_does_not_walk() -> None:
     with pytest.raises(bl.BootloaderError):
         bl.BootloaderSession(firmware(2)[:-3], TARGET)
+
+
+def _with_flags(data: bytes, block: int, flags: int) -> bytes:
+    """``data`` with one record's flags word replaced."""
+    rec = bl.walk_firmware(data)[block - 1]
+    return data[: rec.offset + 10] + struct.pack("<H", flags) + data[rec.offset + 12 :]
+
+
+def test_walk_accepts_the_mid_file_flag_published_builds_use() -> None:
+    # 7.4.4407's block 130 and one block of most other builds carry 8, not 9.
+    data = _with_flags(firmware(3), 2, bl.FLAGS_MORE_ALT)
+    assert [r.flags for r in bl.walk_firmware(data)] == [9, 8, 13]
+
+
+def test_walk_still_needs_the_last_flag_on_the_last_record() -> None:
+    data = firmware(3)
+    last = len(bl.walk_firmware(data))
+    with pytest.raises(bl.BootloaderError, match="flags"):
+        bl.walk_firmware(_with_flags(data, last, bl.FLAGS_MORE_ALT))

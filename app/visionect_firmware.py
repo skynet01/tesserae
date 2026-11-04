@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import http.client
 import io
 import json
 import logging
@@ -25,6 +26,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -286,7 +288,15 @@ class FirmwareRepository:
                 self._save()
                 return True
             return self._failed(f"the repository answered {exc.code}")
-        except (OSError, ValueError, RepositoryError) as exc:
+        except (
+            OSError,
+            ValueError,
+            EOFError,
+            RecursionError,
+            zlib.error,
+            http.client.HTTPException,
+            RepositoryError,
+        ) as exc:
             return self._failed(f"{type(exc).__name__}: {exc}")
         with self._lock:
             self._builds = builds
@@ -388,7 +398,7 @@ class FirmwareRepository:
                 last = exc
                 if exc.code != 404:
                     break
-            except (OSError, RepositoryError) as exc:
+            except (OSError, http.client.HTTPException, RepositoryError) as exc:
                 last = exc
                 break
         if last is not None:

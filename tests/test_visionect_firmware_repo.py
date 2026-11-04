@@ -6,11 +6,15 @@ records.
 
 from __future__ import annotations
 
+import contextlib
+import gzip
 import json
+import socket
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -294,3 +298,57 @@ def test_oversized_answers_are_refused(server, tmp_path: Path, monkeypatch) -> N
     build = next(b for b in full if b.checksum_hex == "a529a106")
     with pytest.raises(fwrepo.RepositoryError):
         repo.fetch(build)
+
+
+def _serve_raw(answer: bytes) -> tuple[str, Any]:
+    """A server that sends ``answer`` as is, to every connection, then hangs up."""
+    listener = socket.create_server(("127.0.0.1", 0))
+
+    def run() -> None:
+        with contextlib.suppress(OSError):
+            while True:
+                conn, _ = listener.accept()
+                with conn:
+                    conn.recv(65536)
+                    conn.sendall(answer)
+
+    threading.Thread(target=run, daemon=True).start()
+    return f"http://127.0.0.1:{listener.getsockname()[1]}", listener
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # A chunked body cut short: http.client raises IncompleteRead.
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n40\r\nshort",
+        # A gzip body cut short: EOFError, not OSError.
+        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 12\r\n\r\n"
+        + gzip.compress(b'{"Firmwares": {}}')[:12],
+        # Not gzip's deflate stream at all: zlib.error.
+        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 14\r\n\r\n"
+        + b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03"
+        + b"\xff\xff\xff\xff",
+        # Not HTTP at all.
+        b"nonsense\r\n\r\n",
+    ],
+)
+def test_a_broken_answer_is_a_plain_failure_with_backoff(tmp_path: Path, answer: bytes) -> None:
+    url, listener = _serve_raw(answer)
+    try:
+        repo = fwrepo.FirmwareRepository(tmp_path, base_url=url, timeout=2.0)
+        assert repo.refresh() is False
+        assert repo.last_error
+        assert repo.stale() is False  # waits before asking again
+    finally:
+        listener.close()
+
+
+def test_a_download_cut_short_is_a_plain_failure(tmp_path: Path) -> None:
+    url, listener = _serve_raw(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n40\r\nshort")
+    try:
+        repo = fwrepo.FirmwareRepository(tmp_path, base_url=url, timeout=2.0)
+        build = fwrepo.parse_list({"Firmwares": {"x": [entry("a529a106", "7.3.4358")]}})[0]
+        with pytest.raises(fwrepo.RepositoryError):
+            repo.fetch(build)
+    finally:
+        listener.close()

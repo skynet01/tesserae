@@ -149,6 +149,8 @@ MAX_WARNED_UNBOUND = 64
 FLASH_MIN_BATTERY_PCT = 30
 # Longest to wait for a bootloader's complete hello once it has connected.
 HELLO_READ_S = 10.0
+# How long a reboot for a flash waits for an unanswered packet to be answered.
+FLASH_REBOOT_WAIT_S = 45.0
 # The sign's own settings (TCLV parameters), shown on the device page and set
 # from it. This follows what Visionect's own Software Suite does on the wire:
 # at most five ids to a packet, and never a second settings packet until the
@@ -447,7 +449,7 @@ def observed_status_gap_s(times: Sequence[float]) -> float | None:
 def desired_params(cfg: dict[str, Any]) -> dict[int, int | str]:
     """The sign settings a device's config asks for, as TCLV id to value:
     ``heartbeat_min`` (minutes between check-ins) and the ``SIGN_SETTINGS``
-    choices (``frame_sleep`` is "sleep" or "awake"). Blank, absent or junk
+    choices (``frame_sleep`` is "sleep", "awake" or "cli_off"). Blank, absent or junk
     leaves the sign's own setting."""
     out: dict[int, int | str] = {}
     try:
@@ -984,6 +986,7 @@ class VisionectService:
         A sign holds its socket open, and on Python < 3.13 asyncio.Server has
         no close_clients()/abort_clients(), so wait_closed() would wait for
         it forever: abort the transports ourselves first."""
+        self._flash_stop_all()
         writers = getattr(server, "_writers", None)
         owned = [sign.writer for sign in list(self._signs.values()) if sign.writer is not None]
         if isinstance(writers, dict):
@@ -1413,7 +1416,8 @@ class VisionectService:
                     sign.shown_at = time.time()
                     self._served(sign, device.id, sign.frame_render)
 
-        if not self._alive(sign) or sign.inflight is not None:
+        # A flash may have been asked for during the encode.
+        if not self._alive(sign) or sign.inflight is not None or self._flash_active(sign.uuid):
             return
         conn, writer = sign.conn, sign.writer
 
@@ -2276,12 +2280,50 @@ class VisionectService:
                 self.firmware_repo = FirmwareRepository(Path(root) / "visionect_firmware")
         return self.firmware_repo
 
+    @staticmethod
+    def _flash_expired(job: visionect_flash.FlashJob) -> bool:
+        """A pending job past its timeout, whether or not its timer ran (a
+        listener restart or a dropped callback leaves none). Never claimed,
+        and it holds nothing up."""
+        return (
+            job.phase == visionect_flash.PENDING
+            and time.time() - job.requested_at
+            > visionect_flash.PENDING_TIMEOUT_S + visionect_flash.PENDING_GRACE_S
+        )
+
     def _flash_active(self, uuid: str) -> bool:
         job = self._flash_jobs.get(uuid)
-        return job is not None and job.active
+        return job is not None and job.active and not self._flash_expired(job)
 
     def _flash_any_active(self) -> bool:
-        return any(job.active for job in list(self._flash_jobs.values()))
+        return any(
+            job.active and not self._flash_expired(job) for job in list(self._flash_jobs.values())
+        )
+
+    def firmware_update_running(self) -> bool:
+        """Whether a frame is being flashed, or about to be. Stopping the listener
+        now would cut the flash off."""
+        return self._flash_any_active()
+
+    def _flash_stop_all(self) -> None:
+        """The listener is stopping: no active job survives it, since its timer
+        and the frame's connection go too. A running flash is ended by its own
+        task being cancelled."""
+        for job in list(self._flash_jobs.values()):
+            if job.timer is not None:
+                job.timer.cancel()
+                job.timer = None
+            if job.phase in (visionect_flash.PENDING, visionect_flash.VERIFYING):
+                job.message = (
+                    "Tesserae stopped before the frame called its bootloader, so nothing was "
+                    "flashed."
+                    if job.phase == visionect_flash.PENDING
+                    else "Tesserae stopped before the frame came back from its flash. Check that "
+                    "it reconnects on the new firmware."
+                )
+                job.phase = visionect_flash.FAILED
+                job.finished_at = time.time()
+                job.touch()
 
     def flash_job(self, device_id: str) -> visionect_flash.FlashJob | None:
         uuid = self.device_uuid(device_id)
@@ -2384,8 +2426,24 @@ class VisionectService:
             "blocked": self._flash_blocked(view),
             "flash": job.view() if job is not None else None,
             "list_known": builds is not None,
+            "unknown_because": self._firmware_unknown_because(view, builds, repo),
             "min_battery": FLASH_MIN_BATTERY_PCT,
         }
+
+    @staticmethod
+    def _firmware_unknown_because(
+        view: dict[str, Any] | None, builds: list[Build] | None, repo: Any
+    ) -> str:
+        """Why the page has no latest version to show, in plain words."""
+        if builds:
+            return ""
+        if builds is not None:
+            return "Visionect lists no firmware for this frame's hardware and display"
+        if repo is not None and repo.builds() is None:
+            return "Visionect's firmware list hasn't been fetched yet, or can't be reached"
+        if (view or {}).get("identity"):
+            return "Waiting for the frame to report its hardware and display"
+        return "Waiting for the frame's next check-in"
 
     def request_firmware_update(self, device_id: str, checksum_hex: str) -> str | None:
         """Flash the chosen build onto the device's sign, from a request
@@ -2501,9 +2559,18 @@ class VisionectService:
 
     def _flash_begin(self, job: visionect_flash.FlashJob) -> None:
         """On the loop: send the reboot and wait for the bootloader."""
+        if job.phase != visionect_flash.PENDING:
+            return
         sign = self._signs.get(job.uuid)
         if sign is None or not self._alive(sign) or self._flash_jobs.get(job.uuid) is not job:
             self._flash_end(job, False, "The frame disconnected before it could be rebooted.")
+            return
+        # Never on top of an unanswered picture or settings packet: that is what
+        # made this frame drop connections before. Nothing new goes out now, so
+        # one being answered is a matter of seconds; past the wait, it never will be.
+        waited = time.time() - job.requested_at
+        if (sign.inflight is not None or sign.param_out) and waited < FLASH_REBOOT_WAIT_S:
+            asyncio.get_running_loop().call_later(1.0, self._flash_begin, job)
             return
         try:
             sign.conn.reboot()
@@ -2522,7 +2589,9 @@ class VisionectService:
     def _flash_wants(self, ip: str) -> bool:
         """Listener hook: a flash is waiting for a bootloader from ``ip``."""
         return any(
-            job.phase == visionect_flash.PENDING and (not job.peer_ip or job.peer_ip == ip)
+            job.phase == visionect_flash.PENDING
+            and not self._flash_expired(job)
+            and (not job.peer_ip or job.peer_ip == ip)
             for job in list(self._flash_jobs.values())
         )
 
@@ -2545,6 +2614,7 @@ class VisionectService:
         if (
             job is None
             or job.phase != visionect_flash.PENDING
+            or self._flash_expired(job)
             or (job.peer_ip and job.peer_ip != ip)
         ):
             logger.info(

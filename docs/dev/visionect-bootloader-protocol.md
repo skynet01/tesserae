@@ -20,8 +20,10 @@ All integers are little-endian. Every bootloader message starts with the word
 
 1. The frame is told to reboot with an ordinary command packet (`CommandType 1`).
    About 12 s later its bootloader opens a **new** TCP connection to the same
-   server port (11113). It does this on every boot. A server that does not
-   answer the hello closes the connection and the frame boots normally.
+   server port (11113). It did not on the boot right after the flash, which went
+   straight to the normal protocol, so it is not every boot. Frames on Tesserae
+   have rebooted normally without an answer, but a hello going unanswered has not
+   been captured.
 2. **Hello**, frame to server, 88 bytes (22 words):
 
    | word | value in the capture | meaning |
@@ -56,7 +58,7 @@ All integers are little-endian. Every bootloader message starts with the word
    | 0-3 | `02 00 00 f0` | magic |
    | 4-7 | 2 | kind: record |
    | 8-9 | 1..184 | block index |
-   | 10-11 | 9; 13 on the last | flags (meaning unknown) |
+   | 10-11 | 9, once in most builds 8; 13 on the last | flags (meaning unknown) |
    | 12-13 | 1616 on the first | payload length, so the record is `24 + length` bytes |
    | 14-15 | 2020; 1452 on the last | unknown |
    | 16-19 | 0..15 | unknown |
@@ -71,6 +73,9 @@ All integers are little-endian. Every bootloader message starts with the word
    next record only after the ack. Acks came 27 ms to 1.16 s after the record (median 50 ms); three took
    about a second (possibly flash erase).
    Offer to first record took 1.3 s, which was the Suite downloading the file.
+   Flag 8 doesn't appear in this capture. The published builds for this hardware
+   carry it on one block (block 130 of 7.4.4407) or not at all, and the Suite
+   flashed 7.4.4407 onto this frame in its usual 13 s.
    The whole flash took about 13 s.
 6. After the last ack the Suite closed the connection with a TCP reset 4.6 ms
    later. The frame then booted the new firmware and connected on the normal
@@ -87,14 +92,15 @@ v1 list lacks this display), JSON with ETag support, entries with
 Wrong magic or kind, a hello or ack of the wrong size, an ack for any block but
 the one just sent (or a repeat), data the frame had no reason to send, a hello
 that does not arrive complete in time, a missing ack, a disconnect, and a file
-that does not walk (blocks 1..N with no gap, flags 9 and 13 on the last, ends
-exactly at the end of the file) are all errors. Nothing is retried.
+that does not walk (blocks 1..N with no gap, flags 8 or 9 and 13 on the last,
+ends exactly at the end of the file) are all errors. A bootloader other than 6.3
+is refused before anything is sent. Nothing is retried.
 
 ## What is not known
 
 - What words 3, 4, 19, 20 of the hello, header bytes 10-11 and 14-23 of a record
-  mean. The module insists on the flag values 9 and 13 because those are all that
-  were seen; another build may use others and would be refused.
+  mean. The module insists on the flag values 8, 9 and 13 because those are all
+  that published builds use; another build may use others and would be refused.
 - Whether the firmware is signed or checksummed beyond what the frame checks
   itself, and how the repository's checksum is computed (it is not CRC32 or
   Adler-32 of the file, nor of the payloads). The file is therefore checked only
@@ -102,7 +108,9 @@ exactly at the end of the file) are all errors. Nothing is retried.
 - What the frame does if a flash is interrupted. It has never been observed. The
   documented way out is the USB Configurator.
 - Whether the 1.3 s between offer and first record, or the reset (rather than a
-  normal close) after the last ack, matter. Both mirror the capture.
+  normal close) after the last ack, matter. Both mirror the capture. The file is
+  fetched over plain HTTP with no signature to check, the same as the Suite does;
+  its SHA-256 is logged when it is offered.
 - Whether the frame needs the hello to be answered within some time (the Suite
   answered in 1.5 ms), whether it acks the offer, and any behaviour on a server
   that sends something other than the Suite did.
