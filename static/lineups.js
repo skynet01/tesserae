@@ -1786,6 +1786,7 @@
       return;
     }
     if (e.target.closest(".lu-lb")) return; // the lightbox handles its own clicks
+    if (e.target.closest(".lu-qthumb")) return; // the queued thumbnail is a label, not a control
     // The zoom icon, or the thumbnail itself (anywhere but Push now, the arrows and x N).
     const zb = e.target.closest(".lu-zoom");
     if (zb) {

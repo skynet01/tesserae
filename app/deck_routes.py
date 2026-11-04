@@ -442,6 +442,21 @@ def _frame_pending(device: Any) -> bool:
     return not isinstance(served, dict) or served.get("digest") != latest.get("digest")
 
 
+def _pending_thumb(device: Any) -> str:
+    """The thumbnail of the render a display has not taken yet (what waits for it
+    when no dashboard explains it: a file, a note or a link sent by hand)."""
+    from app.lineup_thumbs import sent_thumb_url
+
+    push = current_app.config.get("PUSH_MANAGER")
+    latest_fn = getattr(push, "latest_render_for", None)
+    latest = latest_fn(device.id) if callable(latest_fn) else None
+    if not isinstance(latest, dict):
+        return ""
+    return sent_thumb_url(latest.get("composition_digest")) or sent_thumb_url(
+        latest.get("preview_digest")
+    )
+
+
 def _heard_from(device: Any) -> tuple[float | None, bool]:
     """``(last heartbeat epoch, recent for its wake interval)``."""
     from app.device_capability import heartbeat_freshness
@@ -1522,6 +1537,7 @@ def _build_lineups_view(
         frame, nothing_sent = _frame_state(d) if not on_pid else (None, False)
         last_seen, heard = _heard_from(d)
         pending = _frame_pending(d)
+        pending_thumb = _pending_thumb(d) if pending else ""
         w, h, spec = _device_size(d)
         published, published_known = _published_state(d)
         color = display_color_mode(
@@ -1552,6 +1568,7 @@ def _build_lineups_view(
                 last_seen=last_seen,
                 heard=heard,
                 pending=pending,
+                pending_thumb_url=pending_thumb,
             )
         )
     today = now.weekday()

@@ -21,6 +21,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Lineups: for album, comics and illustrated-news dashboards the arrows draw another picture (and go back through the ones drawn) instead of choosing; Push sends the picture shown.
 - Lineups: pushing a step from a lineup marks that lineup live, even one that does not run today; sending something by hand marks none.
 - Lineups: a block that runs all day and carries on into tomorrow no longer counts down to an end; it says when quiet hours pause it.
+- Lineups: a display's top thumbnail always shows what is on the frame; what waits for it, from a lineup or a manual send, is a small tagged thumbnail on its corner.
 - Quiet hours: a lineup step or interval skipped overnight now lands as quiet hours end, and a sleeping display wakes for it.
 - A widget that paints with GPT Image can ask for the quality (low, medium
   or high) and the exact size of the picture, so a poster can be painted

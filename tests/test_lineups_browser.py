@@ -113,6 +113,16 @@ _FRAME = {
 _QUEUED = "A new frame is queued. The frame picks it up at its next check-in ~3:48 PM."
 
 
+_QUEUED_THUMB = {
+    "name": "News",
+    "thumb_url": _PIXEL,
+    "aspect": "800/480",
+    "orientation": "l",
+    "label": "Queued",
+    "title": _QUEUED,
+}
+
+
 def _note(state: str, label: str, sub: str = "", title: str = "") -> dict[str, str]:
     return {"state": state, "label": label, "sub": sub, "title": title or label}
 
@@ -123,14 +133,14 @@ def _header_variant(display: dict[str, Any], kind: str) -> None:
     if not kind:
         return
     display["on_screen"], display["on_screen_known"] = None, False
-    display["queued_badge"] = None
+    display["queued_thumb"] = None
     display["placeholder"] = _note("none", "No image yet")
     if kind in ("frame", "badge"):
         display["frame"] = {**_FRAME, "thumb_url": _PIXEL}
         display["show_title"] = _FRAME["title"]
         display["placeholder"] = None
         if kind == "badge":
-            display["queued_badge"] = _note("queued", "Queued", "", _QUEUED)
+            display["queued_thumb"] = _QUEUED_THUMB
     elif kind == "frame-gone":
         display["frame"] = dict(_FRAME)
         display["placeholder"] = _note("unavailable", "Image unavailable")
@@ -138,9 +148,7 @@ def _header_variant(display: dict[str, Any], kind: str) -> None:
         display["nothing_sent"] = True
         display["placeholder"] = _note("nothing", "Nothing sent yet")
     elif kind == "queued":
-        display["placeholder"] = _note(
-            "queued", "Queued", "Frame picks it up at its next check-in ~3:48 PM", _QUEUED
-        )
+        display["queued_thumb"] = {**_QUEUED_THUMB, "name": "A new frame", "thumb_url": ""}
     elif kind == "delivering":
         display["placeholder"] = _note("delivering", "Delivering")
     elif kind == "heard":
@@ -463,26 +471,34 @@ def test_header_without_a_dashboard_matches_both_renderers(live: str, hdr: str) 
         text = page.locator("#display-kitchen .lu-ds-hdr").inner_text()
         thumb = page.locator("#display-kitchen .lu-now-thumb")
         title = thumb.get_attribute("title")
-        has_img = thumb.locator("img").count()
-        gamut = thumb.locator(".lu-thumb[data-gamut]").count()
-        badge = thumb.locator(".lu-qbadge").count()
+        main = ":scope > .lu-thumb, :scope > .lu-now-wrap > .lu-thumb"
+        has_img = thumb.evaluate(f"e => e.querySelector('{main}').querySelectorAll('img').length")
+        gamut = int(thumb.evaluate(f"e => e.querySelector('{main}').hasAttribute('data-gamut')"))
+        tagged = thumb.locator(".lu-qthumb .lu-qtag").count()
+        tag_on_main = thumb.evaluate(
+            f"e => e.querySelector('{main}').querySelectorAll('.lu-qtag').length"
+        )
+        queued_title = thumb.locator(".lu-qthumb").first.get_attribute("title") if tagged else None
         thumb_text = thumb.inner_text()
         browser.close()
     assert len(server) == 2
     assert _shape(server[1]) == _shape(re.search(r"<header.*?</header>", client[1], re.S).group(0))
     assert "?" not in thumb_text
+    assert tag_on_main == 0, "the header thumb is the glass; only the small one is tagged"
+    assert (tagged, queued_title) == ((1, _QUEUED) if hdr in ("badge", "queued") else (0, None))
     if hdr == "badge":
-        assert has_img == 1 and badge == 1 and title == _QUEUED
+        assert has_img == 1 and title == _FRAME["title"]
         assert "a frame sent by hand" in text
     elif hdr.startswith("frame"):
         assert "a frame sent by hand" in text and "unknown" not in text
-        assert title == _FRAME["title"] and badge == 0
+        assert title == _FRAME["title"]
         # A real thumb carries the display-color treatment; the placeholder has none.
         assert (has_img, gamut) == ((1, 1) if hdr == "frame" else (0, 0))
     elif hdr == "nothing":
         assert "Nothing sent yet" in text and title == "Nothing sent yet"
     elif hdr == "queued":
-        assert "Queued" in text and "next check-in ~3:48 PM" in text and title == _QUEUED
+        assert "No image yet" in text and title == "No image yet"
+        assert "Queued" in thumb_text
     elif hdr == "delivering":
         assert "Delivering" in text
     elif hdr == "heard":
@@ -3856,3 +3872,35 @@ def test_all_day_block_row_matches_in_both_renderers_and_has_no_end(
             assert want in t
         else:
             assert "pauses" not in t and "paused" not in t
+
+
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+@pytest.mark.parametrize("width", [360, 1440])
+def test_the_queued_thumbnail_sits_on_the_glass_thumbs_corner_and_is_only_a_label(
+    live: str, scheme: str, width: int
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, _ = _open(p, live, width=width, scheme=scheme, pics=True)
+        fig = page.locator("#display-kitchen .lu-now-thumb")
+        main = fig.locator(".lu-now-wrap > .lu-thumb").bounding_box()
+        small = fig.locator(".lu-qthumb .lu-thumb").bounding_box()
+        assert main and small and fig.locator(".lu-qtag").inner_text() == "Queued"
+        # A corner overlay: smaller than the glass thumb, over its bottom right corner.
+        assert small["width"] < main["width"] and small["height"] < main["height"]
+        assert abs((small["x"] + small["width"]) - (main["x"] + main["width"])) <= 16
+        assert abs((small["y"] + small["height"]) - (main["y"] + main["height"])) <= 16
+        assert page.evaluate("() => document.documentElement.scrollWidth <= innerWidth")
+        # The header thumb is the picture on the glass (Family sits on the kitchen display).
+        assert fig.get_attribute("title").startswith("On screen:")
+        # A label, not a control: no lightbox, and the card does not fold.
+        fig.locator(".lu-qthumb").click(position={"x": 4, "y": 4})
+        assert page.locator(LB).count() == 0
+        assert page.locator("#display-kitchen .lu-ds-body").is_visible()
+        # The glass thumb still zooms.
+        fig.locator(".lu-now-wrap > .lu-thumb").click(position={"x": 6, "y": 6})
+        assert page.locator(LB).count() == 1
+        page.keyboard.press("Escape")
+        assert page._lu_errors == []
+        browser.close()
