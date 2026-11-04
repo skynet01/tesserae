@@ -825,28 +825,7 @@
 
 /* ---- Power ------------------------------------------------------------- */
 .dx-dp .dx-power-chart .dx-battery-chartbox { margin: 0; }
-.dx-dp .dx-power-chart .dx-stat-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 24px;
-  margin: 10px 0 0;
-  padding: 0;
-  border: 0;
-  background: none;
-}
-.dx-dp .dx-power-chart .dx-stat-tile {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 0;
-  border: 0;
-  background: none;
-  box-shadow: none;
-  min-width: 0;
-}
-.dx-dp .dx-power-chart .dx-stat-label { order: 1; font-size: var(--t-type-help); color: var(--t-fg-soft); text-transform: none; letter-spacing: 0; font-family: var(--t-font); }
-.dx-dp .dx-power-chart .dx-stat-value { order: 2; font-size: var(--t-type-body); font-weight: 700; color: var(--t-fg); }
-.dx-dp .dx-power-chart .dx-stat-sub { order: 3; font-size: var(--t-type-help); color: var(--t-fg-soft); }
+.dx-dp .dx-power-chart .dx-stat-grid { margin-top: 12px; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
 .dx-dp .dx-power-chart .dx-battery-hint { margin: 8px 0 0; font-size: var(--t-type-help); color: var(--t-fg-soft); }
 .dx-dp .dx-offset > summary {
   list-style: none;

@@ -164,7 +164,6 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Visionect: a sleeping frame shows the picture it actually holds, with newer ones marked Queued until it wakes.
 
 - Device batteries: the chart tooltip is readable in the dark theme, and dots are no longer cut off at the edges.
-- Device batteries: Visionect frames no longer show drain predictions.
 - History: 12-hour times no longer overlap the thumbnail.
 - A link now always sits left of a button, and the primary action is rightmost,
   across the admin pages, dialogs and banners.
