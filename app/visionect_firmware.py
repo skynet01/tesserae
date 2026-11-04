@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -49,6 +50,12 @@ FAILED_RETRY_S = 15 * 60.0
 APP_NAME = "UniFw"
 KIND = "firmware"
 CACHE_VERSION = 1
+# Visionect's own release notes, per firmware version. The source of the docs
+# page: the same text, with one section per release.
+NOTES_URL = "https://docs.visionect.com/_sources/TechnicalDocumentation/ReleaseNotes/VisionectFirmware.rst.txt"
+NOTES_PAGE = "https://docs.visionect.com/TechnicalDocumentation/ReleaseNotes/VisionectFirmware.html"
+MAX_NOTES_BYTES = 2 * 1024 * 1024
+NOTES_MAX_AGE_S = 24 * 3600.0
 
 
 class RepositoryError(RuntimeError):
@@ -159,6 +166,43 @@ def compatible(
     return out
 
 
+_NOTES_RELEASE = re.compile(r"^Release\s+(\d+\.\d+\.\d+)\s*$")
+_NOTES_HEADING = re.compile(r"^\*\*(.+?):?\*\*:?\s*$")
+_NOTES_ITEM = re.compile(r"^\s*[*-]\s+(.*\S)\s*$")
+_NOTES_RULE = re.compile(r"^[=~^\-]{3,}\s*$")
+
+
+def parse_release_notes(text: str) -> dict[str, list[dict[str, Any]]]:
+    """Visionect's release notes as ``{version: [{"title", "items"}]}``.
+
+    The file has a ``Release 7.3.4358`` heading per release, then ``**Changes:**``
+    style titles over ``*`` lists. Anything else in it is left out, and a section
+    with nothing in it isn't listed."""
+    notes: dict[str, list[dict[str, Any]]] = {}
+    sections: list[dict[str, Any]] | None = None
+    for line in text.splitlines():
+        release = _NOTES_RELEASE.match(line)
+        if release:
+            sections = notes.setdefault(release.group(1), [])
+            continue
+        if sections is None or _NOTES_RULE.match(line):
+            continue
+        heading = _NOTES_HEADING.match(line.strip())
+        if heading:
+            sections.append({"title": heading.group(1), "items": []})
+            continue
+        item = _NOTES_ITEM.match(line)
+        if item and sections:
+            sections[-1]["items"].append(item.group(1).replace("``", ""))
+        elif line.startswith("  ") and line.strip() and sections and sections[-1]["items"]:
+            sections[-1]["items"][-1] += " " + line.strip()  # a wrapped item
+    return {
+        version: kept
+        for version, parts in notes.items()
+        if (kept := [s for s in parts if s["items"]])
+    }
+
+
 def _read_capped(resp: Any, limit: int) -> bytes:
     data = resp.read(limit + 1)
     if len(data) > limit:
@@ -192,6 +236,9 @@ class FirmwareRepository:
         self._failed_at = 0.0
         self._loaded = False
         self._refreshing = False
+        self._notes: dict[str, list[dict[str, Any]]] | None = None
+        self._notes_checked_at = 0.0
+        self._notes_refreshing = False
         self.last_error = ""
         self.generation = 0
         """Bumped whenever the list changes or a check finishes, so a page can
@@ -355,6 +402,68 @@ class FirmwareRepository:
         finally:
             with contextlib.suppress(OSError):
                 tmp.unlink()
+
+    # -- release notes -------------------------------------------------------
+
+    @property
+    def _notes_path(self) -> Path:
+        return self.cache_dir / "notes.json"
+
+    def notes_for(self, version: str) -> list[dict[str, Any]]:
+        """Visionect's notes for a version, from the cache; empty when it has
+        published none or they aren't here yet. No network."""
+        with self._lock:
+            if self._notes is None:
+                self._notes = {}
+                try:
+                    doc = json.loads(self._notes_path.read_text(encoding="utf-8"))
+                    self._notes = dict(doc["notes"])
+                    self._notes_checked_at = float(doc["checked_at"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            return list(self._notes.get(version) or [])
+
+    def refresh_notes(self) -> bool:
+        """Ask for the notes again. True when the cache is now current."""
+        req = urllib.request.Request(NOTES_URL, headers={"User-Agent": "Tesserae"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                text = _read_capped(resp, MAX_NOTES_BYTES).decode("utf-8", "replace")
+        except (OSError, http.client.HTTPException, RepositoryError) as exc:
+            logger.info("visionect: firmware release notes not reachable (%s)", exc)
+            with self._lock:
+                self._notes_checked_at = self._clock()  # not again until the next check is due
+            return False
+        notes = parse_release_notes(text)
+        with self._lock:
+            self._notes = notes
+            self._notes_checked_at = self._clock()
+            self.generation += 1
+        try:
+            self._write_atomic(
+                self._notes_path,
+                json.dumps({"checked_at": self._notes_checked_at, "notes": notes}).encode(),
+            )
+        except OSError as exc:
+            logger.warning("visionect: couldn't cache the firmware release notes: %s", exc)
+        return True
+
+    def refresh_notes_in_background(self) -> None:
+        self.notes_for("")  # loads the cache and when it was checked
+        with self._lock:
+            due = self._clock() - self._notes_checked_at >= NOTES_MAX_AGE_S
+            if not due or self._notes_refreshing:
+                return
+            self._notes_refreshing = True
+
+        def run() -> None:
+            try:
+                self.refresh_notes()
+            finally:
+                with self._lock:
+                    self._notes_refreshing = False
+
+        threading.Thread(target=run, name="visionect-firmware-notes", daemon=True).start()
 
     # -- the files -----------------------------------------------------------
 

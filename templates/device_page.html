@@ -632,8 +632,6 @@
           {#- What the bound sign can be asked to do (devices_visionect_action;
               only while it is connected). -#}
           <div class="dx-frame-actions">
-            {% if sign.note %}<span class="dx-help">{{ sign.note }}</span>
-            {% elif not sign.connected %}<span class="dx-help">The frame takes these while it's connected.</span>{% endif %}
             <span class="dx-btn-row">
               {% for action, icon, label, title in [
                   ('network', 'wifi-high', 'Network details', 'Read the frame\'s IP settings and server now'),
@@ -648,6 +646,8 @@
               </form>
               {% endfor %}
             </span>
+            {% if sign.note %}<span class="dx-help">{{ sign.note }}</span>
+            {% elif not sign.connected %}<span class="dx-help">The frame takes these while it's connected.</span>{% endif %}
           </div>
           {% if sign.error %}
           <div class="dx-band is-warn"><i class="ph ph-warning" aria-hidden="true"></i><div class="dx-band-text"><p>{{ sign.error }}</p></div></div>
@@ -670,12 +670,11 @@
           {% set _fwv = vs.firmware if vs and vs.firmware else none %}
           {% if sign and _fwv %}
           {% set _fl = _fwv.flash %}
-          {% set _default = (_fwv.options|rejectattr('installed')|first).value if _fwv.update_available and (_fwv.options|rejectattr('installed')|list) else '' %}
           <div class="dx-fw" id="firmware" data-render-sync="firmware:{{ section.device_id }}">
             <dl class="dx-kv">
               <div><dt>Installed firmware</dt><dd>{{ _fwv.installed or 'Unknown' }}</dd></div>
               <div><dt>Latest available</dt><dd>
-                {%- if _fwv.latest %}{{ _fwv.latest }}{% if _fwv.update_available %} <span class="tg tg--warn">Update available</span>{% endif %}
+                {%- if _fwv.latest %}{{ _fwv.latest }}{% if _fwv.update_available %} <a class="tg tg--warn" href="{{ url_for('auth.firmware_index') }}" title="Open the Firmware page">Update available</a>{% endif %}
                 {%- else %}<span class="dx-help">{{ _fwv.unknown_because or 'Not known right now' }}</span>{% endif -%}
               </dd></div>
             </dl>
@@ -688,19 +687,6 @@
                 <p class="dx-help">{{ _fl.text }}</p>
               </div>
             </div>
-            {% endif %}
-            {% if _fwv.options and not (_fl and _fl.active) %}
-            <form class="dx-frame-actions" method="post" action="{{ _fwv.endpoint }}"
-                  onsubmit="var o = this.checksum.options[this.checksum.selectedIndex]; return confirm('Flash firmware ' + o.text + ' onto the frame?\n\nThe frame restarts into its bootloader, takes the update (about a minute) and restarts again. Do not power it off meanwhile: an interrupted update can leave it unable to start, and only Visionect\'s USB Configurator may bring it back. Tesserae has not seen that recover on its own.');">
-              <span class="dx-help">{% if _fwv.blocked %}{{ _fwv.blocked }}{% else %}Needs the frame connected and its battery above {{ _fwv.min_battery }}%. Older versions can be chosen too.{% endif %}</span>
-              <span class="dx-btn-row">
-                <label class="sr-only" for="{{ section.id }}-fw-version">Firmware version</label>
-                {{ dx_select(section.id ~ '-fw-version', 'checksum', _default, _fwv.options, blank_label='Choose a version', attrs='required') }}
-                <button type="submit" class="dx-btn is-sm is-primary" title="Flash the chosen firmware onto the frame"{% if not _fwv.can_flash %} disabled{% endif %}>
-                  <i class="ph ph-cpu" aria-hidden="true"></i><span>Update firmware</span>
-                </button>
-              </span>
-            </form>
             {% endif %}
           </div>
           {% endif %}

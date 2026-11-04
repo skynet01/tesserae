@@ -352,3 +352,46 @@ def test_a_download_cut_short_is_a_plain_failure(tmp_path: Path) -> None:
             repo.fetch(build)
     finally:
         listener.close()
+
+
+NOTES = """==================
+Visionect Firmware
+==================
+
+Intro paragraph.
+
+Firmware version 7
+------------------
+
+Release 7.3.4358
+~~~~~~~~~~~~~~~~~
+
+**Improvements:**
+ * First thing.
+ * Second thing
+   wrapped.
+
+Release 7.1.4276
+~~~~~~~~~~~~~~~~~
+
+**Changes:**
+ * ``CODE`` change.
+
+**Fixes:**
+ * A fix.
+
+Release 6.0.1
+~~~~~~~~~~~~~
+
+Nothing listed.
+"""
+
+
+def test_release_notes_are_split_by_version() -> None:
+    notes = fwrepo.parse_release_notes(NOTES)
+    assert notes["7.3.4358"] == [
+        {"title": "Improvements", "items": ["First thing.", "Second thing wrapped."]}
+    ]
+    assert [s["title"] for s in notes["7.1.4276"]] == ["Changes", "Fixes"]
+    assert notes["7.1.4276"][0]["items"] == ["CODE change."]
+    assert "6.0.1" not in notes and "7.4.4407" not in notes

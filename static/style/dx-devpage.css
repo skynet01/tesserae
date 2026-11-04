@@ -814,7 +814,6 @@
 .dx-dp .dx-empty-title { font-weight: 700; }
 
 .dx-dp .dx-frame-actions { display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap; margin-top: 12px; }
-.dx-dp .dx-frame-actions .dx-btn-row { margin-left: auto; }
 .dx-dp .dx-collect { display: flex; align-items: flex-start; gap: 12px 20px; flex-wrap: wrap; padding: 4px 0 12px; }
 .dx-dp .dx-collect-text { flex: 1; min-width: 220px; }
 .dx-dp .dx-collect-text .dx-help { margin-top: 2px; }
@@ -933,7 +932,6 @@
   .dx-dp .dx-kv { grid-template-columns: minmax(0, 1fr); }
   .dx-dp .dx-kv dt { padding-bottom: 0; }
   .dx-dp .dx-kv dd { padding-top: 2px; }
-  .dx-dp .dx-frame-actions .dx-btn-row { margin-left: 0; }
   .dx-dp .dx-li { flex-wrap: wrap; }
   .dx-dp .dx-li-when { min-width: 0; }
   .dx-dp .dx-collect .dx-btn-row { flex-wrap: wrap; }

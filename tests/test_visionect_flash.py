@@ -652,22 +652,14 @@ def test_the_page_shows_versions_and_the_control_only_for_a_visionect_sign(
         "Installed firmware",
         "Latest available",
         "Update available",
-        "7.5.1 (newest)",
-        "7.4.4407 (installed)",
-        "7.3.4358 (downgrade)",
-        "Update firmware",
-        'name="checksum"',
-        "/settings/devices/hall/visionect-firmware",
-        "USB Configurator",  # the risk is in the confirm dialog
         'data-render-sync="firmware:hall"',
     ):
         assert text in page, text
     # The rail's Firmware row says an update is there.
     assert "v7.5.1 available" in page
-    # Newest is the default choice; the primary button is last in its row.
-    assert 'value="7ffffff0" selected' in page
-    row = page[page.index("dx-frame-actions", page.index('id="firmware"')) :]
-    assert row.index("<select") < row.index("Update firmware")
+    # The flash itself is on the Firmware page, and the tag goes there.
+    assert 'name="checksum"' not in page
+    assert '<a class="tg tg--warn" href="/settings/firmware"' in page
     # Not a Visionect device: none of it.
     other = client.get("/settings/devices/porch").get_data(as_text=True)
     for text in ("Installed firmware", "Latest available", "Update firmware", "visionect-firmware"):
@@ -721,7 +713,6 @@ def test_the_page_shows_progress_and_the_result(
     assert "Updating firmware to 7.3.4358" in page
     assert "Block 77 of 184 (42%)" in page
     assert '<progress class="dx-progress" max="100" value="42"' in page
-    assert "Update firmware" not in page  # no second flash from the page
     done = {
         **flash,
         "active": False,
@@ -946,5 +937,60 @@ def test_a_reboot_for_a_flash_goes_out_anyway_past_the_wait(h: Harness) -> None:
             lambda x: any(int.from_bytes(f.payload[:4], "little") == 1 for f in x.commands()),
             timeout=4.0,
         )
+    finally:
+        sign.close()
+
+
+def test_the_firmware_page_flashes_a_visionect_frame_with_visionect_s_notes(
+    client_app, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app, client = client_app
+    fake = fake_service([])
+    for build in fake.firmware_view("hall")["builds"]:
+        build["notes"] = (
+            [{"title": "Changes", "items": ["Fixed <the> thing"]}]
+            if build["version"] == "7.5.1"
+            else []
+        )
+    view = fake.firmware_view("hall")
+    fake.firmware_view = lambda _d: view
+    monkeypatch.setattr(visionect, "service", lambda: fake)
+    page = client.get("/settings/firmware").get_data(as_text=True)
+    for text in (
+        "official Visionect firmware",
+        "7.5.1 (newest)",
+        "7.3.4358 (downgrade)",
+        "USB Configurator",  # the risk is in the confirm dialog
+        "/settings/devices/hall/visionect-firmware",
+        "update available",
+        "Fixed &lt;the&gt; thing",  # the docs' text is escaped
+        "Visionect hasn't published notes",
+    ):
+        assert text in page, text
+    assert "USB update only" not in page.split("Fleet rollout")[0]
+    assert 'value="7ffffff0" selected' in page
+    assert 'data-fw-notes="7ffffff0">' in page  # the default choice's notes show
+    assert 'data-fw-notes="a529a106" hidden' in page
+    # Nothing to stage for this kind in Fleet rollout.
+    assert "fw-fleet-kind" not in page or "<code>visionect" not in page
+
+
+def test_a_flash_from_the_firmware_page_comes_back_to_it(
+    client_app, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _app, client = client_app
+    asked: list[tuple[str, str]] = []
+    monkeypatch.setattr(visionect, "service", lambda: fake_service(asked))
+    resp = client.post("/settings/devices/hall/visionect-firmware", data={"checksum": "a529a106"})
+    assert resp.status_code == 302 and resp.headers["Location"].endswith("/settings/firmware")
+    assert asked == [("hall", "a529a106")]
+
+
+def test_a_firmware_view_says_nothing_about_an_update_on_the_newest_build(h: Harness) -> None:
+    sign = connect(h)  # reports 7.4.4407, the newest for its hardware in LIST or not
+    try:
+        view = h.svc.firmware_view("lobby")
+        newest = view["builds"][0]["version"]
+        assert view["update_available"] is (newest != "7.4.4407")
     finally:
         sign.close()

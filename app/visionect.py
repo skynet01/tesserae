@@ -60,7 +60,7 @@ from typing import Any
 
 from flask import Flask
 
-from app import background_loops, device_service, visionect_flash
+from app import background_loops, device_service, online, visionect_flash
 from app.device_loader import Device, DeviceRegistry
 from app.visionect_bootloader import BootloaderError, parse_hello
 from app.visionect_firmware import (
@@ -2391,8 +2391,13 @@ class VisionectService:
         view = self.sign_view(uuid)
         job = self._flash_jobs.get(uuid)
         repo = self._repo()
-        if repo is not None:
+        ctx = self._ctx
+        settings = ctx.app.config.get("SETTINGS_STORE") if ctx is not None else None
+        # Looking for builds is optional traffic, so the app's online switch
+        # covers it. Downloading a chosen build is always something asked for.
+        if repo is not None and online.online_enabled(settings):
             repo.refresh_in_background()
+            repo.refresh_notes_in_background()
         ident = (view or {}).get("identity") or {}
         installed = ident.get("firmware")
         checksum = ident.get("checksum")
@@ -2409,6 +2414,7 @@ class VisionectService:
                     "installed": is_installed,
                     "newest": i == 0,
                     "downgrade": installed is not None and b.version < installed,
+                    "notes": repo.notes_for(b.version_text) if repo is not None else [],
                 }
             )
         latest = builds[0] if builds else None
@@ -2440,7 +2446,7 @@ class VisionectService:
         if builds is not None:
             return "Visionect lists no firmware for this frame's hardware and display"
         if repo is not None and repo.builds() is None:
-            return "Visionect's firmware list hasn't been fetched yet, or can't be reached"
+            return "Visionect's firmware list hasn't been fetched yet, or can't be reached (it needs online features on)"
         if (view or {}).get("identity"):
             return "Waiting for the frame to report its hardware and display"
         return "Waiting for the frame's next check-in"

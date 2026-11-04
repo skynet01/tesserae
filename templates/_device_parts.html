@@ -38,7 +38,8 @@
 <div class="dx-live" data-render-sync="tiles:{{ section.get('device_id') }}">
 {{ stat_tile('Showing', section.overview.showing, (base ~ '#lineups') if base is not none else '', "Open this display's lineups") }}
 {{ stat_tile('Battery', section.overview.battery, (base ~ '#power') if base is not none and section.battery_offset_endpoint else '', 'Open power settings') }}
-{{ stat_tile('Firmware', section.overview.firmware, (base ~ '#connection') if base is not none else '', 'Open firmware and connection details') }}
+{%- set _fw_update = section.overview.firmware.update or ((section.status.firmware or {}).state == 'outdated' and (section.status.firmware or {}).latest) %}
+{{ stat_tile('Firmware', section.overview.firmware, url_for('auth.firmware_index') if _fw_update else ((base ~ '#connection') if base is not none else ''), 'Open the Firmware page' if _fw_update else 'Open firmware and connection details') }}
 {{ stat_tile('Next update', section.overview.next_wake, (base ~ '#timing') if base is not none else '', 'Open wake timing') }}
 {%- if section.overview.queued %}
 <p class="dx-queued{% if section.overview.queued.live %} is-live{% endif %}" role="status" data-device-queued>
@@ -314,10 +315,11 @@
     <span class="dx-vital-v"><span class="dx-bars" aria-hidden="true">{% for n in [1, 2, 3, 4] %}<span class="dx-bar{% if n <= tiles.signal.bars %} is-on{% endif %}"></span>{% endfor %}</span>{{ tiles.signal.label }}</span>
     <span class="sr-only">, {{ sig_tip }}</span></a></li>
   {%- endif %}
-  <li><a class="dx-vital" href="#connection"{% if ov.firmware.sub %} title="{{ ov.firmware.sub }}"{% endif %}>
+  {%- set fw_update = (fw.state == 'outdated' and fw.latest) or ov.firmware.update %}
+  <li><a class="dx-vital" href="{{ url_for('auth.firmware_index') if fw_update else '#connection' }}"{% if ov.firmware.sub %} title="{{ ov.firmware.sub }}"{% endif %}>
     <span class="dx-vital-k">Firmware</span>
     <span class="dx-vital-v{% if ov.firmware.muted %} is-muted{% endif %}">{{ ov.firmware.value }}
-      {%- if (fw.state == 'outdated' and fw.latest) or ov.firmware.update %}<span class="tg tg--warn dx-v-badge">update</span>{% endif %}</span>
+      {%- if fw_update %}<span class="tg tg--warn dx-v-badge">update</span>{% endif %}</span>
     {%- if ov.firmware.sub %}<span class="sr-only">, {{ ov.firmware.sub }}</span>{% endif %}</a></li>
   {%- set h = st.health %}
   <li><a class="dx-vital" href="#connection" title="{% if h == 'ok' %}Online{% elif h == 'warn' %}Quiet{% elif h == 'stale' %}Stale{% else %}No heartbeat yet{% endif %}">
@@ -340,13 +342,18 @@
 {%- set overdue = st.health == 'stale' -%}
 {%- set outdated = fw.state == 'outdated' and fw.latest -%}
 {%- set bt = mo and mo.mode == 'bluetooth' -%}
+{%- set _vs = section.visionect_setup -%}
+{%- set stuck = (_vs.sign.stuck if _vs and _vs.sign else 0) -%}
 <div class="dx-callouts-wrap" data-render-sync="callouts:{{ section.get('device_id') }}">
-{%- if ov.queued or outdated or overdue or low or bt or coll %}
+{%- if ov.queued or outdated or overdue or low or bt or coll or stuck %}
 <ul class="dx-callouts" aria-label="Needs attention">
   {%- if ov.queued %}
   <li class="dx-callout{% if ov.queued.live %} is-live{% endif %}" role="status" title="{{ ov.queued.title }}" data-device-queued>
     <i class="ph ph-clock-countdown is-warn" aria-hidden="true"></i><span>{{ ov.queued.text }}</span>
   </li>
+  {%- endif %}
+  {%- if stuck %}
+  <li class="dx-callout" data-frame-stuck-callout><i class="ph ph-warning is-bad" aria-hidden="true"></i><span>Frame looks stuck: {{ stuck }} reconnects in 15 minutes, no picture</span><a href="#connection">Details</a></li>
   {%- endif %}
   {%- if outdated %}
   <li class="dx-callout"><i class="ph ph-arrow-circle-up is-warn" aria-hidden="true"></i><span>Firmware v{{ fw.latest }} available</span><a href="{{ url_for('auth.firmware_index') }}" title="{{ fw.notes_headline or ('Latest available: v' ~ fw.latest) }}. Open the Firmware page to roll it out.">Update</a></li>

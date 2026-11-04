@@ -19,6 +19,7 @@ from werkzeug.wrappers import Response
 from app import visionect
 from app.clock_text import clock_of
 from app.device_loader import Device
+from app.visionect_firmware import NOTES_PAGE
 
 from ._shared import bp, device_kinds, devices, settings_store
 
@@ -73,15 +74,19 @@ def _health_text(health: Any) -> str:
     """The last day of a frame's connections in a line; only what happened."""
     if not isinstance(health, dict) or not health.get("connections"):
         return ""
-    parts = [f"{health['connections']} connections"]
+
+    def count(n: int, name: str) -> str:
+        return f"{n} {name}{'' if n == 1 else 's'}"
+
+    parts = [count(health["connections"], "connection")]
     for key, name in (
-        ("protocol_errors", "protocol errors"),
-        ("connection_errors", "connection errors"),
-        ("reboots", "reboots"),
+        ("protocol_errors", "protocol error"),
+        ("connection_errors", "connection error"),
+        ("reboots", "reboot"),
     ):
         if health.get(key):
-            parts.append(f"{health[key]} {name}")
-    parts.append(f"{health.get('pictures', 0)} pictures")
+            parts.append(count(health[key], name))
+    parts.append(count(health.get("pictures", 0), "picture"))
     return ", ".join(parts)
 
 
@@ -109,7 +114,16 @@ def _visionect_firmware(svc: Any, device: Device) -> dict[str, Any] | None:
         if b["downgrade"]:
             tags.append("downgrade")
         label = b["version"] + (f" ({', '.join(tags)})" if tags else "")
-        options.append({"value": b["checksum"], "label": label, "installed": b["installed"]})
+        options.append(
+            {
+                "value": b["checksum"],
+                "label": label,
+                "version": b["version"],
+                "installed": b["installed"],
+                "downgrade": b["downgrade"],
+                "notes": b.get("notes") or [],
+            }
+        )
     flash = fv["flash"]
     flash_view = None
     if flash:
@@ -143,6 +157,7 @@ def _visionect_firmware(svc: Any, device: Device) -> dict[str, Any] | None:
         "unknown_because": fv.get("unknown_because", ""),
         "min_battery": fv["min_battery"],
         "endpoint": url_for("auth.devices_visionect_firmware", instance_id=device.id),
+        "notes_page": NOTES_PAGE,
     }
 
 
@@ -419,12 +434,10 @@ def devices_visionect_action(instance_id: str, action: str) -> Response:
 
 @bp.post("/settings/devices/<instance_id>/visionect-firmware")
 def devices_visionect_firmware(instance_id: str) -> Response:
-    """Flash a chosen firmware build onto a Visionect sign (the device page's
-    Troubleshooting section). Explicit only: the build is validated and
-    downloaded, then the sign is rebooted into its bootloader."""
-    redirect_to = redirect(
-        url_for("auth.device_page", instance_id=instance_id, _anchor="connection")
-    )
+    """Flash a chosen firmware build onto a Visionect sign (from the Firmware
+    page). Explicit only: the build is validated and downloaded, then the sign is
+    rebooted into its bootloader."""
+    redirect_to = redirect(url_for("auth.firmware_index"))
     device = devices().get(instance_id)
     if device is None or not visionect.is_visionect_device(device):
         flash(f"Unknown Visionect device {instance_id!r}.", "error")
@@ -440,7 +453,7 @@ def devices_visionect_firmware(instance_id: str) -> Response:
     else:
         flash(
             f"Updating {device.name}: it restarts into its bootloader and takes the new "
-            "firmware, about a minute in all. Progress shows below; don't power it off.",
+            "firmware, about a minute in all. Progress shows in its row; don't power it off.",
             "ok",
         )
     return redirect_to
