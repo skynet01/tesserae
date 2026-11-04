@@ -12,14 +12,13 @@
 {% block title %}Widgets, Tesserae{% endblock %}
 
 {% block main %}
-<header class="page-head">
-  <h1><i class="ph ph-puzzle-piece"></i> Widgets</h1>
-  <p class="lede">Every loaded widget, plus the supporting fonts + data plugins that back them. Browse the catalog to install more. Bundled plugins ship with Tesserae: you can disable them, not remove them.</p>
-  <div class="page-head-cta">
-    <a class="dx-btn-primary" href="{{ url_for('marketplace.browse') }}">
-      <i class="ph ph-storefront" aria-hidden="true"></i>
-      <span>Browse catalog</span>
-    </a>
+<header class="page-head dx-dash-head">
+  <div class="dx-dash-head-text">
+    <h1><i class="ph ph-puzzle-piece"></i> Widgets</h1>
+    <p class="lede">Every loaded widget, plus the supporting fonts + data plugins that back them. Browse the catalog to install more. Bundled plugins ship with Tesserae: you can disable them, not remove them.</p>
+  </div>
+  {#- The actions sit right, the primary one last (as on Dashboards). -#}
+  <div class="page-head-cta dx-dash-head-actions">
     {# A widget you wrote for this install only. The form submits as soon as a
        file is picked; the label is the visible button. #}
     <form method="post" action="{{ url_for('marketplace.upload_widget') }}"
@@ -30,6 +29,10 @@
                hidden onchange="this.form.submit()">
       </label>
     </form>
+    <a class="dx-btn-primary" href="{{ url_for('marketplace.browse') }}">
+      <i class="ph ph-storefront" aria-hidden="true"></i>
+      <span>Browse catalog</span>
+    </a>
   </div>
 </header>
 
