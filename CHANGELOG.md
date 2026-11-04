@@ -15,6 +15,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Device batteries: each chart has its own 12h / 24h / 7d / 30d range, remembered per device, and drag-to-zoom.
 - Collapsible sections on the Server, System, About, Stats, Widgets, Companion, Generative AI, Cloud relay, calendar-feed and gallery pages, remembered per page; `section_card` takes `collapsible=False` to opt out.
 - Lineups: next update times are right for a display asleep in quiet hours, such as no more ~6:31 PM after a 9 AM wake.
+- Quiet hours: a lineup step or interval skipped overnight now lands as quiet hours end, and a sleeping display wakes for it.
 
 - Paper's phone shell. The four places you go most (Send, Dashboards,
   Lineups, History) sit in a tab bar along the bottom and More lifts the
