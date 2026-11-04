@@ -77,7 +77,7 @@ FLAGS_MORE = 0x0009
 """Record flags word on nearly every record but the last."""
 FLAGS_MORE_ALT = 0x0008
 """Also seen mid-file: once in most builds, never in others (7.4.4407 block 130).
-Its meaning isn't known; the file is relayed unchanged either way."""
+Its meaning isn't known. The frame acks it like any other (measured on 7.4.4407)."""
 FLAGS_LAST = 0x000D
 """Record flags word on the last record."""
 

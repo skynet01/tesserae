@@ -6,10 +6,12 @@ without any I/O so it can be moved into `pyvisionect` as it is.
 
 ## What was measured
 
-One capture of Visionect's own Software Suite 7.6.5 flashing a Place & Play 32"
-(hardware 1.1.0, hardware name id 8, display id 3255107884) from firmware
-7.4.4407 (`2cb91ed6`) to 7.3.4358 (`a529a106`), bootloader 6.3.3830. One flash,
-one frame, one firmware build. A decoder over the capture reproduces every
+Two captures of Visionect's own Software Suite 7.6.5 flashing a Place & Play 32"
+(hardware 1.1.0, hardware name id 8, display id 3255107884), bootloader 6.3.3830:
+from firmware 7.4.4407 (`2cb91ed6`) to 7.3.4358 (`a529a106`), and back to
+7.4.4407. One frame, two builds. The tables below quote the first; the second has
+the same shape, and replaying it through the module reproduces all 233336 bytes
+the Suite sent. A decoder over the capture reproduces every
 message below byte for byte, including the 232064-byte file the server relayed,
 which is identical to the body the Suite downloaded from the repository.
 
@@ -73,9 +75,9 @@ All integers are little-endian. Every bootloader message starts with the word
    next record only after the ack. Acks came 27 ms to 1.16 s after the record (median 50 ms); three took
    about a second (possibly flash erase).
    Offer to first record took 1.3 s, which was the Suite downloading the file.
-   Flag 8 doesn't appear in this capture. The published builds for this hardware
-   carry it on one block (block 130 of 7.4.4407) or not at all, and the Suite
-   flashed 7.4.4407 onto this frame in its usual 13 s.
+   Flag 8 is on one block of some builds (block 130 of 7.4.4407) and none of
+   others. The frame acked it like any other, 44 ms later, and the slowest ack in
+   that flash was 1.7 s.
    The whole flash took about 13 s.
 6. After the last ack the Suite closed the connection with a TCP reset 4.6 ms
    later. The frame then booted the new firmware and connected on the normal
