@@ -555,7 +555,7 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
             "heartbeat_min": 5,
             "settings": {
                 "touch_mode": "On",
-                "frame_sleep": "Stay awake (drains the battery)",
+                "frame_sleep": "CLI and CPU always on",
                 "wifi_ssid": "home-wifi",
                 "wifi_psk": "",
             },
@@ -578,9 +578,9 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
         "61%",
         "home-wifi · -53 dBm",
         'name="heartbeat_min"',  # the Sleep interval editor
-        "Off (stays awake)",
+        "CLI and CPU always on",
         "Full refresh asked",
-        "Sleep between check-ins",
+        "Power saving mode",
     ):
         assert text in page, text
     assert 'name="heartbeat_min" value="5"' in page

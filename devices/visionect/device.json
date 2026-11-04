@@ -4,7 +4,9 @@
   "icon": "frame-corners",
   "version": "0.1.0",
   "description": "A Visionect e-paper frame (Place & Play 32\", Joan, the 13\" boards) driven directly, with no Visionect Software Suite. The frame dials the server address in its flash on TCP 11113; Tesserae listens there, renders a 16-level grey picture and pushes it over the frame's own protocol (pyvisionect). Point the frame at this host: run Tesserae where the old Visionect server ran, or set the address over the frame's USB console. The protocol has no authentication, so keep port 11113 on your LAN. Leave the UUID blank to bind the first unknown frame that connects within an hour. Quiet hours with sleep-through put the frame into deep sleep until the window ends.",
-  "renderers": ["trmnl_png_gray16"],
+  "renderers": [
+    "trmnl_png_gray16"
+  ],
   "transport": "push",
   "panel": {
     "w": 1440,
@@ -28,151 +30,69 @@
       "min": 1,
       "max": 1440,
       "presets": [
-        {"value": 5, "label": "5 minutes"},
-        {"value": 15, "label": "15 minutes"},
-        {"value": 30, "label": "30 minutes"},
-        {"value": 60, "label": "1 hour"},
-        {"value": 120, "label": "2 hours"},
-        {"value": 360, "label": "6 hours"},
-        {"value": 720, "label": "12 hours"},
-        {"value": 1440, "label": "1 day"}
+        {
+          "value": 5,
+          "label": "5 minutes"
+        },
+        {
+          "value": 15,
+          "label": "15 minutes"
+        },
+        {
+          "value": 30,
+          "label": "30 minutes"
+        },
+        {
+          "value": 60,
+          "label": "1 hour"
+        },
+        {
+          "value": 120,
+          "label": "2 hours"
+        },
+        {
+          "value": 360,
+          "label": "6 hours"
+        },
+        {
+          "value": 720,
+          "label": "12 hours"
+        },
+        {
+          "value": 1440,
+          "label": "1 day"
+        }
       ],
-      "help": "How long the frame sleeps between check-ins. Tesserae writes it to the frame the next time it connects and saves it to the frame's flash. Custom value is in minutes."
+      "help": "How long the frame waits before sending a status after it last heard from the server, in minutes (Visionect's wording). Tesserae asks every frame for a status about every 15 minutes, so a longer value changes nothing yet. Saved to the frame's flash at its next connection."
     },
     "frame_sleep": {
       "type": "select",
       "group": "sign",
-      "label": "Sleep between check-ins",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "sleep", "label": "Sleep between check-ins"},
-        {"value": "awake", "label": "Stay awake (drains the battery)"}
-      ],
-      "help": "Whether the frame sleeps between check-ins. Staying awake keeps Wi-Fi on and drains the battery; use it only on mains power."
-    },
-    "touch_mode": {
-      "type": "select",
-      "group": "sign",
-      "label": "Touch",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "0", "label": "Off"},
-        {"value": "1", "label": "On"},
-        {"value": "3", "label": "On with beep"}
-      ],
-      "help": "Whether the frame reacts to touch, and whether it beeps."
-    },
-    "system_screens": {
-      "type": "select",
-      "group": "sign",
-      "label": "System screens",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "1", "label": "Battery"},
-        {"value": "2", "label": "Not connected"},
-        {"value": "3", "label": "Battery and not connected"}
-      ],
-      "help": "Which built-in status screens the frame may draw itself: the low-battery screen, the not-connected screen, or both."
-    },
-    "roaming_mode": {
-      "type": "select",
-      "group": "sign",
-      "label": "Wi-Fi roaming",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "0", "label": "Off"},
-        {"value": "1", "label": "On"}
-      ],
-      "help": "Lets the frame move to a stronger access point of the same network."
-    },
-    "wifi_region": {
-      "type": "select",
-      "group": "sign",
-      "label": "Wi-Fi region",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "0", "label": "Default"},
-        {"value": "1", "label": "US"},
-        {"value": "2", "label": "Europe"},
-        {"value": "3", "label": "Japan"}
-      ],
-      "help": "The regulatory region the Wi-Fi radio uses."
-    },
-    "wifi_mode": {
-      "type": "select",
-      "group": "sign",
-      "label": "Wi-Fi power mode",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "0", "label": "Default"},
-        {"value": "1", "label": "No broadcast filtering"},
-        {"value": "2", "label": "Enhanced max power save"},
-        {"value": "3", "label": "No broadcast filtering, enhanced power save"}
-      ],
-      "help": "Wi-Fi power saving behaviour. Leave on default unless the frame misses updates."
-    },
-    "epd_border": {
-      "type": "select",
-      "group": "sign",
-      "label": "Panel border",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "0", "label": "From the server"},
-        {"value": "1", "label": "White"},
-        {"value": "2", "label": "Black"}
-      ],
-      "help": "The colour of the panel's border pixels."
-    },
-    "charging_mode": {
-      "type": "select",
-      "group": "sign",
-      "label": "Battery charging",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "0", "label": "Normal"},
-        {"value": "1", "label": "Charging off"}
-      ],
-      "help": "Charging off stops the battery charging from its supply."
-    },
-    "ble_mode": {
-      "type": "select",
-      "group": "sign",
-      "label": "Bluetooth",
-      "choices": [
-        {"value": "", "label": "Leave as the frame has it"},
-        {"value": "0", "label": "Off"},
-        {"value": "1", "label": "On"}
-      ],
-      "help": "Whether the frame's Bluetooth radio is on."
-    },
-    "wifi_security": {
-      "type": "select",
-      "group": "sign_net",
-      "label": "Wi-Fi security",
+      "label": "Power saving mode",
       "choices": [
         {
           "value": "",
           "label": "Leave as the frame has it"
         },
         {
-          "value": "none",
-          "label": "None (open)"
+          "value": "sleep",
+          "label": "CLI wake on accelerometer"
         },
         {
-          "value": "wpa2",
-          "label": "WPA2"
+          "value": "awake",
+          "label": "CLI and CPU always on"
         },
         {
-          "value": "wpa2e",
-          "label": "WPA2 Enterprise"
+          "value": "cli_off",
+          "label": "CLI disabled while asleep"
         }
       ],
-      "help": "The security mode of the network the frame joins. A wrong mode leaves it offline until it is fixed over USB."
+      "help": "What stays awake between check-ins. Wake on accelerometer is the usual setting. Always on keeps the CPU running and drains the battery, so use it only on mains power. (CLI is the frame's USB console.)"
     },
-    "wifi_band": {
+    "touch_mode": {
       "type": "select",
-      "group": "sign_net",
-      "label": "Wi-Fi band",
+      "group": "sign",
+      "label": "Touch mode",
       "choices": [
         {
           "value": "",
@@ -180,18 +100,46 @@
         },
         {
           "value": "0",
-          "label": "Dual band"
+          "label": "Off"
         },
         {
           "value": "1",
-          "label": "2.4 GHz"
+          "label": "On"
+        },
+        {
+          "value": "3",
+          "label": "On + Beep"
+        }
+      ],
+      "help": "How the touch panel behaves. Frames without one don't show this."
+    },
+    "system_screens": {
+      "type": "select",
+      "group": "sign",
+      "label": "System screens",
+      "choices": [
+        {
+          "value": "",
+          "label": "Leave as the frame has it"
+        },
+        {
+          "value": "0",
+          "label": "Disabled"
+        },
+        {
+          "value": "1",
+          "label": "Battery"
         },
         {
           "value": "2",
-          "label": "5 GHz"
+          "label": "Not connected"
+        },
+        {
+          "value": "3",
+          "label": "Battery + Not connected"
         }
       ],
-      "help": "Which band the frame may join. Leave it on dual band unless you know why."
+      "help": "Which built-in screens the frame may draw itself: low battery, not connected, both, or neither."
     },
     "wifi_ssid": {
       "type": "string",
@@ -207,13 +155,6 @@
       "secret": true,
       "placeholder": "Leave blank to keep the frame's",
       "help": "8 to 64 characters. The frame never reports it back, so Tesserae sends it once for each value you save."
-    },
-    "server_address": {
-      "type": "string",
-      "group": "sign_net",
-      "label": "Server address",
-      "placeholder": "192.168.1.10:11113",
-      "help": "Where the frame connects, as host:port. Point it anywhere but this Tesserae and the frame stops checking in."
     }
   }
 }

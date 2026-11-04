@@ -10,7 +10,6 @@ is the sign's UUID, which binds a physical sign to this device.
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 # Marks the protocol for app.visionect: hardware-catalog SKUs (Joan 6, ...)
@@ -82,16 +81,6 @@ def validate_config(payload: dict[str, Any]) -> tuple[bool, str | None]:
                 return False, f"{label} must be plain ASCII text"
             if not low <= len(text) <= high:
                 return False, f"{label} must be {low} to {high} characters"
-    server = payload.get("server_address")
-    if server not in (None, ""):
-        host, _, port = str(server).strip().rpartition(":")
-        if not (
-            host
-            and re.fullmatch(r"[A-Za-z0-9._-]{1,253}", host)
-            and port.isdigit()
-            and 1 <= int(port) <= 65535
-        ):
-            return False, "server address must look like 192.168.1.10:11113"
     raw = payload.get("uuid")
     if raw is None or raw == "":
         return True, None

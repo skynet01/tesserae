@@ -149,11 +149,6 @@ def test_validate_config_checks_the_sleep_interval(visionect, minutes: object, o
         ({"wifi_psk": "short"}, False),
         ({"wifi_psk": "longenough"}, True),
         ({"wifi_psk": "caf\u00e9caf\u00e9"}, False),
-        ({"server_address": "192.168.1.10:11113"}, True),
-        ({"server_address": "tesserae.local:11113"}, True),
-        ({"server_address": "192.168.1.10"}, False),
-        ({"server_address": "host:99999"}, False),
-        ({"server_address": ""}, True),
     ],
 )
 def test_validate_config_checks_the_network_settings(visionect, payload: dict, ok: bool) -> None:

@@ -2192,32 +2192,6 @@ def test_a_long_run_of_render_failures_doesnt_overflow_the_backoff() -> None:
 # -- the sign's own settings and actions ---------------------------------------
 
 
-@pytest.fixture
-def extra_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(visionect, "READ_EXTRA_SETTINGS", True)
-
-
-def test_only_the_settings_proven_on_hardware_are_read_by_default(tmp_path: Path) -> None:
-    """The second read sent a real frame into a reconnect loop."""
-    assert visionect.READ_EXTRA_SETTINGS is False
-    h = Harness(tmp_path, uuid=UUID)
-    try:
-        assert h.svc.start()
-        sign = FakeSign(h.svc.port)
-        try:
-            sign.status()
-            assert sign.wait_for(lambda s: len(_params(s)) == 1)
-            assert {i[0] for i in _params(sign)[0]} == set(visionect.READ_PARAMS)
-            _answer(sign, {29: _u32(30), 52: _u32(0)})
-            sign.wait_for(lambda s: len(_params(s)) > 1, timeout=1.5)
-            assert len(_params(sign)) == 1
-            assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("heartbeat_min") == 30)
-        finally:
-            sign.close()
-    finally:
-        h.svc.stop()
-
-
 def _params(sign: FakeSign) -> list[list[tuple[int, int, bytes]]]:
     """Each PARAM packet the server sent, as (id, control, value) items."""
     from pyvisionect.packets import decode_payload
@@ -2258,6 +2232,8 @@ def _u32(n: int) -> bytes:
         ({"heartbeat_min": "nope"}, {}),
         ({"frame_sleep": "awake"}, {visionect.PARAM_SLEEP_DISABLE: 1}),
         ({"frame_sleep": "sleep"}, {visionect.PARAM_SLEEP_DISABLE: 0}),
+        ({"frame_sleep": "cli_off"}, {visionect.PARAM_SLEEP_DISABLE: 2}),
+        ({"system_screens": "0"}, {visionect.PARAM_SCREENS: 0}),
         ({"frame_sleep": "whatever"}, {}),
     ],
 )
@@ -2265,112 +2241,79 @@ def test_desired_params(cfg: dict[str, Any], want: dict[int, int]) -> None:
     assert visionect.desired_params(cfg) == want
 
 
-def _u16(n: int) -> bytes:
-    return n.to_bytes(2, "little")
+BASE = {29: _u32(1), 49: _u32(1), 52: _u32(0), 65: b"home-wifi"}
 
 
-# The first read (3 ids), the second read in two packets, and after a write a
-# read back of both.
-READS = 3
-AFTER_WRITE = READS + 2 + 3  # write, flash save, then the three read-back packets
-
-
-def _answer_extras(
-    sign: FakeSign,
-    first: dict[int, bytes],
-    second: dict[int, bytes],
-    refused: tuple[int, ...] = (),
+def test_settings_go_one_packet_at_a_time_as_the_suite_sends_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sign's answers to the two packets of the second read, in order
-    (``refused`` ids are read errors in the first)."""
-    _answer(sign, first, refused=refused)
-    _answer(sign, second)
-
-
-def test_sign_settings_are_read_then_written_saved_and_read_back(tmp_path: Path, extra_settings: None) -> None:
+    """Read, then each write, the flash save and the read back, every one only
+    after the frame answered the last. Five ids at most, the Suite's limit."""
+    monkeypatch.setattr(visionect, "PARAM_WAIT_S", 30.0)
     h = Harness(tmp_path, uuid=UUID)
     h.settings.sections["devices"]["lobby"].update(
-        heartbeat_min="5",
-        frame_sleep="awake",
-        touch_mode="3",
-        wifi_region="2",
-        wifi_psk="hunter22xx",
-        server_address="10.0.0.5:11113",
+        heartbeat_min="5", frame_sleep="awake", system_screens="3", wifi_psk="hunter22xx"
     )
     try:
         assert h.svc.start()
         sign = FakeSign(h.svc.port)
         try:
             sign.status()
-            # First the read, and nothing written before the answer.
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
-            assert {i[0] for i in _params(sign)[0]} == set(visionect.READ_PARAMS)
-            assert all(control == 0 for _, control, _ in _params(sign)[0])
-            _answer(sign, {29: _u32(1), 52: _u32(0), 65: b"home-wifi"})
-            # Then the second read, in packets of six.
-            assert sign.wait_for(lambda s: len(_params(s)) == 3)
-            second = [{i[0] for i in p} for p in _params(sign)[1:3]]
-            assert second == [
-                set(visionect.EXTRA_PARAMS[:6]),
-                set(visionect.EXTRA_PARAMS[6:]),
-            ]
-            # The frame has touch (off), a region, security, band and its server,
-            # but not the other settings.
-            _answer_extras(
-                sign,
-                {50: _u32(0), 144: _u32(0)},
-                {66: b"wpa2", 68: _u32(0), 18: bytes([10, 0, 0, 9]), 19: _u16(11113)},
-                refused=(49,),
-            )
-            # Then the changed settings, a flash save, and a read back of both sets.
-            assert sign.wait_for(lambda s: len(_params(s)) == AFTER_WRITE)
-            write, save = _params(sign)[3:5]
-            assert [(i[0], i[1], i[2]) for i in write] == [
+            first = _params(sign)[0]
+            assert [i[0] for i in first] == list(visionect.READ_PARAMS)
+            assert len(first) <= visionect.READ_CHUNK
+            assert all(control == 0 for _, control, _ in first)
+            # Nothing else goes until it answers. This frame has no touch panel.
+            assert not sign.wait_for(lambda s: len(_params(s)) > 1, timeout=0.5)
+            _answer(sign, BASE, refused=(50,))
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            assert [(i[0], i[1], i[2]) for i in _params(sign)[1]] == [
                 (29, 1, _u32(5)),
-                (50, 1, _u32(3)),
+                (49, 1, _u32(3)),
                 (52, 1, _u32(1)),
                 (67, 1, b"hunter22xx"),
-                (144, 1, _u32(2)),
-                (166, 1, b"10.0.0.5:11113"),
             ]
-            assert [(i[0], i[1]) for i in save] == [(53, 1)]
-            assert {i[0] for i in _params(sign)[5]} == set(visionect.READ_PARAMS)
-            _answer(sign, {29: _u32(5), 52: _u32(1), 65: b"home-wifi"})
-            _answer_extras(
+            assert not sign.wait_for(lambda s: len(_params(s)) > 2, timeout=0.5)
+            _answer(sign, {29: b"", 49: b"", 52: b"", 67: b""}, control=1)
+            assert sign.wait_for(lambda s: len(_params(s)) == 3)
+            assert [(i[0], i[1]) for i in _params(sign)[2]] == [(53, 1)]
+            _answer(sign, {53: b""}, control=1)
+            assert sign.wait_for(lambda s: len(_params(s)) == 4)
+            assert {i[0] for i in _params(sign)[3]} == set(visionect.READ_PARAMS)
+            _answer(
                 sign,
-                {50: _u32(3), 144: _u32(2)},
-                {66: b"wpa2", 68: _u32(0), 18: bytes([10, 0, 0, 5]), 19: _u16(11113)},
+                {29: _u32(5), 49: _u32(3), 52: _u32(1), 65: b"home-wifi"},
+                refused=(50,),
             )
             assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("heartbeat_min") == 5)
             view = h.svc.sign_view(UUID) or {}
             assert view["sleep_disabled"] == 1 and view["wifi"] == "home-wifi"
-            # Only what the frame answered is offered, labelled with its value.
+            # Only what the frame answered is offered: no touch mode here.
             expected = {
-                "frame_sleep": "Stay awake (drains the battery)",
-                "touch_mode": "On with beep",
-                "wifi_region": "Europe",
-                "wifi_security": "WPA2",
-                "wifi_band": "Dual band",
+                "frame_sleep": "CLI and CPU always on",
+                "system_screens": "Battery + Not connected",
                 "wifi_ssid": "home-wifi",
                 "wifi_psk": "",
-                "server_address": "10.0.0.5:11113",
             }
             _wait(lambda: (h.svc.sign_view(UUID) or {}).get("settings") == expected)
             assert (h.svc.sign_view(UUID) or {}).get("settings") == expected
             # The password is never logged.
             assert "hunter22xx" not in " ".join(line[2] for line in view["exchanges"])
-            # In step now: nothing more is written, and the password isn't
-            # sent again on the next connection.
+            # In step now: nothing more is written.
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > AFTER_WRITE, timeout=1.5)
-            assert len(_params(sign)) == AFTER_WRITE
+            sign.wait_for(lambda s: len(_params(s)) > 4, timeout=1.5)
+            assert len(_params(sign)) == 4
         finally:
             sign.close()
     finally:
         h.svc.stop()
 
 
-def test_a_refused_setting_is_reported_and_not_written_again(tmp_path: Path, extra_settings: None) -> None:
+def test_a_write_the_frame_doesnt_answer_is_never_saved_to_flash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(visionect, "PARAM_WAIT_S", 0.3)
     h = Harness(tmp_path, uuid=UUID)
     h.settings.sections["devices"]["lobby"].update(heartbeat_min="5")
     try:
@@ -2379,47 +2322,88 @@ def test_a_refused_setting_is_reported_and_not_written_again(tmp_path: Path, ext
         try:
             sign.status()
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
-            _answer(sign, {29: _u32(1), 52: _u32(0)})
-            assert sign.wait_for(lambda s: len(_params(s)) == 3)
-            _answer_extras(sign, {50: _u32(0)}, {19: _u16(11113)})
-            assert sign.wait_for(lambda s: len(_params(s)) == AFTER_WRITE)
+            _answer(sign, BASE)
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            h.push()
+            sign.wait_for(lambda s: len(_params(s)) > 2, timeout=1.5)
+            assert len(_params(sign)) == 2
+            assert "didn't answer" in (h.svc.sign_view(UUID) or {}).get("param_error", "")
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_a_flash_save_with_no_answer_still_reads_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(visionect, "PARAM_WAIT_S", 0.3)
+    h = Harness(tmp_path, uuid=UUID)
+    h.settings.sections["devices"]["lobby"].update(heartbeat_min="5")
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            _answer(sign, BASE)
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            _answer(sign, {29: b""}, control=1)
+            assert sign.wait_for(lambda s: len(_params(s)) == 3)  # the save, unanswered
+            assert sign.wait_for(lambda s: len(_params(s)) == 4, timeout=3)
+            assert not (h.svc.sign_view(UUID) or {}).get("param_error")
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_a_refused_setting_is_reported_not_saved_and_not_written_again(tmp_path: Path) -> None:
+    h = Harness(tmp_path, uuid=UUID)
+    h.settings.sections["devices"]["lobby"].update(heartbeat_min="5")
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            _answer(sign, BASE)
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
             _answer(sign, {29: _u32(0x005A0000)}, control=3)
-            _answer(sign, {29: _u32(1), 52: _u32(0)})  # the read back: unchanged
+            # No flash save: straight to the read back.
+            assert sign.wait_for(lambda s: len(_params(s)) == 3)
+            assert all(i[1] == 0 for i in _params(sign)[2])
+            _answer(sign, BASE)
             assert _wait(lambda: "refused" in (h.svc.sign_view(UUID) or {}).get("param_error", ""))
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > AFTER_WRITE, timeout=1.5)
-            assert len(_params(sign)) == AFTER_WRITE
+            sign.wait_for(lambda s: len(_params(s)) > 3, timeout=1.5)
+            assert len(_params(sign)) == 3
         finally:
             sign.close()
     finally:
         h.svc.stop()
 
 
-def test_a_setting_the_frame_lacks_is_skipped_not_blocking(tmp_path: Path, extra_settings: None) -> None:
+def test_a_setting_the_frame_lacks_is_skipped_not_blocking(tmp_path: Path) -> None:
     h = Harness(tmp_path, uuid=UUID)
-    h.settings.sections["devices"]["lobby"].update(heartbeat_min="5", wifi_region="1")
+    h.settings.sections["devices"]["lobby"].update(heartbeat_min="5", touch_mode="1")
     try:
         assert h.svc.start()
         sign = FakeSign(h.svc.port)
         try:
             sign.status()
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
-            _answer(sign, {29: _u32(1), 52: _u32(0)})
-            assert sign.wait_for(lambda s: len(_params(s)) == 3)
-            # No Wi-Fi region on this firmware.
-            _answer(sign, {}, refused=(144,))
-            _answer(sign, {19: _u16(11113)})
-            assert sign.wait_for(lambda s: len(_params(s)) == AFTER_WRITE)
-            write = _params(sign)[3]
-            assert [(i[0], int.from_bytes(i[2], "little")) for i in write] == [(29, 5)]
-            assert "wifi_region" not in (h.svc.sign_view(UUID) or {}).get("settings", {})
+            _answer(sign, BASE, refused=(50,))
+            assert sign.wait_for(lambda s: len(_params(s)) == 2)
+            assert [(i[0], int.from_bytes(i[2], "little")) for i in _params(sign)[1]] == [(29, 5)]
+            assert "touch_mode" not in (h.svc.sign_view(UUID) or {}).get("settings", {})
         finally:
             sign.close()
     finally:
         h.svc.stop()
 
 
-def test_blank_settings_leave_the_sign_alone(tmp_path: Path, extra_settings: None) -> None:
+def test_blank_settings_leave_the_sign_alone(tmp_path: Path) -> None:
     h = Harness(tmp_path, uuid=UUID)
     try:
         assert h.svc.start()
@@ -2427,12 +2411,64 @@ def test_blank_settings_leave_the_sign_alone(tmp_path: Path, extra_settings: Non
         try:
             sign.status()
             assert sign.wait_for(lambda s: len(_params(s)) == 1)
-            _answer(sign, {29: _u32(1), 52: _u32(0)})
-            assert sign.wait_for(lambda s: len(_params(s)) == 3)
-            _answer_extras(sign, {50: _u32(1)}, {19: _u16(11113)})
+            _answer(sign, BASE)
             h.push()
-            sign.wait_for(lambda s: len(_params(s)) > READS, timeout=1.5)
-            assert len(_params(sign)) == READS  # reads only
+            sign.wait_for(lambda s: len(_params(s)) > 1, timeout=1.5)
+            assert len(_params(sign)) == 1  # read only
+        finally:
+            sign.close()
+    finally:
+        h.svc.stop()
+
+
+def test_a_reconnect_doesnt_read_settings_again_but_a_reboot_does(tmp_path: Path) -> None:
+    """The Suite never reads settings because a frame connected."""
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        assert h.svc.start()
+        first = FakeSign(h.svc.port)
+        try:
+            first.status(tags=with_tag(0, 2))
+            assert first.wait_for(lambda s: len(_params(s)) == 1)
+            _answer(first, BASE)
+            assert _wait(lambda: (h.svc.sign_view(UUID) or {}).get("heartbeat_min") == 1)
+        finally:
+            first.close()
+        again = FakeSign(h.svc.port)
+        try:
+            again.status(tags=with_tag(0, 2))
+            again.wait_for(lambda s: len(_params(s)) > 0, timeout=1.5)
+            assert _params(again) == []
+            assert (h.svc.sign_view(UUID) or {}).get("heartbeat_min") == 1
+        finally:
+            again.close()
+        rebooted = FakeSign(h.svc.port)
+        try:
+            rebooted.status(tags=with_tag(0, 1))
+            assert rebooted.wait_for(lambda s: len(_params(s)) == 1)
+        finally:
+            rebooted.close()
+    finally:
+        h.svc.stop()
+
+
+def test_stays_awake_only_for_the_always_on_power_saving_mode(tmp_path: Path) -> None:
+    """Setting 52 has three values, and 2 sleeps like 0 does."""
+    h = Harness(tmp_path, uuid=UUID)
+    try:
+        assert h.svc.start()
+        sign = FakeSign(h.svc.port)
+        try:
+            sign.status()
+            assert sign.wait_for(lambda s: len(_params(s)) == 1)
+            _answer(sign, {**BASE, 52: _u32(2)})
+            assert _wait(
+                lambda: (
+                    (h.svc.sign_view(UUID) or {}).get("settings", {}).get("frame_sleep")
+                    == "CLI disabled while asleep"
+                )
+            )
+            assert h.svc._signs[UUID].known_sleep_disabled is False
         finally:
             sign.close()
     finally:

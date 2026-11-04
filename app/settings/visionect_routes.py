@@ -114,7 +114,9 @@ def _visionect_sign(view: dict[str, Any]) -> dict[str, Any]:
         rows.append(("Next check-in", f"in {st['next_status_min']} min"))
     sleep_off = view.get("sleep_disabled")
     if isinstance(sleep_off, int):
-        rows.append(("Sleep between check-ins", "Off (stays awake)" if sleep_off else "On"))
+        choices = visionect.SIGN_SETTINGS["frame_sleep"][1]
+        label = next((lab for _cv, wire, lab in choices if wire == sleep_off), str(sleep_off))
+        rows.append(("Power saving mode", label))
     if view.get("connect_reason") and view.get("connected"):
         since = clock(view.get("connected_at"))
         rows.append(
