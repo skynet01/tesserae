@@ -18,6 +18,10 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Collapsible sections on the Server, System, About, Stats, Widgets, Companion, Generative AI, Cloud relay, calendar-feed and gallery pages, remembered per page; `section_card` takes `collapsible=False` to opt out.
 - Lineups: next update times are right for a display asleep in quiet hours, such as no more ~6:31 PM after a 9 AM wake.
 - Lineups: zoom any thumbnail into a larger view with Push now, and choose which photo or newspaper to push with previous and next arrows.
+- Lineups: for album, comics and illustrated-news dashboards the arrows draw another picture (and go back through the ones drawn) instead of choosing; Push sends the picture shown.
+- Lineups: pushing a step from a lineup marks that lineup live, even one that does not run today; sending something by hand marks none.
+- Lineups: a block that runs all day and carries on into tomorrow no longer counts down to an end; it says when quiet hours pause it.
+- Lineups: a display's top thumbnail always shows what is on the frame; what waits for it, from a lineup or a manual send, is a small tagged thumbnail on its corner.
 - Quiet hours: a lineup step or interval skipped overnight now lands as quiet hours end, and a sleeping display wakes for it.
 - A widget that paints with GPT Image can ask for the quality (low, medium
   or high) and the exact size of the picture, so a poster can be painted

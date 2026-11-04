@@ -1563,6 +1563,15 @@ def fetch(
     published = published_edition(datetime.now(UTC), today_iso)
     payload = _payload(wanted, problems, records, busy, config, store, today_iso, published)
     payload["layout"] = config.layout()
+    # ``_browse`` (not a manifest option) is the Lineups page's "draw next": that
+    # many turns past the current one, read-only, so browsing never moves the
+    # frame's own turn.
+    try:
+        browse = max(0, min(50, int(options.get("_browse") or 0)))
+    except (TypeError, ValueError):
+        browse = 0
+    if browse:
+        ctx = {**ctx, "browse": browse, "settled": False}
     return fit_screen(payload, config, store, ctx, now)
 
 
@@ -1611,6 +1620,8 @@ def fit_screen(
     chosen = store.take_turn(placement, len(items), decide, advance=settled, now=now)
     if not chosen.rotating:
         return payload
+    for _ in range(int(ctx.get("browse") or 0)):
+        chosen = decide((chosen.show[0] + len(chosen.show)) % len(items))
     shown = set(chosen.show)
     offset = 1 if farside else 0
     payload["farside"] = farside if 0 in shown and farside else []

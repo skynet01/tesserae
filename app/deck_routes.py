@@ -72,6 +72,7 @@ from app.next_update import DeviceTiming, reach_for_device, tracks_held_frame
 from app.state.deck_model import Deck, DeckPage
 from app.state.deck_store import DeckStore
 from app.state.page_store import PageStore
+from app.step_items import step_draws as _step_draws
 from app.step_items import step_items as _step_items
 
 bp = Blueprint("decks", __name__, url_prefix="/decks")
@@ -243,6 +244,55 @@ _MANUAL_PUSH_SOURCES = frozenset(
 )
 
 
+def _manual_send_times() -> dict[str, float]:
+    """display id -> when something was last sent to it by hand (the Send page,
+    a file, a note, History's resend ...). Newest few rows per source, so one
+    busy display cannot hide another's."""
+    events = current_app.config.get("EVENT_LOG")
+    out: dict[str, float] = {}
+    if events is None:
+        return out
+    for source in sorted(_MANUAL_PUSH_SOURCES):
+        try:
+            rows = events.list(type="push", source=source, statuses=("sent",), limit=8)
+        except Exception:
+            continue
+        for ev in rows:
+            for did in ev.extra.get("device_ids") or []:
+                if isinstance(did, str):
+                    out[did] = max(out.get(did, 0.0), float(ev.timestamp))
+    return out
+
+
+def _lineups_in_control(devices: list[Any]) -> dict[str, str]:
+    """display id -> the lineup whose step the display was last driven by.
+
+    The nav record is written whenever a lineup puts a step on a display (the
+    scheduler's advances and fires, a button or Home Assistant step, and Push
+    now on a step tile), so it is the one record of "this lineup is playing
+    here". It stops holding the moment something is sent to that display by
+    hand afterwards, so a Send page push marks no lineup live. A lineup the
+    scheduler fires next takes the record over (it writes its own), which ends
+    a forced lineup's turn."""
+    nav = _nav_store()
+    if nav is None:
+        return {}
+    manual = _manual_send_times()
+    out: dict[str, str] = {}
+    for d in devices:
+        try:
+            rec = nav.get(d.id)
+        except Exception:
+            continue
+        if not rec or not rec.get("deck_id"):
+            continue
+        updated = rec.get("updated_at")
+        if isinstance(updated, (int, float)) and manual.get(d.id, 0.0) > float(updated):
+            continue
+        out[d.id] = str(rec["deck_id"])
+    return out
+
+
 def _frame_origin(
     device_id: str,
     page_id: str,
@@ -390,6 +440,21 @@ def _frame_pending(device: Any) -> bool:
     served_fn = getattr(push, "last_served_render_for", None)
     served = served_fn(device.id) if callable(served_fn) else None
     return not isinstance(served, dict) or served.get("digest") != latest.get("digest")
+
+
+def _pending_thumb(device: Any) -> str:
+    """The thumbnail of the render a display has not taken yet (what waits for it
+    when no dashboard explains it: a file, a note or a link sent by hand)."""
+    from app.lineup_thumbs import sent_thumb_url
+
+    push = current_app.config.get("PUSH_MANAGER")
+    latest_fn = getattr(push, "latest_render_for", None)
+    latest = latest_fn(device.id) if callable(latest_fn) else None
+    if not isinstance(latest, dict):
+        return ""
+    return sent_thumb_url(latest.get("composition_digest")) or sent_thumb_url(
+        latest.get("preview_digest")
+    )
 
 
 def _heard_from(device: Any) -> tuple[float | None, bool]:
@@ -1359,6 +1424,7 @@ def _build_lineups_view(
         current = {}
     panel_states = _panel_states(devices)
     live = _live_map()
+    in_control = _lineups_in_control(devices)
 
     known = {d.id for d in devices}
     scheduler = current_app.config.get("SCHEDULER")
@@ -1408,6 +1474,7 @@ def _build_lineups_view(
             height=h,
             item_count=count,
             items=items,
+            draw=_step_draws(page) if page is not None else False,
         )
 
     by_display: dict[str, list[LineupInput]] = {d.id: [] for d in devices}
@@ -1433,8 +1500,7 @@ def _build_lineups_view(
                 unassigned.append(_lineup_input(deck, runtime=runtime, last_fired=last_fired))
             continue
         for did in targets:
-            rec = live.get(did)
-            playing = bool(rec and rec[0] == deck.id)
+            playing = in_control.get(did) == deck.id
             by_display[did].append(
                 _lineup_input(deck, runtime=runtime, playing=playing, last_fired=last_fired)
             )
@@ -1471,6 +1537,7 @@ def _build_lineups_view(
         frame, nothing_sent = _frame_state(d) if not on_pid else (None, False)
         last_seen, heard = _heard_from(d)
         pending = _frame_pending(d)
+        pending_thumb = _pending_thumb(d) if pending else ""
         w, h, spec = _device_size(d)
         published, published_known = _published_state(d)
         color = display_color_mode(
@@ -1501,6 +1568,7 @@ def _build_lineups_view(
                 last_seen=last_seen,
                 heard=heard,
                 pending=pending,
+                pending_thumb_url=pending_thumb,
             )
         )
     today = now.weekday()
@@ -2206,6 +2274,8 @@ def step_item(deck_id: str) -> Response:
     if render is None:
         return fail("That display's panel is unknown.", 400)
     if render.path.is_file():
+        import hashlib
+
         base = url_for("composer.lineup_thumbnail", kind="draft", key=render.cache_key, ext=_EXT)
         return jsonify(
             {
@@ -2215,6 +2285,8 @@ def step_item(deck_id: str) -> Response:
                 "label": item.label,
                 "thumb_url": base,
                 "large_url": f"{base}?lg=1",
+                # Lets the page tell when a draw came out the same as one before.
+                "sig": hashlib.sha256(render.path.read_bytes()).hexdigest()[:16],
             }
         )
     if not preview_cache.is_pending(render.path) and (
@@ -2323,7 +2395,12 @@ def push_step(deck_id: str) -> Response:
             if made is None:
                 return fail(_EditError("That display's panel is unknown.", 400, deck_id))
             renders[did] = made
-        name = f"{page.name} ({chosen.label})"
+        drawn = chosen.key.startswith("draw:")
+        if drawn and not all(r.path.is_file() for r in renders.values()):
+            # A draw is only ever what the preview showed; drawing it again
+            # would send a different picture.
+            return fail(_EditError("That picture is no longer stored. Draw another.", 409, deck_id))
+        name = page.name if drawn else f"{page.name} ({chosen.label})"
         item_base_url = request.host_url.rstrip("/")
         item_pool = current_app.config.get("BROWSER_POOL")
         from app.composer import _preview_timezone_id
@@ -2351,7 +2428,24 @@ def push_step(deck_id: str) -> Response:
             composition = (Path(current_app.config["RENDERS_DIR"]) / f"{digest}.png").read_bytes()
     fresh = composition is None and not renders
 
+    def mark_playing(shown: list[str]) -> None:
+        """Record that this lineup now has its step on those displays: the one
+        record the page (and the buttons) read for "this lineup is playing
+        here", the same one the scheduler writes after its own fires. Without
+        it the push left no trace of which lineup it came from."""
+        from app.state.deck_nav_store import navigation_locked
+
+        nav = _nav_store()
+        if nav is None or not shown:
+            return
+        with navigation_locked(nav, shown), contextlib.suppress(Exception):
+            for did in shown:
+                nav.set(did, deck.id, page_id)
+
     def send_step() -> None:
+        from app.push import DELIVERED_STATUSES
+
+        shown: list[str] = []
         if renders:
             from app import preview_cache
 
@@ -2369,16 +2463,27 @@ def push_step(deck_id: str) -> Response:
                         timezone_id=item_tz,
                         query=made.query,
                     )
-                pusher.republish_composition(
+                result = pusher.republish_composition(
                     made.path.read_bytes(), page_id=page_id, device_ids={did}
                 )
+                if result.status in DELIVERED_STATUSES:
+                    shown.append(did)
         elif composition is None:
-            pusher.push(page_id, device_ids=set(targets), bypass_coalesce=True, force_publish=True)
+            result = pusher.push(
+                page_id, device_ids=set(targets), bypass_coalesce=True, force_publish=True
+            )
+            if result.status in DELIVERED_STATUSES:
+                shown = list(targets)
         else:
             # History's normal per-device transform handles resizing and
             # physical rotation. Resolve each target's own panel dimensions.
             for did in targets:
-                pusher.republish_composition(composition, page_id=page_id, device_ids={did})
+                result = pusher.republish_composition(
+                    composition, page_id=page_id, device_ids={did}
+                )
+                if result.status in DELIVERED_STATUSES:
+                    shown.append(did)
+        mark_playing(shown)
 
     _run_in_background(send_step, label=f"lineup-step:{deck_id}:{page_id}")
     now_ts = time.time()

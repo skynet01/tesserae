@@ -15,7 +15,7 @@
 //   notice                a line under the picture ("Could not draw this item")
 //   aspect, orientation, gamut, greyLevels   the display's own look (the same
 //                         data-gamut treatment as every Lineups thumbnail)
-//   nav                   {text, label}; draws previous / next
+//   nav                   {text, label, prev?, next?, hasPrev?, hasNext?}; draws previous / next
 //   push                  {label, title, busy, disabled}; draws the Push button
 //   msg                   {text, kind: "ok" | "queued" | "err"}
 //   onStep(delta), onPush(), onClose()
@@ -110,6 +110,17 @@
     if (m.nav) {
       $("[data-lb-pos]").textContent = m.nav.text || "";
       nav.setAttribute("aria-label", m.nav.label || "Choose an item");
+      const prev = el.querySelector('[data-lb-step="-1"]');
+      const next = el.querySelector('[data-lb-step="1"]');
+      prev.disabled = m.nav.hasPrev === false;
+      next.disabled = m.nav.hasNext === false;
+      for (const [b, label, dflt] of [
+        [prev, m.nav.prev, "Previous item"],
+        [next, m.nav.next, "Next item"],
+      ]) {
+        b.setAttribute("aria-label", label || dflt);
+        b.title = label || dflt;
+      }
     }
     const push = $("[data-lb-push]");
     push.hidden = !m.push;

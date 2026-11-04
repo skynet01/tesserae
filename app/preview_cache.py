@@ -36,7 +36,7 @@ _PANEL_STALE_S = 24 * 3600
 # chosen item and display) is full size and there can be one per photo, so the
 # newest few are kept and the rest go.
 _ITEM_FILE = re.compile(r"^.+-i[0-9a-f]{10}__[0-9a-f]{16}\.png$")
-ITEM_KEEP = 24
+ITEM_KEEP = 32
 # Item renders that may be waiting at once; past it a new one is refused
 # rather than queued, so clicking through a folder cannot pile up renders.
 ITEM_BACKLOG_MAX = 4

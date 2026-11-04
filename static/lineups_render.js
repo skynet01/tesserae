@@ -230,7 +230,19 @@
           : `<span class="lu-hn q" title="Scheduled, queued: lands ${esc(n.lands || "")}">${esc(n.scheduled_name)}</span>${n.on_screen_name ? `<span class="lu-hn dim" title="Still on screen">${esc(n.on_screen_name)} on screen</span>` : ""}`;
         now = `<span class="lu-hs-now">${now}</span>`;
       }
-      return `<div class="lu-hs" title="${esc(p.title)}"><span class="lu-hs-line">${w}${ws}<span>ends in <b>${esc(p.ends_in_label)}</b></span></span><span class="lu-hs-bar" role="progressbar" aria-label="Time through this window" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${p.window_pct}"><i style="width:${p.window_pct}%"></i></span>${now}</div>`;
+      // An all-day block that carries on into tomorrow has no end and no bar; only an
+      // interruption by quiet hours is said.
+      const tail = p.always_on
+        ? p.pauses_in_label
+          ? `${ws}<span>pauses in <b>${esc(p.pauses_in_label)}</b></span>`
+          : p.paused_until_label
+            ? `${ws}<span>paused until <b>${esc(p.paused_until_label)}</b></span>`
+            : ""
+        : `${ws}<span>ends in <b>${esc(p.ends_in_label)}</b></span>`;
+      const bar = p.always_on
+        ? ""
+        : `<span class="lu-hs-bar" role="progressbar" aria-label="Time through this window" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${p.window_pct}"><i style="width:${p.window_pct}%"></i></span>`;
+      return `<div class="lu-hs" title="${esc(p.title)}"><span class="lu-hs-line">${w}${tail}</span>${bar}${now}</div>`;
     }
     if (l.status === "live") {
       return `<div class="lu-hs"><span class="lu-hs-line">${w}${ws}<span>${l.kind === "manual" ? "playing now" : "live"}</span></span></div>`;
@@ -328,7 +340,8 @@
   function stepHtml(d, l, s, ui) {
     const choice = (ui && ui.itemChoice && ui.itemChoice(d, l, s)) || null;
     const canPush = !!(d.id && l.actions.push_step_url && !s.missing && !s.off_display);
-    const canPick = canPush && !!s.pick_items && !!l.actions.step_item_url;
+    const draw = !!s.draw_items;
+    const canPick = canPush && (!!s.pick_items || draw) && !!l.actions.step_item_url;
     const picked = choice && choice.state === "ready" ? choice.thumb_url : "";
     const cls = s.next
       ? "is-next"
@@ -343,8 +356,10 @@
     const push = canPush
       ? `<form method="post" action="${esc(l.actions.push_step_url)}" class="lu-push-form"><input type="hidden" name="index" value="${s.index}"><input type="hidden" name="display_id" value="${esc(d.id)}"><input type="hidden" name="page_id" value="${esc(s.dashboard_id)}"><input type="hidden" name="composition_digest" value="${esc(choice ? "" : s.composition_digest || "")}">${choice ? `<input type="hidden" name="item" value="${esc(choice.key)}">` : ""}<button type="submit" class="lu-push-ov" data-push="${esc(l.id)}:${s.index}" title="${esc(s.push_title)}" aria-label="${esc(s.push_title)}"><i>${ico("send")}</i><span>Push now</span></button></form>`
         : "";
+    const prevLabel = draw ? "Previous picture" : "Previous item";
+    const nextLabel = draw ? "Draw the next picture" : "Next item";
     const items = canPick
-      ? `<span class="lu-items" role="group" aria-label="Choose which ${esc(s.name)} item to push"><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:-1" aria-label="Previous item" title="Previous item">${ico("chevl")}</button><span class="lu-it-pos" aria-hidden="true">${choice ? `${choice.idx + 1}/${s.items.length}` : ""}</span><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:1" aria-label="Next item" title="Next item">${ico("chev")}</button></span>`
+      ? `<span class="lu-items" role="group" aria-label="${draw ? `Draw another ${esc(s.name)} picture` : `Choose which ${esc(s.name)} item to push`}"><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:-1" aria-label="${prevLabel}" title="${prevLabel}"${draw && !choice ? " disabled" : ""}>${ico("chevl")}</button><span class="lu-it-pos" aria-hidden="true">${choice && !draw ? `${choice.idx + 1}/${s.items.length}` : ""}</span><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:1" aria-label="${nextLabel}" title="${nextLabel}">${ico("chev")}</button></span>`
       : "";
     const count =
       s.item_count > 1
@@ -416,11 +431,8 @@
     const linkIcon = { connected: "signal", sleeps: "clock" }[d.link.mode] || "info";
     const fr = op ? null : d.frame;
     const ph = d.placeholder;
-    const qb = d.queued_badge;
-    const qbHtml = qb
-      ? `<span class="lu-qbadge" title="${esc(qb.title)}" aria-label="${esc(qb.title)}">${ico("clock")}<span>${esc(qb.label)}</span></span>`
-      : "";
-    const phIcon = { queued: "clock", delivering: "send", unavailable: "info" };
+    const qt = d.queued_thumb;
+    const phIcon = { delivering: "send", unavailable: "info" };
     const delivering = !!ph && ph.state === "delivering";
     const zoomH = zoomBtn(`head:${d.id}`, `Zoom what ${d.name} is showing`);
     const thumbHtml =
@@ -434,7 +446,7 @@
             null,
             vm.displays[0]?.id === d.id,
             d,
-            op.thumb_url ? qbHtml + zoomH : qbHtml
+            op.thumb_url ? zoomH : ""
           )
         : fr && fr.thumb_url
           ? thumb(
@@ -446,7 +458,7 @@
               fr.title,
               vm.displays[0]?.id === d.id,
               d,
-              qbHtml + zoomH
+              zoomH
             )
           : `<span class="lu-thumb ${d.orientation || "l"} empty note-${esc(ph.state)}" style="--ar:${d.width || 16}/${d.height || 10};--arw:${d.width || 16};--arh:${d.height || 10}" role="img" aria-label="${esc(ph.title)}" title="${esc(ph.title)}"><span class="lu-thumb-note">${ico(phIcon[ph.state] || "screen")}<b>${esc(ph.label)}</b>${ph.sub ? `<small>${esc(ph.sub)}</small>` : ""}</span></span>`;
     let tags = `<span class="lu-im" title="${esc(d.link.title)}">${ico(linkIcon)}<span>${esc(d.link.label)}</span></span>`;
@@ -470,7 +482,7 @@
       ? `<div class="lu-today"><div class="lu-today-bar">${dayTrack(d, d.day, editable)}${dayScale(d.day)}</div>${dayPick(d, d.day, vm.now.weekday)}</div>`
       : "";
     return (
-      `<header class="lu-ds-hdr"><figure class="lu-now-thumb" title="${esc(qb ? qb.title : delivering ? ph.title : op ? `On screen: ${op.name}` : fr ? fr.title : ph.title)}">${thumbHtml}</figure>` +
+      `<header class="lu-ds-hdr"><figure class="lu-now-thumb" title="${esc(delivering ? ph.title : op ? `On screen: ${op.name}` : fr ? fr.title : ph.title)}">${qt ? `<span class="lu-now-wrap">${thumbHtml}<span class="lu-qthumb" role="group" aria-label="${esc(qt.title)}" title="${esc(qt.title)}">${thumb(qt.name, qt.thumb_url, qt.aspect, qt.orientation, "", null, false, d)}<span class="lu-qtag">${ico("clock")}<span>${esc(qt.label)}</span></span></span></span>` : thumbHtml}</figure>` +
       `<div class="lu-ds-name-row"><div class="lu-ds-title"><h2>${esc(d.name)}</h2>${d.settings_url ? `<a class="lu-gear" href="${esc(d.settings_url)}" title="${esc(d.name)} settings" aria-label="${esc(d.name)} settings">${ico("gear")}</a>` : ""}</div><span class="lu-ds-tags">${tags}</span></div>` +
       `<div class="lu-ds-state">${show}${next}</div>${today}` +
       `<button class="lu-fold lu-ds-fold" type="button" data-collapse="${esc(d.id)}" aria-expanded="${collapsed ? "false" : "true"}" aria-controls="lu-dsb-${esc(d.id)}" aria-label="${esc(d.name)}: collapse or expand">${ico("caret")}</button></header>`

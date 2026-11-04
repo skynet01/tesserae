@@ -75,9 +75,30 @@ def _pictures(vm: dict[str, Any]) -> dict[str, Any]:
         for lineup in d["lineups"]:
             for step in lineup["steps"]:
                 step["thumb_url"] = _img_url(step["dashboard_id"])
+                # Comics stands for a widget that cannot name its items but differs per render.
+                step["draw_items"] = step["dashboard_id"] == "comics"
         if d["on_screen"]:
             d["on_screen"]["thumb_url"] = _img_url("onscreen-" + d["id"])
     return vm
+
+
+def _always_on(vm: dict[str, Any], variant: str) -> None:
+    """Make Dinner an all-day block that carries on into tomorrow: no end, no bar."""
+    dinner = next(lu for lu in vm["displays"][0]["lineups"] if lu["id"] == "dinner")
+    dinner["window"].update(
+        start="00:00", end="24:00", label="00:00–24:00", start_min=0, end_min=1440
+    )
+    p = dinner["progress"]
+    p.update(
+        always_on=True,
+        window_pct=None,
+        ends_in_label=None,
+        ends_in_minutes=None,
+        pauses_in_label="4h 48m" if variant == "pauses" else None,
+        pauses_in_minutes=288 if variant == "pauses" else None,
+        paused_until_label="06:30" if variant == "paused" else None,
+        title="Runs all day.",
+    )
 
 
 _PIXEL = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="
@@ -92,6 +113,16 @@ _FRAME = {
 _QUEUED = "A new frame is queued. The frame picks it up at its next check-in ~3:48 PM."
 
 
+_QUEUED_THUMB = {
+    "name": "News",
+    "thumb_url": _PIXEL,
+    "aspect": "800/480",
+    "orientation": "l",
+    "label": "Queued",
+    "title": _QUEUED,
+}
+
+
 def _note(state: str, label: str, sub: str = "", title: str = "") -> dict[str, str]:
     return {"state": state, "label": label, "sub": sub, "title": title or label}
 
@@ -102,14 +133,14 @@ def _header_variant(display: dict[str, Any], kind: str) -> None:
     if not kind:
         return
     display["on_screen"], display["on_screen_known"] = None, False
-    display["queued_badge"] = None
+    display["queued_thumb"] = None
     display["placeholder"] = _note("none", "No image yet")
     if kind in ("frame", "badge"):
         display["frame"] = {**_FRAME, "thumb_url": _PIXEL}
         display["show_title"] = _FRAME["title"]
         display["placeholder"] = None
         if kind == "badge":
-            display["queued_badge"] = _note("queued", "Queued", "", _QUEUED)
+            display["queued_thumb"] = _QUEUED_THUMB
     elif kind == "frame-gone":
         display["frame"] = dict(_FRAME)
         display["placeholder"] = _note("unavailable", "Image unavailable")
@@ -117,9 +148,7 @@ def _header_variant(display: dict[str, Any], kind: str) -> None:
         display["nothing_sent"] = True
         display["placeholder"] = _note("nothing", "Nothing sent yet")
     elif kind == "queued":
-        display["placeholder"] = _note(
-            "queued", "Queued", "Frame picks it up at its next check-in ~3:48 PM", _QUEUED
-        )
+        display["queued_thumb"] = {**_QUEUED_THUMB, "name": "A new frame", "thumb_url": ""}
     elif kind == "delivering":
         display["placeholder"] = _note("delivering", "Delivering")
     elif kind == "heard":
@@ -154,6 +183,8 @@ def live(tmp_path: Path) -> Iterator[str]:
         vm = _sample_vm(request.args.get("cycle", "h23"))
         if request.args.get("pics"):
             _pictures(vm)
+        if request.args.get("always"):
+            _always_on(vm, request.args["always"])
         _header_variant(vm["displays"][1], request.args.get("hdr", ""))
         for d in vm["displays"]:
             for lu in d["lineups"]:
@@ -211,8 +242,13 @@ class _Api:
         # GET step-item calls, and how many answers stay "pending" before "ready".
         self.item_calls: list[dict[str, str]] = []
         self.item_pending = 0
+        # Draws whose signature is forced (a widget that drew what it drew before).
+        self.same_sig: dict[str, str] = {}
         self.item_status = 200
         self.push_delay = 0.0
+
+    def sig_for(self, item: str) -> str:
+        return self.same_sig.get(item) or re.sub(r"\W", "", item).ljust(16, "0")[-16:]
 
     def install(self, page: Any) -> None:
         def handle(route: Any) -> None:
@@ -243,7 +279,7 @@ class _Api:
                         body=json.dumps({"ok": True, "state": "pending"}),
                     )
                 else:
-                    thumb = _img_url("item-" + q["item"].replace(".", "-"))
+                    thumb = _img_url("item-" + re.sub(r"\W", "-", q["item"]))
                     route.fulfill(
                         status=200,
                         content_type="application/json",
@@ -254,6 +290,7 @@ class _Api:
                                 "item": q["item"],
                                 "thumb_url": thumb,
                                 "large_url": thumb + "?lg=1",
+                                "sig": self.sig_for(q["item"]),
                             }
                         ),
                     )
@@ -297,6 +334,7 @@ def _open(
     pics: bool = False,
     mobile: bool = False,
     ui: str = "",
+    extra: str = "",
 ) -> tuple[Any, Any, _Api]:
     browser = _launch(p)
     ctx = browser.new_context(
@@ -320,7 +358,8 @@ def _open(
         + PAGE
         + f"?cycle={cycle}&hdr={hdr}"
         + ("&off=1" if off else "")
-        + ("&pics=1" if pics else ""),
+        + ("&pics=1" if pics else "")
+        + extra,
         wait_until="load",
     )
     if js:
@@ -432,26 +471,34 @@ def test_header_without_a_dashboard_matches_both_renderers(live: str, hdr: str) 
         text = page.locator("#display-kitchen .lu-ds-hdr").inner_text()
         thumb = page.locator("#display-kitchen .lu-now-thumb")
         title = thumb.get_attribute("title")
-        has_img = thumb.locator("img").count()
-        gamut = thumb.locator(".lu-thumb[data-gamut]").count()
-        badge = thumb.locator(".lu-qbadge").count()
+        main = ":scope > .lu-thumb, :scope > .lu-now-wrap > .lu-thumb"
+        has_img = thumb.evaluate(f"e => e.querySelector('{main}').querySelectorAll('img').length")
+        gamut = int(thumb.evaluate(f"e => e.querySelector('{main}').hasAttribute('data-gamut')"))
+        tagged = thumb.locator(".lu-qthumb .lu-qtag").count()
+        tag_on_main = thumb.evaluate(
+            f"e => e.querySelector('{main}').querySelectorAll('.lu-qtag').length"
+        )
+        queued_title = thumb.locator(".lu-qthumb").first.get_attribute("title") if tagged else None
         thumb_text = thumb.inner_text()
         browser.close()
     assert len(server) == 2
     assert _shape(server[1]) == _shape(re.search(r"<header.*?</header>", client[1], re.S).group(0))
     assert "?" not in thumb_text
+    assert tag_on_main == 0, "the header thumb is the glass; only the small one is tagged"
+    assert (tagged, queued_title) == ((1, _QUEUED) if hdr in ("badge", "queued") else (0, None))
     if hdr == "badge":
-        assert has_img == 1 and badge == 1 and title == _QUEUED
+        assert has_img == 1 and title == _FRAME["title"]
         assert "a frame sent by hand" in text
     elif hdr.startswith("frame"):
         assert "a frame sent by hand" in text and "unknown" not in text
-        assert title == _FRAME["title"] and badge == 0
+        assert title == _FRAME["title"]
         # A real thumb carries the display-color treatment; the placeholder has none.
         assert (has_img, gamut) == ((1, 1) if hdr == "frame" else (0, 0))
     elif hdr == "nothing":
         assert "Nothing sent yet" in text and title == "Nothing sent yet"
     elif hdr == "queued":
-        assert "Queued" in text and "next check-in ~3:48 PM" in text and title == _QUEUED
+        assert "No image yet" in text and title == "No image yet"
+        assert "Queued" in thumb_text
     elif hdr == "delivering":
         assert "Delivering" in text
     elif hdr == "heard":
@@ -3440,4 +3487,420 @@ def test_zoomed_picture_follows_a_color_display(live: str) -> None:
         thumb = page.locator(f"{LB} .lu-thumb")
         assert thumb.get_attribute("data-gamut") == "color"
         assert page.locator(f"{LB} img").evaluate("e => getComputedStyle(e).filter") == "none"
+        browser.close()
+
+
+# -- draw next, against a real render ------------------------------------------------------
+
+
+def test_draw_next_end_to_end_with_a_real_chromium_render(
+    real: tuple[str, Flask], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A canvas dashboard with a list widget, the real routes, the real render
+    queue and a real Chromium drawing it: Next draws another picture (it changes),
+    Previous goes back without drawing, and Push sends exactly the pixels shown.
+    The gallery stands in for a random album: it differs on every render and
+    has no way to name an item for this page (draw mode)."""
+    import io
+
+    from PIL import Image
+
+    import app.step_items as step_items
+    from app.state.deck_model import Deck, DeckPage
+    from app.state.page_store import Page
+
+    base, app = real
+    if _EXE:
+        monkeypatch.setenv("TESSERAE_CHROMIUM_PATH", _EXE)
+    colours = {
+        "red": (220, 30, 30),
+        "green": (30, 200, 60),
+        "blue": (30, 60, 220),
+        "yellow": (230, 220, 30),
+        "violet": (160, 40, 200),
+        "cyan": (30, 200, 210),
+    }
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    for name, rgb in colours.items():
+        Image.new("RGB", (400, 300), rgb).save(photos / f"{name}.jpg")
+    module = app.config["PLUGIN_REGISTRY"].get("picture_gallery").server_module
+    monkeypatch.setattr(module, "_folder_path", lambda name, data_dir: photos)
+    monkeypatch.setitem(step_items._PROVIDERS, "picture_gallery", step_items._draw_items)
+    app.config["PAGE_STORE"].save(
+        Page.model_validate(
+            {
+                "id": "drawn",
+                "name": "Drawn",
+                "device_ids": ["panel"],
+                "layout_kind": "canvas",
+                "canvas": {
+                    "w": 800,
+                    "h": 480,
+                    "els": [
+                        {
+                            "id": "g1",
+                            "kind": "widget",
+                            "widget": "picture_gallery",
+                            "x": 0,
+                            "y": 0,
+                            "w": 800,
+                            "h": 480,
+                            "options": {"folder": "x", "mode": "sequential", "scale": "fill"},
+                        }
+                    ],
+                },
+            }
+        )
+    )
+    app.config["DECK_STORE"].upsert(
+        Deck(
+            id="drawdeck",
+            name="Drawdeck",
+            device_ids=["panel"],
+            pages=[DeckPage(page_id="drawn"), DeckPage(page_id="news")],
+            advance="timer",
+            advance_interval_minutes=30,
+            advance_anchor="11:00",
+            advance_end_at="13:00",
+            advance_days_of_week=[0, 1, 2, 3, 4],
+        )
+    )
+
+    class _Spy:
+        """The real push manager, but what a push would send is kept, not sent."""
+
+        def __init__(self, inner: Any) -> None:
+            self.inner = inner
+            self.sent: list[tuple[bytes, dict[str, Any]]] = []
+
+        def republish_composition(self, png: bytes, **kw: Any) -> Any:
+            self.sent.append((png, kw))
+            return type("R", (), {"status": "sent"})()
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.inner, name)
+
+    spy = _Spy(app.config["PUSH_MANAGER"])
+    app.config["PUSH_MANAGER"] = spy
+    previews = Path(app.config["DATA_ROOT"]) / "core" / "previews"
+
+    def dominant(path: Path) -> tuple[int, int, int]:
+        with Image.open(io.BytesIO(path.read_bytes())) as im:
+            return im.convert("RGB").resize((1, 1), Image.Resampling.BOX).getpixel((0, 0))  # type: ignore[return-value]
+
+    def drawn_files() -> list[Path]:
+        return sorted(previews.glob("drawn-i*__*.png"))
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = _launch(p)
+        page = browser.new_context(viewport={"width": 1440, "height": 900}).new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        requests: list[str] = []
+        page.on("request", lambda r: requests.append(r.url) if "/step-item" in r.url else None)
+        page.goto(base + "/decks", wait_until="load")
+        page.wait_for_function(
+            "() => document.querySelector('[data-lu]').classList.contains('is-enhanced')"
+        )
+        step = page.locator('#lu-row-drawdeck .lu-step[data-step="0"]')
+        tile = step.locator(".lu-tile")
+        tile.scroll_into_view_if_needed()
+        tile.hover()
+        prev_btn = tile.locator('[data-item="drawdeck:0:-1"]')
+        next_btn = tile.locator('[data-item="drawdeck:0:1"]')
+        # Draw mode: arrows exist, no count anywhere, "previous" waits for something drawn.
+        assert next_btn.get_attribute("aria-label") == "Draw the next picture"
+        assert prev_btn.is_disabled() and tile.locator(".lu-it-pos").inner_text() == ""
+        assert step.locator(".lu-count").count() == 0
+
+        def shown() -> str:
+            return str(tile.locator("img").get_attribute("src"))
+
+        def wait_drawn() -> None:
+            # Loading starts the moment Next is clicked; the picture lands when it ends.
+            page.wait_for_selector(
+                '#lu-row-drawdeck [data-step="0"] .lu-tile.is-loading', timeout=5_000
+            )
+            page.wait_for_selector(
+                '#lu-row-drawdeck [data-step="0"] .lu-tile:not(.is-loading)', timeout=90_000
+            )
+
+        seen_urls: list[str] = []
+        for _ in range(12):  # until three different pictures are drawn
+            tile.hover()
+            before = len(requests)
+            next_btn.click()
+            wait_drawn()
+            assert len(requests) > before  # Next draws; it never reuses
+            if shown() not in seen_urls:  # a draw that came out the same is not kept
+                seen_urls.append(shown())
+            if len(seen_urls) >= 3:
+                break
+        assert len(seen_urls) >= 3, "Next must draw different pictures"
+        files = drawn_files()
+        colours_seen = {dominant(f) for f in files}
+        assert len(colours_seen) >= 3, "each draw must be a different render"
+        shown_colours = [
+            dominant(
+                previews
+                / f"{re.search(r'draft/(drawn-i[0-9a-f]{10}__[0-9a-f]{16})', u).group(1)}.png"  # type: ignore[union-attr]
+            )
+            for u in seen_urls
+        ]
+        assert len(set(shown_colours)) == len(shown_colours), "the pictures on the tile differ"
+        # The picture on the tile is the one in the drawn file.
+        key = re.search(r"draft/(drawn-i[0-9a-f]{10}__[0-9a-f]{16})\.", shown())
+        assert key
+        showing = previews / f"{key.group(1)}.png"
+        assert showing.is_file()
+        # Previous goes back through what was drawn without drawing anything.
+        before = len(requests)
+        tile.hover()
+        latest = shown()
+        prev_btn.click()
+        page.wait_for_function(
+            "(u) => document.querySelector('#lu-row-drawdeck [data-step=\"0\"] .lu-tile img').src.endsWith(u) === false",
+            arg=latest,
+        )
+        page.wait_for_timeout(500)
+        assert len(requests) == before, "going back must not render"
+        went_back = shown()
+        assert went_back != seen_urls[-1] and went_back in seen_urls
+        back_key = re.search(r"draft/(drawn-i[0-9a-f]{10}__[0-9a-f]{16})\.", went_back)
+        assert back_key
+        # Push now sends exactly the pixels showing (the earlier picture, not the latest).
+        tile.hover()
+        step.locator("[data-push]").click()
+        page.wait_for_function("() => document.querySelector('#lu-row-drawdeck .pushed')")
+        for _ in range(50):
+            if spy.sent:
+                break
+            page.wait_for_timeout(100)
+        assert len(spy.sent) == 1
+        sent_png, kw = spy.sent[0]
+        assert kw == {"page_id": "drawn", "device_ids": {"panel"}}
+        assert sent_png == (previews / f"{back_key.group(1)}.png").read_bytes()
+        assert sent_png != showing.read_bytes() or len(files) == 1
+        assert dominant(previews / f"{back_key.group(1)}.png") in colours_seen
+        tile.hover()
+        page.screenshot(path=os.environ.get("LU_SHOT_DIR", "/tmp") + "/lineups-draw-e2e.png")
+        assert errors == []
+        browser.close()
+    # Browsing and pushing never wrote the album's sequential cursor (the page says
+    # sequential; a draw forces random so a preview cannot cost the frame a photo).
+    plugin_data = Path(app.config["PLUGIN_REGISTRY"].get("picture_gallery").data_dir)
+    assert not list(plugin_data.rglob(".sequential_index*"))
+
+
+COMICS = '#lu-row-dinner .lu-step[data-step="5"]'  # a widget the arrows draw again
+
+
+def _wait_item(page: Any, step: str, text: str) -> None:
+    page.wait_for_function(
+        "([sel, t]) => { const i = document.querySelector(sel + ' .lu-tile img'); return i && i.getAttribute('src').includes(t) }",
+        arg=[step, text],
+    )
+
+
+def test_draw_arrows_draw_again_go_back_without_drawing_and_show_no_count(live: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, api = _open(p, live, pics=True)
+        tile = page.locator(f"{COMICS} .lu-tile")
+        tile.hover()
+        prev_btn = tile.locator('[data-item="dinner:5:-1"]')
+        next_btn = tile.locator('[data-item="dinner:5:1"]')
+        assert (
+            tile.locator(".lu-items").get_attribute("aria-label") == "Draw another Comics picture"
+        )
+        assert prev_btn.get_attribute("aria-label") == "Previous picture" and prev_btn.is_disabled()
+        assert next_btn.get_attribute("aria-label") == "Draw the next picture"
+        assert tile.locator(".lu-count, .lu-it-pos:not(:empty)").count() == 0  # no unknown total
+        assert "stacked" not in tile.get_attribute("class")
+        # Next draws one: the dashboard rendered once more under a new key, not an item name.
+        api.item_pending = 1
+        next_btn.click()
+        assert "is-loading" in tile.get_attribute("class")
+        page.wait_for_function(
+            "() => !document.querySelector('#lu-row-dinner [data-step=\"5\"] .lu-tile').classList.contains('is-loading')",
+            timeout=8000,
+        )
+        first = api.item_calls[0]["item"]
+        assert re.fullmatch(r"draw:[0-9a-f]{12}:1", first)
+        assert tile.locator(".lu-it-pos").inner_text() == ""
+        assert prev_btn.is_enabled()
+        tile.hover()
+        next_btn.click()
+        page.wait_for_function(
+            "() => document.querySelector('#lu-row-dinner [data-step=\"5\"] .lu-tile img').getAttribute('src').includes(':2'.replace(':', '-'))"
+        )
+        second = api.item_calls[-1]["item"]
+        assert re.fullmatch(r"draw:[0-9a-f]{12}:2", second) and second != first
+        # Previous goes back to the first picture without asking for anything.
+        calls = len(api.item_calls)
+        tile.hover()
+        prev_btn.click()
+        _wait_item(page, COMICS, re.sub(r"\W", "-", first))
+        page.wait_for_timeout(500)
+        assert len(api.item_calls) == calls
+        # ... and Next goes forward through what is already drawn, still without drawing.
+        tile.hover()
+        next_btn.click()
+        _wait_item(page, COMICS, re.sub(r"\W", "-", second))
+        page.wait_for_timeout(500)
+        assert len(api.item_calls) == calls
+        # Push sends the picture showing, by its key; nothing else is drawn for it.
+        tile.hover()
+        page.locator(f"{COMICS} [data-push]").click()
+        page.wait_for_function("() => document.querySelector('#lu-row-dinner .pushed')")
+        assert api.posts[-1][1] == {"index": 5, "item": second, "display_id": "frame"}
+        # Back past the first picture returns to the step as last sent.
+        for _ in range(2):
+            tile.hover()
+            prev_btn.click()
+        page.wait_for_function(
+            "() => document.querySelector('#lu-row-dinner [data-step=\"5\"] .lu-tile img').getAttribute('src') === '/_img/comics.png'"
+        )
+        assert prev_btn.is_disabled() and page._lu_errors == []
+        browser.close()
+
+
+def test_one_draw_at_a_time_and_a_repeat_is_not_kept(live: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, api = _open(p, live, pics=True)
+        api.item_pending = 2
+        tile = page.locator(f"{COMICS} .lu-tile")
+        tile.hover()
+        next_btn = tile.locator('[data-item="dinner:5:1"]')
+        for _ in range(4):
+            next_btn.click()  # while the first is still being drawn, these draw nothing more
+        page.wait_for_function(
+            "() => !document.querySelector('#lu-row-dinner [data-step=\"5\"] .lu-tile').classList.contains('is-loading')",
+            timeout=10000,
+        )
+        assert len({c["item"] for c in api.item_calls}) == 1
+        # The next draw comes out identical to the first: not a new picture, so it is dropped and said.
+        first = api.item_calls[0]["item"]
+        api.item_pending = 0
+        api.same_sig = {}
+        original = api.sig_for
+
+        def same(item: str) -> str:
+            return original(first)
+
+        api.sig_for = same  # type: ignore[method-assign]
+        tile.hover()
+        next_btn.click()
+        page.wait_for_function(
+            "() => document.querySelector('[data-lu-live]').textContent.includes('same')"
+        )
+        page.locator(f"{COMICS} [data-zoom]").click()
+        assert "same as one already drawn" in page.locator(".lu-lb-note").inner_text()
+        browser.close()
+
+
+def test_lightbox_draw_navigation_text_and_buttons(live: str) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, api = _open(p, live, pics=True)
+        page.locator(f"{COMICS} [data-zoom]").click()
+        assert (
+            page.locator("[data-lb-nav]").get_attribute("aria-label")
+            == "Draw another Comics picture"
+        )
+        assert page.locator("[data-lb-pos]").inner_text() == "As last sent"
+        assert page.locator("[data-lb-step='-1']").is_disabled()
+        assert (
+            page.locator("[data-lb-step='1']").get_attribute("aria-label")
+            == "Draw the next picture"
+        )
+        page.keyboard.press("ArrowLeft")  # nothing to go back to
+        assert api.item_calls == []
+        page.keyboard.press("ArrowRight")
+        page.wait_for_function(
+            "() => document.querySelector('[data-lb-pos]').textContent === 'Drawn here: 1 of 1'"
+        )
+        page.wait_for_function(
+            "() => document.querySelector('.lu-lb img').getAttribute('src').includes('lg=1') && document.querySelector('.lu-lb img').getAttribute('src').includes('item-draw')"
+        )
+        page.keyboard.press("ArrowRight")
+        page.wait_for_function(
+            "() => document.querySelector('[data-lb-pos]').textContent === 'Drawn here: 2 of 2'"
+        )
+        page.keyboard.press("ArrowLeft")
+        assert page.locator("[data-lb-pos]").inner_text() == "Drawn here: 1 of 2"
+        assert len(api.item_calls) == 2
+        page.locator("[data-lb-push]").click()
+        page.wait_for_function("() => document.querySelector('.lu-lb-msg').textContent.length > 0")
+        body = api.posts[-1][1]
+        assert body["item"] == api.item_calls[0]["item"] and "composition_digest" not in body
+        assert page.locator(".lu-lb-msg").inner_text() == "Pushed · lands now"
+        browser.close()
+
+
+@pytest.mark.parametrize("variant", ["pauses", "paused", "none"])
+def test_all_day_block_row_matches_in_both_renderers_and_has_no_end(
+    live: str, variant: str
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    sel = "#lu-row-dinner .lu-row-state"
+    with sync_playwright() as p:
+        browser, nojs, _ = _open(p, live, js=False, extra=f"&always={variant}")
+        server = nojs.eval_on_selector(sel, "e => e.outerHTML")
+        text = nojs.locator(sel).inner_text()
+        assert nojs.locator("#lu-row-dinner .lu-hs-bar").count() == 0
+        browser.close()
+        browser, page, _ = _open(p, live, extra=f"&always={variant}")
+        client = page.eval_on_selector(sel, "e => e.outerHTML")  # drawn by lineups_render.js
+        live_text = page.locator(sel).inner_text()
+        assert page.locator("#lu-row-dinner .lu-hs-bar").count() == 0
+        browser.close()
+    assert _shape(server) == _shape(client)
+    assert "ends in" not in text and "ends in" not in live_text
+    assert "00:00–24:00" in text
+    want = {"pauses": "pauses in 4h 48m", "paused": "paused until 06:30", "none": ""}[variant]
+    for t in (text, live_text):
+        if want:
+            assert want in t
+        else:
+            assert "pauses" not in t and "paused" not in t
+
+
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+@pytest.mark.parametrize("width", [360, 1440])
+def test_the_queued_thumbnail_sits_on_the_glass_thumbs_corner_and_is_only_a_label(
+    live: str, scheme: str, width: int
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser, page, _ = _open(p, live, width=width, scheme=scheme, pics=True)
+        fig = page.locator("#display-kitchen .lu-now-thumb")
+        main = fig.locator(".lu-now-wrap > .lu-thumb").bounding_box()
+        small = fig.locator(".lu-qthumb .lu-thumb").bounding_box()
+        assert main and small and fig.locator(".lu-qtag").inner_text() == "Queued"
+        # A corner overlay: smaller than the glass thumb, over its bottom right corner.
+        assert small["width"] < main["width"] and small["height"] < main["height"]
+        assert abs((small["x"] + small["width"]) - (main["x"] + main["width"])) <= 16
+        assert abs((small["y"] + small["height"]) - (main["y"] + main["height"])) <= 16
+        assert page.evaluate("() => document.documentElement.scrollWidth <= innerWidth")
+        # The header thumb is the picture on the glass (Family sits on the kitchen display).
+        assert fig.get_attribute("title").startswith("On screen:")
+        # A label, not a control: no lightbox, and the card does not fold.
+        fig.locator(".lu-qthumb").click(position={"x": 4, "y": 4})
+        assert page.locator(LB).count() == 0
+        assert page.locator("#display-kitchen .lu-ds-body").is_visible()
+        # The glass thumb still zooms.
+        fig.locator(".lu-now-wrap > .lu-thumb").click(position={"x": 6, "y": 6})
+        assert page.locator(LB).count() == 1
+        page.keyboard.press("Escape")
+        assert page._lu_errors == []
         browser.close()
