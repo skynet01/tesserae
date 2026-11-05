@@ -2524,6 +2524,23 @@ def test_served_image_stays_and_a_queued_thumb_appears_beside_it() -> None:
     assert calm.queued_thumb is None and calm.placeholder is None
 
 
+def test_the_header_shows_the_frame_taken_not_the_dashboards_newest_render() -> None:
+    # An album's next photo is rendered and waiting: the dashboard's thumbnail is
+    # that new photo, so the header must show what the frame actually took.
+    displays, dashboards = sample_inputs()
+    kitchen = replace(
+        displays[1],
+        pending=True,
+        pending_thumb_url="/compose/thumbs/v1/sent/new.webp",
+        glass_thumb_url="/compose/thumbs/v1/sent/old.webp",
+    )
+    d = _display(build_view([kitchen], dashboards, now=SAMPLE_NOW), "kitchen")
+    assert d.on_screen is not None
+    assert d.on_screen.thumb_url == "/compose/thumbs/v1/sent/old.webp"
+    assert d.queued_thumb is not None
+    assert d.queued_thumb.thumb_url == "/compose/thumbs/v1/sent/new.webp"
+
+
 def test_a_lineups_queued_step_is_the_small_thumb_and_the_glass_stays_the_header() -> None:
     from app.lineups_view import DashboardInfo
 

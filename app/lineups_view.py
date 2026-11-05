@@ -293,6 +293,10 @@ class DisplayInput:
     #: the picture waiting for it when that is no dashboard (a file, a note, a link sent
     #: by hand): the thumbnail of the latest render, "" when it cannot be named
     pending_thumb_url: str = ""
+    #: the picture the display actually took, when it reports one. A dashboard's
+    #: own thumbnail is its newest render, which for a dashboard that changes on
+    #: every render (an album) may be the one still waiting.
+    glass_thumb_url: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1599,8 +1603,20 @@ def _header_notes(
         )
         if queued is not None:
             scr = _screen(dashboards.get(queued.dashboard_id), queued.dashboard_id, d)
+            # A render already waiting is the picture itself; the dashboard's
+            # thumbnail only stands in for a step not rendered yet.
+            waiting_url = (
+                d.pending_thumb_url
+                if d.pending and d.published and d.published.dashboard_id == queued.dashboard_id
+                else ""
+            )
             thumb = QueuedThumbView(
-                queued.name, scr.thumb_url, scr.aspect, scr.orientation, "Queued", sentence
+                queued.name,
+                waiting_url or scr.thumb_url,
+                scr.aspect,
+                scr.orientation,
+                "Queued",
+                sentence,
             )
         else:
             aspect, orient = _aspect(d.width, d.height)
@@ -2165,6 +2181,8 @@ def build_display(
         )
 
     on_screen = _screen(dashboards.get(on_id), on_id, d, on_since) if on_id is not None else None
+    if on_screen is not None and d.glass_thumb_url:
+        on_screen.thumb_url = d.glass_thumb_url
     scheduled_view: ScheduledView | None = None
     if sched is not None and sched_dash is not None:
         scheduled_view = ScheduledView(
