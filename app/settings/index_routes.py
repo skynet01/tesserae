@@ -1624,6 +1624,18 @@ def _battery_card_or_none(device_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _battery_card_or_none(device_id: str) -> dict[str, Any] | None:
+    """The Batteries page's chart card for this device (last 7 days), for the
+    Power section; ``None`` without history or when it can't be built."""
+    from app.device_battery_routes import device_card
+
+    try:
+        return device_card(device_id, window_days=7)
+    except Exception:
+        current_app.logger.debug("devices: no battery card for %s", device_id, exc_info=True)
+        return None
+
+
 def _device_overview(device: Device, section: dict[str, Any]) -> dict[str, Any]:
     """The four headline tiles (showing / battery / firmware / next wake)
     shared by the Devices table's quick panel and the device page's
