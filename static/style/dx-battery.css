@@ -177,7 +177,7 @@
 .dx-battery-quiet--danger:hover { color: var(--t-danger); }
 .dx-battery-quiet:focus-visible { outline: 2px solid var(--t-accent); outline-offset: 2px; border-radius: 3px; }
 
-/* Per-chart range: 12h | 24h | 7d | 30d, above the chart. */
+/* Per-chart range: 6h | 12h | 24h | 7d | 30d, above the chart. */
 .dx-battery-chartbox { display: flex; flex-direction: column; gap: 10px; }
 .dx-battery-bar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; min-height: 24px; }
 .dx-battery-bar-key { flex: 1 1 auto; min-width: 0; }
