@@ -15,6 +15,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Device batteries: a Wakes / day tile with a breakdown by cause.
 - Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.
 - Device batteries: each chart has its own 6h / 12h / 24h / 7d / 30d range, remembered per device, and drag-to-zoom; the range switch at the top of the page is gone.
+- Device batteries: a gear next to each frame's name opens its settings.
 - Collapsible sections on the Server, System, About, Stats, Widgets, Companion, Generative AI, Cloud relay, calendar-feed and gallery pages, remembered per page; `section_card` takes `collapsible=False` to opt out.
 - Lineups: next update times are right for a display asleep in quiet hours, such as no more ~6:31 PM after a 9 AM wake.
 - Lineups: zoom any thumbnail into a larger view with Push now, and choose which photo or newspaper to push with previous and next arrows.
