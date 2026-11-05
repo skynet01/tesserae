@@ -128,7 +128,7 @@
   font-size: 12.5px;
 }
 
-.dx-battery-stats { gap: 8px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.dx-battery-stats { gap: 8px; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
 @media (max-width: 720px) { .dx-battery-stats { grid-template-columns: repeat(2, 1fr); } }
 .dx-battery-hint {
   margin: 0;
