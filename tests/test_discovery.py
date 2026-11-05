@@ -598,7 +598,7 @@ def test_visionect_device_page_shows_the_signs_report_and_its_actions(
     assert 'name="touch_mode"' in page and "The frame is set to On." in page
     assert 'name="frame_sleep"' in page
     assert 'name="wifi_region"' not in page and 'name="charging_mode"' not in page
-    assert "40 connections, 39 protocol errors, 1 pictures" in page
+    assert "40 connections, 39 protocol errors, 1 picture" in page
     assert "This frame looks stuck" in page and "reconnected 25 times" in page
     assert "172.16.3.151" in page
     assert "/settings/devices/hall/visionect/network" in page
