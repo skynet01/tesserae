@@ -1585,6 +1585,12 @@ def _now_line_for(device_id: str) -> dict[str, Any] | None:
     if next_step is None and nxt is not None and nxt.steps:
         next_step = nxt.steps[0]
         next_when = nxt.next_run.main if nxt.next_run is not None else ""
+    # A step on the dashboard already showing has no picture of its own yet: its
+    # thumbnail is what is on the frame now, not what comes next (an album draws
+    # its next photo only when the step fires).
+    showing = display.on_screen.dashboard_id if display and display.on_screen else None
+    if next_step is not None and next_step.dashboard_id == showing:
+        next_step = None
     upcoming: dict[str, Any] = (
         {
             "next_thumb": next_step.thumb_url,
@@ -1598,7 +1604,8 @@ def _now_line_for(device_id: str) -> dict[str, Any] | None:
     if live is not None:
         parts: list[str] = []
         window = live.window
-        if window is not None and not window.is_point and window.end is not None:
+        always_on = bool(live.progress and live.progress.always_on)
+        if window is not None and not window.is_point and window.end is not None and not always_on:
             parts.append(f"until {clock(window.end_min, end=True, cycle=view.time_cycle)}")
             # The next lineup takes over where this one ends.
             if nxt is not None and nxt.next_run is not None and nxt.next_run.hhmm == window.end:
