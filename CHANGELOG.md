@@ -8,15 +8,26 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
-- Visionect frames: set the heart beat interval, power saving mode, touch mode and system screens from the device page, only those the frame supports; settings go one packet at a time, as Visionect's own server sends them.
-- Visionect frames: a Status check interval, the last day's connections and errors, a warning when a frame looks stuck, hardware and radio details, and network details on request.
-- Visionect frames: update the frame's firmware from the Firmware page, with Visionect's release notes.
-- Device batteries: dots on the chart show each wake-up and why it happened (lineup, Home Assistant, button, manual push, reconnect, restart or scheduled check-in), each ringed so overlapping dots stay apart.
-- Device batteries: a Wakes / day tile with a breakdown by cause.
-- Device batteries: time with no readings (asleep or offline) is shaded instead of drawn as a line.
-- Device batteries: each chart has its own 6h / 12h / 24h / 7d / 30d range, remembered per device, and drag-to-zoom; the range switch at the top of the page is gone.
+- Visionect frames: update firmware from the Firmware page, more frame settings and connection health on the device page, and a sleeping frame keeps its old picture with newer ones Queued.
+- Visionect firmware: the builds tested on a frame are checked against a known SHA-256 when downloaded or read from the cache, and a list entry whose checksum isn't plain hex is skipped.
+- Device page: summary tiles and the next picture in the left column, a Lineups link, accent group titles, Troubleshooting's buttons at its foot, and devices listed under Settings in the sidebar.
+- GPT Image from words alone (`gpt_image_t2i`) for a widget that puts a
+  picture's whole layout in its prompt, such as a card with its own type,
+  where a reference picture would pull the composition towards itself. It
+  takes the same quality and size as the edit model, and goes straight to
+  OpenAI when only an OpenAI key is set.
+- Device page: a summary rail beside Display, Schedule, Controls, Power, Troubleshooting and Remove sections, with compact field rows and Advanced disclosures.
+- Collapsible sections on the Server, System, About, Stats and other admin pages, remembered per page.
+- Sub-section titles are one heading style on every page, with a hairline above.
+- Paper's section title marker follows the theme's accent colour instead of a fixed red.
+- The Lineups page is centred like the other pages instead of sitting left.
+- Device batteries: the chart marks each wake-up with a dot and why it happened.
+- Device batteries: a Wakes / day tile, and time with no readings is shaded instead of drawn as a line.
+- Device batteries: each chart has its own 6h / 12h / 24h / 7d / 30d range and drag-to-zoom, and there's no longer a second switch at the top.
 - Device batteries: a gear next to each frame's name opens its settings.
-- Collapsible sections on the Server, System, About, Stats, Widgets, Companion, Generative AI, Cloud relay, calendar-feed and gallery pages, remembered per page; `section_card` takes `collapsible=False` to opt out.
+- Device batteries: a readable dark tooltip, and Clear history is a corner link.
+- Device batteries: Visionect frames get drain and Reaches predictions too, and a short chart range predicts from at least a week of readings.
+- Device page: six collapsible sections instead of eleven, and the top tiles jump to their section.
 - Lineups: next update times are right for a display asleep in quiet hours, such as no more ~6:31 PM after a 9 AM wake.
 - Lineups: zoom any thumbnail into a larger view with Push now, and choose which photo or newspaper to push with previous and next arrows.
 - Lineups: for album, comics and illustrated-news dashboards the arrows draw another picture (and go back through the ones drawn) instead of choosing; Push sends the picture shown.
@@ -166,9 +177,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
-- Visionect: a sleeping frame shows the picture it actually holds, with newer ones marked Queued until it wakes.
-
-- Device batteries: the chart tooltip is readable in the dark theme, and dots are no longer cut off at the edges.
+- Visionect frames: a saved Wi-Fi password now reaches the frame, is masked on the device page instead of sent back to the browser, and is hidden in the frame log if the frame echoes it.
 - History: 12-hour times no longer overlap the thumbnail.
 - A link now always sits left of a button, and the primary action is rightmost,
   across the admin pages, dialogs and banners.
@@ -227,6 +236,10 @@ All notable changes to Tesserae are recorded here. Format loosely follows
   toggles a full-size view that pans inside the overlay, and a second click
   returns to fit. Backdrop click closes in the fit view only; Escape always
   closes.
+
+### Security
+
+- certifi 2026.10.23 in the lockfile, for PYSEC-2026-4320 in 2026.7.22.
 
 ## [0.496.1], 2026-10-31
 
