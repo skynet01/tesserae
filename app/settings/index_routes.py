@@ -22,7 +22,14 @@ from flask import current_app, flash, redirect, render_template, request, sessio
 from werkzeug.wrappers import Response
 
 from app import backup as _backup_mod
-from app import device_service, device_timetable, next_update, palette_profiles, test_patterns
+from app import (
+    device_service,
+    device_timetable,
+    next_update,
+    palette_profiles,
+    samsung_frame,
+    test_patterns,
+)
 from app import firmware_check as firmware_check_module
 from app import install_id as install_id_module
 from app import updater as _updater_mod
@@ -2152,10 +2159,13 @@ def _transport_badge(device: Device) -> str:
     "HA" for push devices (OpenDisplay-via-HA) delivered through a Home
     Assistant service call rather than a broker. Visionect signs are push
     devices too, over their own TCP protocol rather than through HA, so
-    they read "TCP" (the kind column names them)."""
+    they read "TCP" (the kind column names them). Samsung Frame TVs are
+    reached directly on the local network, "LAN"."""
     if device.transport == "rest":
         return "REST"
     if device.transport == "push":
+        if samsung_frame.is_samsung_frame_device(device):
+            return "LAN"
         return "TCP" if visionect_routes.is_visionect_device(device) else "HA"
     if device.transport == "relay":
         # Before the access-token branch: relay devices carry a device token

@@ -8,6 +8,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
+- Samsung The Frame: a `samsung_frame` kind that shows pages through the TV's own Art Mode, uploading each frame as a 4K JPEG over the local network and deleting its older uploads.
 - Visionect frames: update firmware from the Firmware page, more frame settings and connection health on the device page, and a sleeping frame keeps its old picture with newer ones Queued.
 - Visionect firmware: the builds tested on a frame are checked against a known SHA-256 when downloaded or read from the cache, and a list entry whose checksum isn't plain hex is skipped.
 - Device page: summary tiles and the next picture in the left column, a Lineups link, accent group titles, Troubleshooting's buttons at its foot, and devices listed under Settings in the sidebar.
