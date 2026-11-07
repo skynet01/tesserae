@@ -44,5 +44,8 @@
     "network:cdn.freedomforum.org",
     "network:frontpages.freedomforum.org",
     "settings:plugin"
-  ]
+  ],
+  "lineups": {
+    "pin_option": "paper"
+  }
 }

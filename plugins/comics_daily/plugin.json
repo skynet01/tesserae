@@ -41,5 +41,8 @@
     "network:web.archive.org",
     "network:xkcd.com",
     "network:imgs.xkcd.com"
-  ]
+  ],
+  "lineups": {
+    "draw": true
+  }
 }

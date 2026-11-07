@@ -2150,6 +2150,14 @@ def rotation_papers() -> list[tuple[str, str]]:
     return out
 
 
+def lineup_items(options: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """The Lineups page's item list (manifest ``lineups.pin_option`` = ``paper``):
+    one entry per paper in the rotation, versioned by today's edition so a
+    cached per-paper preview is redrawn when the day turns."""
+    stamp = edition_stamp()
+    return [{"key": code, "label": label, "version": stamp} for code, label in rotation_papers()]
+
+
 def edition_stamp() -> str:
     """The edition day papers are drawn from today (US Eastern), so a cached
     per-paper preview is thrown away when the day turns."""
