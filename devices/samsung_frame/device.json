@@ -156,6 +156,13 @@
       "min": 1,
       "max": 10,
       "help": "How many of Tesserae's uploads stay in My Photos. The newest is shown; older ones are deleted. Two keeps the previous frame as a fallback while the next one uploads."
+    },
+    "token": {
+      "type": "string",
+      "label": "Pairing token",
+      "default": "",
+      "secret": true,
+      "help": "Filled in by Tesserae after you press Allow on the TV. Clear it to pair again."
     }
   }
 }
