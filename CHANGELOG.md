@@ -6,6 +6,10 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Device page: dashboard schedules have their own list instead of sitting in the Lineups list.
+
 ## [0.510.0], 2026-11-10
 
 ### Added
