@@ -429,8 +429,10 @@ def test_an_image_the_cells_size_is_served_untouched(app: Flask, client: FlaskCl
     assert data == small
 
 
-def test_manifest_lets_lineups_draw_another_image() -> None:
+def test_manifest_leaves_lineup_items_to_the_core() -> None:
+    # Core lists the gallery's photos itself (app/step_items.py, by plugin id),
+    # so a `lineups` declaration here would be a second, ignored source.
     import json
 
     manifest = json.loads((Path(__file__).resolve().parents[1] / "plugin.json").read_text())
-    assert manifest["lineups"] == {"draw": True}
+    assert "lineups" not in manifest
