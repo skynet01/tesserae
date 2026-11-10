@@ -2196,3 +2196,16 @@ def test_the_smaller_screens_choice_reaches_the_page(tmp_path: Path, cdn: FakeCd
     # What the host passes as settings is ignored: the manifest declares none.
     _configure(tmp_path)
     assert server.fetch({"paper": "NY_NYT"}, {"small_screens": "whole"}, ctx=ctx)["fit"] == "top"
+
+
+def test_the_manifest_lists_its_papers_for_lineups() -> None:
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "plugin.json").read_text())
+    assert manifest["lineups"] == {"pin_option": "paper", "noun": "papers"}
+
+
+def test_lineup_items_are_the_papers_in_the_rotation(app: Flask) -> None:
+    with app.app_context():
+        items = _app_module(app).lineup_items({})
+    assert [i["key"] for i in items][:3] == ["NY_NYT", "WSJ", "USAT"]
+    assert items[0]["label"].startswith("The New York Times")
+    assert len({i["version"] for i in items}) == 1

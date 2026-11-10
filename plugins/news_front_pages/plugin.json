@@ -46,6 +46,7 @@
     "settings:plugin"
   ],
   "lineups": {
-    "pin_option": "paper"
+    "pin_option": "paper",
+    "noun": "papers"
   }
 }

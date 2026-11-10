@@ -2777,3 +2777,9 @@ def test_a_480x800_portrait_screen_packs_what_fits_and_previews_what_it_draws() 
         config, far, strips, [{"name": "Big", "w": 1440, "h": 2560, "group": srv.MINE}]
     )
     assert len(wide[0]["shown"][0]["pictures"]) == 4
+
+
+def test_a_comics_cell_declares_nothing_for_lineups() -> None:
+    """One composed page: no stack, no "draw", no arrows."""
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "plugin.json").read_text())
+    assert "lineups" not in manifest

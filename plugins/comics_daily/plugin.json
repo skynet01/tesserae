@@ -1,7 +1,7 @@
 {
   "tesserae_compat": "1.x",
   "name": "Comics",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "kind": "widget",
   "locales": [
     "en"
@@ -41,8 +41,5 @@
     "network:web.archive.org",
     "network:xkcd.com",
     "network:imgs.xkcd.com"
-  ],
-  "lineups": {
-    "draw": true
-  }
+  ]
 }

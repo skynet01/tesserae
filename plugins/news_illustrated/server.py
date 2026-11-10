@@ -90,9 +90,10 @@ def fetch(
 ) -> dict[str, Any]:
     """The story this placement shows now. Never makes stories itself.
 
-    ``_browse`` (not a manifest option) is the Lineups page's "draw next": a
-    preview render shows the story that many places past the current one and
-    moves nothing, so browsing never costs the frame a story."""
+    ``story`` pins the cell to one feed's story (the Lineups page picks it from
+    ``lineup_items``); a pinned cell never moves the rotation. ``_browse`` (not
+    a manifest option) shows the story that many places past the current one
+    and moves nothing."""
     data_dir = Path(ctx["data_dir"])
     values = config.load(data_dir, _legacy_settings)
     cfg = pipeline.Config.from_settings(merged(values, settings))
@@ -131,11 +132,52 @@ def fetch(
     stories = store.load_stories(data_dir)
     if not stories:
         return out
-    index = store.pick(data_dir, placement, len(stories), advance=not preview, now=time.time())
+    pinned = story_index(stories, options.get("story"))
+    if pinned is not None:
+        index = pinned
+    else:
+        index = store.pick(data_dir, placement, len(stories), advance=not preview, now=time.time())
     with contextlib.suppress(TypeError, ValueError):
         index = (index + max(0, int(options.get("_browse") or 0))) % len(stories)
     out.update(story_data(data_dir, stories[index], index, len(stories)))
     return out
+
+
+def story_index(stories: list[dict[str, Any]], key: Any) -> int | None:
+    """Where the story of feed ``key`` (its ``source_key``) sits, or None when
+    ``key`` is blank or that feed has no story now (the cell then rotates)."""
+    key = str(key or "").strip()
+    if not key:
+        return None
+    return next((i for i, s in enumerate(stories) if s.get("source_key") == key), None)
+
+
+def lineup_items(options: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """The Lineups page's item list (manifest ``lineups.pin_option`` = ``story``):
+    one entry per story now on disk, a feed's current top story. The key is the
+    feed's, so a pin follows the feed to its next story; the version changes
+    with the story so a cached preview is redrawn."""
+    out: list[dict[str, str]] = []
+    for s in store.load_stories(_data_dir()):
+        key = str(s.get("source_key") or "")
+        if not key:
+            continue
+        source = str(s.get("source") or "").strip()
+        title = str(s.get("title") or "")
+        version = str(s.get("story_id") or "") + str(s.get("image") or "")
+        out.append(
+            {"key": key, "label": f"{source}: {title}" if source else title, "version": version}
+        )
+    return out
+
+
+def choices(name: str) -> list[dict[str, str]]:
+    """The ``story`` option's choices: rotate, or one feed's story."""
+    if name != "stories":
+        return []
+    rows = [{"value": "", "label": "Rotate through the stories"}]
+    rows += [{"value": x["key"], "label": x["label"]} for x in lineup_items()]
+    return rows
 
 
 def story_data(data_dir: Path, story: dict[str, Any], index: int, count: int) -> dict[str, Any]:

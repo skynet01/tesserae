@@ -1,12 +1,12 @@
 {
   "tesserae_compat": "1.x",
   "name": "AI Illustrated News",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "kind": "widget",
   "locales": [
     "en"
   ],
-  "description": "Once a day, the top story of each of your feeds, summarised by an AI and drawn as a satirical ink cartoon (kie.ai, Gemini, Pollinations or HuggingFace). Shows one story at a time, poster style, moving to the next on each refresh.",
+  "description": "Once a day, the top story of each of your feeds, summarised by an AI and drawn as a satirical ink cartoon (kie.ai, Gemini, Pollinations or HuggingFace). Shows one story at a time, poster style, moving to the next on each refresh, or pinned to one feed's story.",
   "icon": "ph-newspaper-clipping",
   "category": "reading",
   "supports": {
@@ -18,6 +18,14 @@
     ]
   },
   "cell_options": [
+    {
+      "name": "story",
+      "type": "select",
+      "label": "Story",
+      "default": "",
+      "choices_from": "stories",
+      "help": "Show one feed's story or rotate through them all."
+    },
     {
       "name": "show_summary",
       "type": "boolean",
@@ -140,6 +148,7 @@
     }
   },
   "lineups": {
-    "draw": true
+    "pin_option": "story",
+    "noun": "stories"
   }
 }

@@ -1563,9 +1563,9 @@ def fetch(
     published = published_edition(datetime.now(UTC), today_iso)
     payload = _payload(wanted, problems, records, busy, config, store, today_iso, published)
     payload["layout"] = config.layout()
-    # ``_browse`` (not a manifest option) is the Lineups page's "draw next": that
-    # many turns past the current one, read-only, so browsing never moves the
-    # frame's own turn.
+    # ``_browse`` (a hidden option, not in the manifest; Lineups no longer sets
+    # it, a comics cell is one composed page): that many turns past the current
+    # one, read-only, so it never moves the frame's own turn.
     try:
         browse = max(0, min(50, int(options.get("_browse") or 0)))
     except (TypeError, ValueError):

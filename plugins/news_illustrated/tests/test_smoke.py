@@ -148,6 +148,52 @@ def test_pushes_rotate_through_the_stories(
     assert starts == []
 
 
+def test_the_manifest_lists_stories_for_lineups_and_pins_one() -> None:
+    manifest = json.loads((Path(__file__).resolve().parents[1] / "plugin.json").read_text())
+    assert manifest["lineups"] == {"pin_option": "story", "noun": "stories"}
+    cell = {o["name"]: o for o in manifest["cell_options"]}
+    assert cell["story"]["choices_from"] == "stories" and cell["story"]["default"] == ""
+
+
+def test_lineup_items_are_the_stories_on_disk(
+    app: Flask, mod: ModuleType, data_dir: Path, client: FlaskClient
+) -> None:
+    with app.app_context():
+        assert mod.lineup_items({}) == []
+    stories = _seed(mod, data_dir)
+    with app.app_context():
+        items = mod.lineup_items({})
+        rows = mod.choices("stories")
+        assert mod.choices("other") == []
+    assert [(i["key"], i["label"]) for i in items] == [
+        ("tech-1a2b3c4d", "Tech: Meta ignores court order"),
+        ("global-5e6f7a8b", "Global: Starlink connection now stable"),
+    ]
+    assert items[0]["version"].endswith(stories[0]["image"])
+    assert rows[0] == {"value": "", "label": "Rotate through the stories"}
+    assert [r["value"] for r in rows[1:]] == ["tech-1a2b3c4d", "global-5e6f7a8b"]
+
+
+def test_a_pinned_cell_shows_that_story_and_leaves_the_rotation_alone(
+    app: Flask, mod: ModuleType, data_dir: Path, starts: list[Any]
+) -> None:
+    _seed(mod, data_dir)
+    with app.app_context():
+        for preview in (False, True):
+            ctx = _ctx(data_dir, preview=preview, settled=not preview)
+            out = mod.fetch({"story": "global-5e6f7a8b"}, {}, ctx=ctx)
+            assert (out["index"], out["count"]) == (2, 2)
+            assert out["title"] == "Starlink connection now stable"
+    assert not (data_dir / "cursor.json").exists(), "a pinned cell never moves the rotation"
+    with app.app_context():
+        # A feed with no story now (or no pin): the cell rotates as usual.
+        gone = mod.fetch(
+            {"story": "removed-00000000"}, {}, ctx=_ctx(data_dir, preview=False, settled=True)
+        )
+        free = mod.fetch({"story": ""}, {}, ctx=_ctx(data_dir, preview=True, settled=False))
+    assert gone["index"] == 1 and free["index"] == 1
+
+
 def test_a_run_in_progress_asks_for_follow_ups(
     app: Flask,
     mod: ModuleType,
