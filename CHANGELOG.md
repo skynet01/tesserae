@@ -6,6 +6,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Keep selection marks and reorder handles visible for selected list items.
+
 ## [0.510.0], 2026-11-10
 
 ### Added
