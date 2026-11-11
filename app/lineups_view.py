@@ -138,6 +138,12 @@ class DashboardInfo:
     composition_digest: str | None = None
     #: the arrows draw it again (a widget that cannot name its items but differs per render)
     draw: bool = False
+    #: how many items a draw widget says it draws from (0 = it does not say)
+    draw_count: int = 0
+    #: the widget lists its items and listed none right now
+    empty_list: bool = False
+    #: the widget letterboxes its pictures (a gallery set to fit), so item previews do too
+    item_fit: bool = False
     missing: bool = False  # a lineup step still points at a deleted dashboard
     #: displays it is bound to, and "Name (WxH)" for each, for the off-display flag
     bound_ids: tuple[str, ...] = ()
@@ -172,6 +178,8 @@ class LineupUrls:
     step_item: str = ""
     window: str = ""
     days: str = ""
+    name: str = ""
+    order: str = ""
     bind: str = ""
 
 
@@ -199,6 +207,9 @@ class LineupInput:
     last_fired: float | None = None  # epoch of an interval lineup's last fire
     #: the lineup names its display(s), so a step bound elsewhere cannot show
     explicit_display: bool = False
+    #: a daily push's stored ``advance_end_at`` (the scheduler ignores it): what
+    #: "Add end time" offers first
+    end_hint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -580,6 +591,7 @@ class WindowView(_Dict):
     overlaps_pause: bool
     pause_title: str | None
     editable: bool
+    end_hint: str | None = None  # a push's remembered end, offered by "Add end time"
 
 
 @dataclass
@@ -624,6 +636,14 @@ class PillView(_Dict):
 
 
 @dataclass
+class OffWhyView(_Dict):
+    """Why a greyed row is greyed: its pictures are not in black and white."""
+
+    label: str  # "Not today", "Done for today", "Off", "Not playing"
+    title: str
+
+
+@dataclass
 class StepView(_Dict):
     index: int
     position: str  # "3/6" or "only"
@@ -650,6 +670,10 @@ class StepView(_Dict):
     pick_items: bool = False
     #: "draw next": the arrows render the dashboard again; there is no list to choose from
     draw_items: bool = False
+    draw_count: int = 0
+    #: lists its items, listed none, but has been sent before: still a collection
+    stacked: bool = False
+    item_fit: bool = False
     missing: bool = False  # its dashboard was deleted; the scheduler cannot show it
     #: its dashboard is bound only to other displays, so this one never shows it
     off_display: bool = False
@@ -681,6 +705,8 @@ class ActionsView(_Dict):
     can_push_step: bool
     bind_url: str = ""
     step_item_url: str = ""
+    name_url: str = ""
+    order_url: str = ""
 
 
 @dataclass
@@ -716,6 +742,8 @@ class LineupView(_Dict):
     warnings: list[str] = field(default_factory=list)
     display_removed: bool = False
     missing_count: int = 0  # steps whose dashboard was deleted; not in step_count
+    # Set on the rows drawn grey (status not_today / off): the reason, as a tag.
+    off_why: OffWhyView | None = None
 
 
 @dataclass
@@ -1362,6 +1390,62 @@ def window_overlaps_pause(pause: PauseInput | None, lineup: LineupInput) -> bool
         elif any(b.s < pe and b.e > ps for ps, pe in parts):
             return True
     return False
+
+
+def _short_range(start: int, end: int) -> str:
+    """``6–8 AM`` / ``11 AM–1 PM`` / ``06:00–08:00``: the clock range, with
+    the first AM/PM left off when both ends share it."""
+    a, b = clock(start), clock(end, end=True)
+    if a[-2:] in ("AM", "PM") and a[-2:] == b[-2:]:
+        a = a[:-2].rstrip("  ")
+    return f"{a}–{b}"
+
+
+def pause_note(pause: PauseInput | None, lineup: LineupInput, where: str) -> str | None:
+    """One line saying what quiet hours do to this lineup, or ``None`` when
+    they leave it alone. ``where`` names them (``Office Frame TV's quiet
+    hours``). Judged per run day with the pause's weekday and all-day masks;
+    a day that loses only part of the window wins over one that loses all of it."""
+    if pause is None or not window_overlaps_pause(pause, lineup):
+        return None
+    spans = day_spans(lineup)
+    if not spans:
+        return None
+    if lineup.kind == "interval":
+        # The window's last minute counts (18:00 runs), but it reads as 18:00, not 18:01.
+        spans = [(s, e - 1 if e < DAY_MIN else e) for s, e in spans]
+        spans = [(s, e) for s, e in spans if e > s] or day_spans(lineup)
+    if lineup.kind == "daily":
+        s = spans[0][0]
+        return f"Skipped: {clock(s)} is in {where}."
+    first, last = spans[0][0], spans[-1][1]
+    partial: str | None = None
+    whole = False
+    for day in sorted(set(lineup.days)):
+        parts = _pause_display_parts(pause, day)
+        hits = [
+            (max(ps, ws), min(pe, we))
+            for ws, we in spans
+            for ps, pe in parts
+            if ws < pe and ps < we
+        ]
+        if not hits:
+            continue
+        covered = sum(b - a for a, b in hits)
+        if covered >= sum(we - ws for ws, we in spans):
+            whole = True
+            continue
+        a, b = min(hits)
+        if a <= first:
+            partial = f"Starts at {clock(b)}: {_short_range(a, b)} is in {where}."
+        elif b >= last:
+            partial = f"Stops at {clock(a)}: {_short_range(a, b)} is in {where}."
+        else:
+            partial = f"Pauses {_short_range(a, b)} for {where}."
+        break
+    if partial:
+        return partial
+    return f"Sends nothing: all of it is in {where}." if whole else None
 
 
 # ---------------------------------------------------------------------------
@@ -2386,6 +2470,23 @@ def _next_update_view(
     )
 
 
+_GREY_NOTE = "Shown grey because it is not running now. Its pictures are in colour when it runs."
+
+
+def _off_why(status: LineupStatus, *, manual: bool, runs_today: bool) -> OffWhyView | None:
+    """The tag on a row drawn grey: a lineup that is off, by hand and idle, due
+    on another day, or due today but already finished (its window has ended)."""
+    if status == "off":
+        return OffWhyView("Off", f"Switched off; nothing runs until it is enabled. {_GREY_NOTE}")
+    if status != "not_today":
+        return None
+    if manual:
+        return OffWhyView("Not playing", f"Runs by hand and is not playing. {_GREY_NOTE}")
+    if runs_today:
+        return OffWhyView("Done for today", f"Today's run has ended. {_GREY_NOTE}")
+    return OffWhyView("Not today", f"It does not run today. {_GREY_NOTE}")
+
+
 def _lineup_sort_key(v: LineupView) -> tuple[int, int, str]:
     if v.status == "off":
         return (2, 0, v.name.lower())
@@ -2431,6 +2532,8 @@ def _lineup_view(
     else:
         status, status_label = "not_today", days_label(days_sorted)
 
+    off_why = _off_why(status, manual=lineup.kind == "manual", runs_today=today % 7 in lineup.days)
+
     # -- window ------------------------------------------------------------
     win = window_minutes(lineup)
     window: WindowView | None = None
@@ -2455,6 +2558,7 @@ def _lineup_view(
                 else None
             ),
             editable=True,
+            end_hint=lineup.end_hint if point else None,
         )
 
     # -- next run ------------------------------------------------------------
@@ -2619,6 +2723,9 @@ def _lineup_view(
                 items=[ItemView(it.index, it.label, it.thumb_url, it.key) for it in items],
                 pick_items=not (off_display or scr.missing) and any(it.key for it in items),
                 draw_items=not (off_display or scr.missing) and bool(dash and dash.draw),
+                draw_count=dash.draw_count if dash and dash.draw else 0,
+                stacked=bool(dash and dash.empty_list and dash.composition_digest),
+                item_fit=bool(dash and dash.item_fit),
                 current=i == intended,
                 next=i == nxt,
                 queued=is_queued,
@@ -2702,8 +2809,11 @@ def _lineup_view(
             can_push_step=bool(lineup.steps),
             bind_url=u.bind,
             step_item_url=u.step_item,
+            name_url=u.name,
+            order_url=u.order,
         ),
         sort_minutes=sort_minutes,
+        off_why=off_why,
     )
 
 

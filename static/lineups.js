@@ -26,7 +26,7 @@
   if (!vm || !Array.isArray(vm.displays)) return;
   R.setTimeCycle(vm.time_cycle);
 
-  const SNAP = 15;
+  const SNAP = R.SNAP;
   const DAY_MIN = 1440;
   const reduceMotion = () =>
     window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -104,6 +104,7 @@
     flash: {}, // display id -> {msg, err}
     saving: {},
     rowErr: {}, // lineup id -> the server's reason an edit was refused
+    dayFlash: {}, // lineup id -> {day, timer}: the day tile just clicked shows its new state
     // display id -> Set of weekdays opened in the Timeline view (default: none)
     tlOpen: Object.fromEntries(
       Object.entries(tlStored).map(([k, v]) => [
@@ -183,10 +184,7 @@
     return x;
   }
   const effLineup = (d, id) => effective(d).lineups.find((l) => l.id === id);
-  const winOf = (l) => [
-    l.window.start_min,
-    l.window.is_point ? l.window.start_min : l.window.end_min,
-  ];
+  const winOf = R.winOf;
   const sameDays = (a, b) => a.every((v, i) => !!v === !!b[i]);
 
   function setPending(d, l, change) {
@@ -227,72 +225,8 @@
   }
   const pendingCount = (d) => Object.keys(st.pending[d.id] || {}).length;
 
-  // Other lineups' windows on the given days (points for single pushes).
-  function obstacles(ed, l, days) {
-    const out = [];
-    ed.lineups.forEach((o) => {
-      if (o.id === l.id || !o.window || !o.enabled || o.window.wraps) return;
-      if (!o.days.some((on, i) => on && days[i])) return;
-      const [s, e] = winOf(o);
-      out.push({ s, e, o });
-    });
-    return out;
-  }
-  function clash(ed, l, s, e, days) {
-    return obstacles(ed, l, days).find((b) =>
-      b.s === b.e
-        ? b.s >= s && b.s < Math.max(e, s + 1)
-        : s === e
-          ? s >= b.s && s < b.e
-          : s < b.e && e > b.s
-    );
-  }
-  function room(ed, l, os, oe) {
-    let lo = 0;
-    let hi = DAY_MIN;
-    let loBy = null;
-    let hiBy = null;
-    obstacles(ed, l, l.days).forEach((b) => {
-      if (b.e <= os && b.e >= lo) {
-        lo = b.s === b.e ? b.s + SNAP : b.e;
-        loBy = b.o;
-      }
-      if (b.s >= oe && b.s <= hi && !(b.s === oe && b.s === b.e && os === oe)) {
-        hi = b.s;
-        hiBy = b.o;
-      }
-    });
-    return { lo, hi, loBy, hiBy };
-  }
-  function proposal(ed, l, mode, os, oe, dm) {
-    const { lo, hi, loBy, hiBy } = room(ed, l, os, oe);
-    const push = !!l.window.is_point;
-    const maxE = push ? Math.min(hi, DAY_MIN - SNAP) : hi;
-    let s = os;
-    let e = oe;
-    let stop = null;
-    if (mode === "move") {
-      s = os + dm;
-      e = oe + dm;
-      if (s < lo) {
-        e += lo - s;
-        s = lo;
-        stop = loBy;
-      }
-      if (e > maxE) {
-        s -= e - maxE;
-        e = maxE;
-        stop = hiBy;
-      }
-    } else if (mode === "l") {
-      s = Math.min(Math.max(os + dm, lo), oe - SNAP);
-      if (os + dm < lo) stop = loBy;
-    } else {
-      e = Math.max(Math.min(oe + dm, hi), os + SNAP);
-      if (oe + dm > hi) stop = hiBy;
-    }
-    return { s, e, stop, pause: R.overlapsPause(ed.pause, s, e) };
-  }
+  // The bar's edit rules are shared with the lineup editor (lineups_render.js).
+  const { room, clash } = R;
   function commit(d, id, s, e) {
     const ed = effective(d);
     const l = ed.lineups.find((x) => x.id === id);
@@ -313,6 +247,7 @@
     },
     folded: isFolded,
     rowError: (l) => st.rowErr[l.id] || "",
+    dayFlash: (id) => st.dayFlash[id] || null,
     tlOpen: (d, i) => !!(st.tlOpen[d.id] && st.tlOpen[d.id].has(i)),
     isNew: (l) => l.id === newId,
     collapsed: (d) => collapsed.has(d.id),
@@ -338,6 +273,7 @@
       "data-zoom",
       "data-item",
       "data-win-edit",
+      "data-name-edit",
       "data-undo",
       "data-save",
     ]) {
@@ -468,6 +404,7 @@
       html = host.innerHTML; // the server's empty state
     }
     replaceCards(html);
+    markSteps();
     followColdThumbs();
     lastRO = barReadOnly();
     root.classList.toggle("bar-ro", lastRO);
@@ -1578,7 +1515,26 @@
       days[day] = true;
     }
     const p = (st.pending[d.id] && st.pending[d.id][lid]) || origOf(found.l);
+    flashDay(lid, day, days[day]);
     applyEdit(d, found.l, { start_min: p.start_min, end_min: p.end_min, days });
+    say(`${R.DAYS[day]} ${days[day] ? "on" : "off"} for ${l.name}.`);
+  }
+  // The tile just clicked shows a check (now on) or an x (now off) in place of its
+  // letter for a moment; it survives a redraw and clears itself.
+  const DAY_FLASH_MS = 1400;
+  function flashDay(lid, day, on) {
+    const old = st.dayFlash[lid];
+    if (old) clearTimeout(old.timer);
+    st.dayFlash[lid] = {
+      day,
+      on,
+      timer: setTimeout(() => {
+        delete st.dayFlash[lid];
+        host
+          .querySelectorAll(`[data-toggle-day^="${CSS.escape(lid)}:"]`)
+          .forEach((b) => b.classList.remove("just-on", "just-off"));
+      }, DAY_FLASH_MS),
+    };
   }
 
   /* ------------------------------------------------------------ window editor */
@@ -1586,34 +1542,113 @@
     const m = /^(\d{1,2}):(\d{2})/.exec(v || "");
     return m ? Number(m[1]) * 60 + Number(m[2]) : NaN;
   };
+  // What an end time is in the model: a daily push has none (it fires once and the frame is
+  // held), so "Add end time" turns it into a start-end window: one dashboard shown again
+  // through it, or several taken in turn (a rotation). Removing the end turns either back
+  // into a push at its start. Those change the lineup's kind, which an unsaved edit cannot
+  // preview, so they save at once.
+  const canToggleEnd = (l) =>
+    l.window.is_point || l.kind === "cycle" || (l.kind === "interval" && l.step_count === 1);
+  async function saveEndChange(d, l, s, e, ui) {
+    const edit = { id: l.id, start: R.hhmm(s) };
+    if (e === null) edit.push = true;
+    else edit.end = R.endHhmm(e);
+    const pend = st.pending[d.id] && st.pending[d.id][l.id];
+    if (pend) edit.days = pend.days.map((on, i) => (on ? i : -1)).filter((i) => i >= 0);
+    ui.busy(true);
+    try {
+      const res = await API.saveEdits([edit]);
+      generation++;
+      const fresh = adoptFresh(res);
+      Object.keys(st.pending).forEach((did) => {
+        delete st.pending[did][l.id];
+        if (!Object.keys(st.pending[did]).length) delete st.pending[did];
+      });
+      delete st.rowErr[l.id];
+      const notes = ["Saved."];
+      if (res && Array.isArray(res.warnings)) notes.push(...res.warnings);
+      st.flash[d.id] = { msg: notes.join(" ") };
+      say(
+        e === null
+          ? `${l.name} is now a single push at ${R.clock(s)}.`
+          : `${l.name} now runs ${R.clockRange(s, e)}.`
+      );
+      if (!fresh) scheduleRefresh(0);
+      render();
+    } catch (err) {
+      ui.busy(false);
+      ui.error(err.message);
+    }
+  }
   function openWinEdit(btn) {
     const found = lineupOf(btn.dataset.winEdit, displayOf(btn));
     if (!found || !found.d) return;
     const d = found.d;
     const l = effLineup(d, found.l.id);
     const point = l.window.is_point;
+    const toggle = canToggleEnd(l);
     const wrap = document.createElement("span");
     wrap.className = "lu-win-edit";
     const endVal = l.window.end === "24:00" ? "23:59" : l.window.end;
+    const endHtml = (v) =>
+      `<span class="lu-win-endwrap"><span>–</span><input type="time" step="900" value="${v}" aria-label="End"></span>`;
     wrap.innerHTML =
       `<input type="time" step="900" value="${l.window.start}" aria-label="Start">` +
-      (point
-        ? ""
-        : `<span>–</span><input type="time" step="900" value="${endVal}" aria-label="End">`) +
+      (point ? "" : endHtml(endVal)) +
+      (toggle ? `<button type="button" class="lu-win-end" data-win-end></button>` : "") +
       `<button type="button" class="lu-ibtn sm" data-win-ok title="Apply (Enter)" aria-label="Apply">${R.ico("check")}</button><span class="lu-win-err" role="alert"></span>`;
     btn.replaceWith(wrap);
     wrap.querySelector("input").focus();
+    const endBtn = wrap.querySelector("[data-win-end]");
+    const err = wrap.querySelector(".lu-win-err");
+    const startIn = wrap.querySelector("input");
+    // The end field exists only while the editor says the lineup has an end, so a
+    // push's editor is the one start field it always was.
+    const endIn = () => wrap.querySelector(".lu-win-endwrap input");
+    let ended = !point;
+    // Without an end it offers one ("+ End time"); with one, a small x beside the end field
+    // takes it off. Its name says what it does next (a toggle's name would stay put).
+    const drawEndBtn = () => {
+      if (!endBtn) return;
+      const what = ended ? "Remove end time" : "Add end time";
+      endBtn.classList.toggle("is-rm", ended);
+      endBtn.innerHTML = ended ? R.ico("x") : `${R.ico("plus")}<span>End time</span>`;
+      endBtn.setAttribute("aria-label", what);
+      endBtn.title = what;
+    };
+    drawEndBtn();
+    // The end first offered: the one the push remembers, else an hour on, and never
+    // past the next lineup on the display when that leaves room.
+    const firstEnd = (s) => {
+      if (!Number.isFinite(s)) return "17:00";
+      const hint = T(l.window.end_hint);
+      let e = Number.isFinite(hint) && hint > s ? hint : s + 60;
+      const { hi } = room(effective(d), l, s, s);
+      if (hi - s >= SNAP) e = Math.min(e, hi);
+      return e >= DAY_MIN ? "23:59" : R.hhmm(e);
+    };
+    if (endBtn)
+      endBtn.addEventListener("click", () => {
+        ended = !ended;
+        err.textContent = "";
+        drawEndBtn();
+        if (ended) {
+          startIn.insertAdjacentHTML("afterend", endHtml(firstEnd(T(startIn.value))));
+          endIn().focus();
+        } else {
+          wrap.querySelector(".lu-win-endwrap").remove();
+          startIn.focus();
+        }
+      });
     const apply = () => {
-      const ins = wrap.querySelectorAll("input");
-      const s = T(ins[0].value);
-      let e = point ? s : T(ins[1].value);
-      if (!point && ins[1].value === "23:59") e = DAY_MIN;
-      const err = wrap.querySelector(".lu-win-err");
+      const s = T(startIn.value);
+      let e = ended ? T(endIn().value) : s;
+      if (ended && endIn().value === "23:59") e = DAY_MIN;
       if (!Number.isFinite(s) || !Number.isFinite(e)) {
         err.textContent = "Enter a time";
         return;
       }
-      if (!point && e - s < SNAP) {
+      if (ended && e - s < SNAP) {
         err.textContent = "End must be after start";
         return;
       }
@@ -1622,10 +1657,20 @@
         err.textContent = `Overlaps ${c.o.name}`;
         return;
       }
+      if (ended === point && toggle) {
+        // The end was added to a push, or taken off a window.
+        saveEndChange(d, l, s, ended ? e : null, {
+          busy: (on) => wrap.querySelectorAll("input, button").forEach((x) => (x.disabled = on)),
+          error: (m) => {
+            err.textContent = m;
+          },
+        });
+        return;
+      }
       commit(d, l.id, s, e);
     };
     wrap.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
+      if (e.key === "Enter" && !e.target.closest("[data-win-end]")) {
         e.preventDefault();
         apply();
       } else if (e.key === "Escape") {
@@ -1637,145 +1682,346 @@
     wrap.querySelector("[data-win-ok]").addEventListener("click", apply);
   }
 
+  /* ------------------------------------------------------------ name editor */
+  const NAME_MAX = 80;
+  // Swap in the server's fresh copy of the displays an edit touched (the page's own edits
+  // are drawn over them by render). Returns how many it replaced.
+  function adoptFresh(res) {
+    const fresh = res && Array.isArray(res.displays) ? res.displays : [];
+    vm.displays = vm.displays.map((x) => {
+      const updated = fresh.find((f) => f.id === x.id);
+      if (!updated) return x;
+      const copy = JSON.parse(JSON.stringify(updated));
+      copy.lineups.forEach((l) => {
+        delete l.pending;
+        delete l.pending_days;
+      });
+      return copy;
+    });
+    return fresh.length;
+  }
+  // The renamed lineup, drawn at once everywhere its name shows (rows, day bar, timeline):
+  // the server's fresh copy of the touched displays when it sent one, else the name patched
+  // in, and a refresh to pick up the rest.
+  function applyRenamed(id, name, res) {
+    const n = adoptFresh(res);
+    if (!n) {
+      vm.displays.forEach((x) =>
+        x.lineups.forEach((l) => {
+          if (l.id === id) l.name = name;
+        })
+      );
+    }
+    (vm.unassigned || []).forEach((l) => {
+      if (l.id === id) l.name = name;
+    });
+    delete st.rowErr[id];
+    scheduleRefresh(n ? 800 : 0);
+  }
+  function openNameEdit(btn) {
+    const found = lineupOf(btn.dataset.nameEdit, displayOf(btn));
+    if (!found) return;
+    const l = found.l;
+    const old = l.name;
+    const wrap = document.createElement("span");
+    wrap.className = "lu-name-edit";
+    wrap.innerHTML =
+      `<input type="text" maxlength="${NAME_MAX}" autocomplete="off" spellcheck="false" aria-label="Name of this lineup. Enter saves, Escape cancels">` +
+      '<span class="lu-name-err" role="alert"></span>';
+    const input = wrap.querySelector("input");
+    const err = wrap.querySelector(".lu-name-err");
+    err.id = `lu-name-err-${l.id}`;
+    input.setAttribute("aria-describedby", err.id);
+    const showErr = (m) => {
+      err.textContent = m;
+      if (m) input.setAttribute("aria-invalid", "true");
+      else input.removeAttribute("aria-invalid");
+    };
+    input.value = old;
+    btn.replaceWith(wrap);
+    input.focus();
+    input.select();
+    let finished = false;
+    const focusName = () => {
+      const b = host.querySelector(`[data-name-edit="${CSS.escape(l.id)}"]`);
+      if (b) b.focus({ preventScroll: true });
+    };
+    const stop = (refocus) => {
+      finished = true;
+      render();
+      if (refocus) focusName();
+    };
+    const submit = async (fromBlur) => {
+      if (finished) return;
+      const name = input.value.replace(/\s+/g, " ").trim();
+      if (!name) {
+        if (fromBlur) {
+          stop();
+          say(`Name not changed: a lineup needs a name.`);
+        } else {
+          showErr("Enter a name");
+        }
+        return;
+      }
+      if (name === old) {
+        stop(!fromBlur);
+        return;
+      }
+      finished = true;
+      input.disabled = true;
+      try {
+        const res = await API.setName(l, name);
+        applyRenamed(l.id, name, res);
+        generation++;
+        say(`Renamed ${old} to ${name}.`);
+        render();
+        if (!fromBlur) focusName();
+      } catch (e) {
+        if (fromBlur) {
+          st.rowErr[l.id] = `Not renamed: ${e.message}`;
+          render();
+        } else {
+          finished = false;
+          input.disabled = false;
+          showErr(e.message);
+          input.focus();
+        }
+        say(`Not renamed: ${e.message}`);
+      }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submit(false);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        stop(true);
+        say("Name not changed.");
+      }
+    });
+    input.addEventListener("input", () => showErr(""));
+    input.addEventListener("blur", () => submit(true));
+  }
+
+  /* ------------------------------------------------------------ step order */
+  // A lineup's dashboards drag left and right to reorder (HTML5 drag and drop, as the deck
+  // editor's rail does), or move with Alt+Left / Alt+Right on any control in the step. The
+  // drop saves at once; the server's copy of the lineup then redraws the n/N labels, the
+  // NOW and NEXT markers and the timeline. A drag ends without a click, so it neither
+  // zooms the picture nor folds the row.
+  let sdrag = null; // {lid, did, ol, scroll, li, from, to}
+  let moving = false;
+  const stepsOf = (ol) => [...ol.children].filter((x) => x.matches(".lu-step"));
+  const rowKey = (row) => ({ lid: row.dataset.lineup, did: row.dataset.display || undefined });
+  function markSteps() {
+    host.querySelectorAll(".lu-strip").forEach((ol) => {
+      const row = ol.closest(".lu-row");
+      const steps = stepsOf(ol);
+      const { lid, did } = row ? rowKey(row) : {};
+      const found = row ? lineupOf(lid, did) : null;
+      const sortable = !!found && steps.length > 1 && steps.length === found.l.steps.length;
+      ol.classList.toggle("is-sortable", sortable);
+      steps.forEach((li) => {
+        // The shortcut is said where focus lands: the step's own buttons.
+        const keyed = [li, ...li.querySelectorAll("[data-zoom], .lu-push-ov")];
+        if (sortable) {
+          li.draggable = true;
+          keyed.forEach((x) => x.setAttribute("aria-keyshortcuts", "Alt+ArrowLeft Alt+ArrowRight"));
+          const cap = li.querySelector("figcaption");
+          if (cap) cap.title = "Drag to reorder, or Alt+Left and Alt+Right";
+        } else {
+          li.removeAttribute("draggable");
+          keyed.forEach((x) => x.removeAttribute("aria-keyshortcuts"));
+        }
+      });
+    });
+  }
+  function clearDrop() {
+    host
+      .querySelectorAll(".lu-step.drop-before, .lu-step.drop-after")
+      .forEach((x) => x.classList.remove("drop-before", "drop-after"));
+  }
+  function endStepDrag() {
+    if (sdrag) {
+      sdrag.li.classList.remove("is-dragging");
+      sdrag.ol.classList.remove("is-reordering");
+    }
+    clearDrop();
+    sdrag = null;
+  }
+  // Where a step moved to ends up, drawn once the server has answered.
+  async function moveStep(lid, did, from, to, keyboard) {
+    const found = lineupOf(lid, did);
+    if (!found || moving || from === to) return;
+    const l = found.l;
+    const n = l.steps.length;
+    if (!(to >= 0 && to < n)) return;
+    const name = l.steps[from].name;
+    const ids = l.steps.map((s) => s.dashboard_id);
+    const rowSel = `.lu-row[data-lineup="${CSS.escape(lid)}"]${did ? `[data-display="${CSS.escape(did)}"]` : ""}`;
+    const focusSel = keyboard
+      ? (document.activeElement &&
+          document.activeElement.matches("[data-zoom]") &&
+          "[data-zoom]") ||
+        ".lu-push-ov, .lu-zoom, button"
+      : "";
+    moving = true;
+    // The step sits in its new place at once; the redraw below makes it exact.
+    const row = host.querySelector(rowSel);
+    const ol = row && row.querySelector(".lu-strip");
+    if (ol) {
+      const steps = stepsOf(ol);
+      const li = steps[from];
+      const rest = steps.filter((x) => x !== li);
+      if (li) ol.insertBefore(li, rest[to] || null);
+      row.setAttribute("aria-busy", "true");
+    }
+    delete st.rowErr[lid];
+    try {
+      const res = await API.moveStep(l, from, to, ids);
+      generation++;
+      const fresh = adoptFresh(res);
+      if (!fresh) {
+        // Without the server's copy, order our own and ask for the rest.
+        vm.displays.forEach((x) =>
+          x.lineups.forEach((v) => {
+            if (v.id === lid) v.steps.splice(to, 0, v.steps.splice(from, 1)[0]);
+          })
+        );
+        scheduleRefresh(0);
+      }
+      moving = false;
+      render();
+      say(`Moved ${name} to position ${to + 1} of ${n}.`);
+      const moved = host.querySelector(`${rowSel} .lu-step[data-step="${to}"]`);
+      if (moved) {
+        moved.classList.add("just-moved");
+        setTimeout(() => moved.classList.remove("just-moved"), 1000);
+        moved.scrollIntoView({ block: "nearest", inline: "nearest" });
+        if (focusSel) {
+          const f = moved.querySelector(focusSel);
+          if (f) f.focus({ preventScroll: true });
+        }
+      }
+    } catch (err) {
+      moving = false;
+      st.rowErr[lid] = `Not reordered: ${err.message}`;
+      say(`Not reordered: ${err.message}`);
+      render();
+      // Back where it was, and so is the keyboard.
+      const back = focusSel && host.querySelector(`${rowSel} .lu-step[data-step="${from}"]`);
+      const f = back && back.querySelector(focusSel);
+      if (f) f.focus({ preventScroll: true });
+      if (err.status === 409) scheduleRefresh(0);
+    }
+  }
+
+  host.addEventListener("dragstart", (e) => {
+    const li = e.target.closest && e.target.closest(".lu-step[draggable='true']");
+    if (!li || moving) return;
+    const ol = li.parentElement;
+    const row = ol.closest(".lu-row");
+    if (!row || !ol.classList.contains("is-sortable")) return;
+    closePeek();
+    hideTip();
+    const { lid, did } = rowKey(row);
+    sdrag = {
+      lid,
+      did,
+      ol,
+      scroll: ol.closest(".lu-strip-scroll"),
+      li,
+      from: stepsOf(ol).indexOf(li),
+      to: null,
+    };
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", li.querySelector(".lu-step-name")?.textContent || "");
+    // The row stays as it is while a gesture is in flight (see busy()).
+    li.classList.add("is-dragging");
+    ol.classList.add("is-reordering");
+  });
+  host.addEventListener("dragover", (e) => {
+    if (!sdrag) return;
+    const sc = e.target.closest && e.target.closest(".lu-strip-scroll");
+    if (sc !== sdrag.scroll) {
+      sdrag.to = null;
+      clearDrop();
+      return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const steps = stepsOf(sdrag.ol);
+    let slot = steps.length;
+    for (let i = 0; i < steps.length; i++) {
+      const r = steps[i].getBoundingClientRect();
+      if (e.clientX < r.left + r.width / 2) {
+        slot = i;
+        break;
+      }
+    }
+    // Dropping before the step itself or right after it leaves it where it is.
+    const to = slot > sdrag.from ? slot - 1 : slot;
+    clearDrop();
+    sdrag.to = to === sdrag.from ? null : to;
+    if (sdrag.to !== null) {
+      if (slot < steps.length) steps[slot].classList.add("drop-before");
+      else steps[steps.length - 1].classList.add("drop-after");
+    }
+    // Near either edge the strip scrolls so a far slot can be reached.
+    const sr = sc.getBoundingClientRect();
+    if (e.clientX < sr.left + 56) sc.scrollLeft -= 18;
+    else if (e.clientX > sr.right - 56) sc.scrollLeft += 18;
+  });
+  host.addEventListener("drop", (e) => {
+    if (!sdrag) return;
+    e.preventDefault();
+    const { lid, did, from, to } = sdrag;
+    endStepDrag();
+    if (to !== null) moveStep(lid, did, from, to, false);
+  });
+  host.addEventListener("dragend", endStepDrag);
+  host.addEventListener("keydown", (e) => {
+    if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const li = e.target.closest && e.target.closest(".lu-step[draggable='true']");
+    if (!li) return;
+    const ol = li.parentElement;
+    const row = ol.closest(".lu-row");
+    if (!row || !ol.classList.contains("is-sortable")) return;
+    e.preventDefault();
+    const steps = stepsOf(ol);
+    const from = steps.indexOf(li);
+    const to = Math.max(0, Math.min(steps.length - 1, from + (e.key === "ArrowLeft" ? -1 : 1)));
+    const { lid, did } = rowKey(row);
+    if (to === from) {
+      say(to === 0 ? "Already the first dashboard." : "Already the last dashboard.");
+      return;
+    }
+    moveStep(lid, did, from, to, true);
+  });
+
   /* ------------------------------------------------------------ bar drag */
-  let drag = null;
-  let justDragged = false;
   // Phones and narrow cards get a read-only bar (as in the mockup); edits go
   // through the time inputs and day tiles. Tablets drag with any pointer.
   const phoneMQ = window.matchMedia(
     "(pointer: coarse) and (max-width: 600px), (pointer: coarse) and (max-height: 500px)"
   );
   const barReadOnly = () => phoneMQ.matches || host.clientWidth <= 602;
-  const tipText = (l, p, grid) => {
-    const t = l.window.is_point ? `at ${R.clock(p.s)}` : R.clockRange(p.s, p.e);
-    const days = l.days.map((on, i) => (on ? R.DAYS[i] : "")).filter(Boolean);
-    const applies =
-      grid && days.length > 1
-        ? `<span class="lu-tip-stop">applies to ${days.join(", ")}</span>`
-        : "";
-    return `<b>${t}</b>${applies}${p.stop ? `<span class="lu-tip-stop">stops at ${R.esc(p.stop.name)}</span>` : ""}${p.pause ? `<span class="lu-tip-warn">${R.ico("pause")}Quiet hours</span>` : ""}`;
-  };
-  document.addEventListener("pointerdown", (e) => {
-    if (drag) endDrag(false); // a lost pointerup never leaves a drag stuck
-    const blk = e.target.closest && e.target.closest(".lu .lu-blk[data-edit]");
-    if (!blk || e.button !== 0) return;
-    const trk = blk.closest(".lu-trk");
-    if (!trk || barReadOnly() || trk.clientWidth <= 0) return;
-    const d = displayById(blk.dataset.display);
-    const ed = d && effective(d);
-    const l = ed && ed.lineups.find((x) => x.id === blk.dataset.lineup);
-    if (!l || !l.window) return;
-    const [os, oe] = winOf(l);
-    const h = e.target.closest(".lu-h");
-    const mode = h ? h.dataset.h : "move";
-    trk.insertAdjacentHTML("beforeend", '<span class="lu-drag-tip" role="status"></span>');
-    const tip = trk.lastElementChild;
-    const grid = trk.classList.contains("tl");
-    const ghosts = [];
-    if (grid) {
-      trk.classList.add("dragging");
-      host.querySelectorAll(`.lu-tlg-trk`).forEach((other) => {
-        if (other === trk || !other.closest(`.lu-ds[data-display="${CSS.escape(d.id)}"]`)) return;
-        if (!l.days[Number(other.dataset.day)]) return;
-        other.insertAdjacentHTML(
-          "beforeend",
-          `<i class="lu-ghost" style="left:${(os / DAY_MIN) * 100}%;width:${((oe - os) / DAY_MIN) * 100}%" title="Applies here too"></i>`
-        );
-        ghosts.push(other.lastElementChild);
-      });
-    }
-    drag = {
-      grid,
-      ghosts,
-      blk,
-      trk,
-      d,
-      ed,
-      l,
-      os,
-      oe,
-      mode,
-      x0: e.clientX,
-      W: trk.clientWidth,
-      moved: false,
-      left: blk.style.left,
-      width: blk.style.width,
-      tip,
-      pid: e.pointerId,
-    };
-    try {
-      blk.setPointerCapture(e.pointerId);
-    } catch {
-      /* the document listeners still drive the drag */
-    }
-    blk.classList.add("is-drag");
-    e.preventDefault();
+  const edit = R.barEdit({
+    host,
+    readOnly: barReadOnly,
+    find: (blk) => {
+      const d = displayById(blk.dataset.display);
+      const ed = d && effective(d);
+      const l = ed && ed.lineups.find((x) => x.id === blk.dataset.lineup);
+      return l && l.window ? { d, ed, l } : null;
+    },
+    commit: (ctx, s, e) => commit(ctx.d, ctx.l.id, s, e),
   });
-  document.addEventListener("pointermove", (e) => {
-    if (!drag) return;
-    if (!drag.blk.isConnected) {
-      endDrag(false);
-      return;
-    }
-    let dm = Math.round((((e.clientX - drag.x0) / drag.W) * DAY_MIN) / SNAP) * SNAP;
-    if (!Number.isFinite(dm)) dm = 0;
-    if (dm) drag.moved = true;
-    const p = proposal(drag.ed, drag.l, drag.mode, drag.os, drag.oe, dm);
-    drag.p = p;
-    const pc = (m) => (m / DAY_MIN) * 100;
-    drag.blk.style.left = pc(p.s) + "%";
-    if (!drag.l.window.is_point) drag.blk.style.width = pc(p.e - p.s) + "%";
-    drag.blk.classList.toggle("is-stopped", !!p.stop);
-    drag.tip.innerHTML = tipText(drag.l, p, drag.grid);
-    if (drag.grid) {
-      // The window belongs to the lineup: ghost the change on its other days.
-      drag.ghosts.forEach((g) => {
-        g.style.left = pc(p.s) + "%";
-        g.style.width = drag.l.window.is_point ? "10px" : pc(p.e - p.s) + "%";
-      });
-    }
-    const mid = ((pc(p.s) + pc(p.e)) / 2 / 100) * drag.W;
-    const w = drag.tip.offsetWidth;
-    drag.tip.style.left = Math.max(0, Math.min(drag.W - w, mid - w / 2)) + "px";
-  });
-  function endDrag(apply) {
-    const g = drag;
-    drag = null;
-    if (!g) return;
-    if (g.tip) g.tip.remove();
-    (g.ghosts || []).forEach((x) => x.remove());
-    g.trk.classList.remove("dragging");
-    g.blk.classList.remove("is-drag", "is-stopped");
-    try {
-      if (g.blk.hasPointerCapture && g.blk.hasPointerCapture(g.pid))
-        g.blk.releasePointerCapture(g.pid);
-    } catch {
-      /* already released */
-    }
-    if (!g.moved) return;
-    justDragged = true;
-    setTimeout(() => {
-      justDragged = false;
-    }, 0);
-    if (!apply || !g.p || (g.p.s === g.os && g.p.e === g.oe) || !g.blk.isConnected) {
-      g.blk.style.left = g.left;
-      g.blk.style.width = g.width;
-      return;
-    }
-    commit(g.d, g.l.id, g.p.s, g.p.e);
-  }
-  document.addEventListener("pointerup", () => drag && endDrag(true));
-  document.addEventListener("pointercancel", () => drag && endDrag(false));
-  window.addEventListener("blur", () => drag && endDrag(false));
   document.addEventListener(
     "keydown",
     (e) => {
-      if (e.key === "Escape" && drag) {
-        drag.moved = true;
-        endDrag(false);
-        e.stopPropagation();
-        return;
-      }
       const gridBlk = e.target.closest && e.target.closest(".lu .lu-tlg-trk .lu-blk[tabindex]");
       if (gridBlk && (e.key === "Enter" || e.key === " ")) {
         e.preventDefault();
@@ -1788,19 +2034,7 @@
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         openRow(blk.dataset.lineup, blk.dataset.display);
-        return;
       }
-      if (!["ArrowLeft", "ArrowRight"].includes(e.key) || barReadOnly()) return;
-      e.preventDefault();
-      const d = displayById(blk.dataset.display);
-      const ed = effective(d);
-      const l = ed.lineups.find((x) => x.id === blk.dataset.lineup);
-      const [os, oe] = winOf(l);
-      const dm = e.key === "ArrowLeft" ? -SNAP : SNAP;
-      const mode = e.shiftKey && !l.window.is_point ? (e.altKey ? "l" : "r") : "move";
-      const p = proposal(ed, l, mode, os, oe, dm);
-      if (p.s === os && p.e === oe) return;
-      commit(d, l.id, p.s, p.e);
     },
     true
   );
@@ -1898,12 +2132,13 @@
     // travelled (a slipped click on Firefox).
     const wr = e.target.closest(".lu-tlg-row");
     if (wr && !e.target.closest(".lu-wb-more")) {
-      if (!justDragged && !travelled(e)) toggleWeekRow(wr.dataset.display, Number(wr.dataset.day));
+      if (!edit.justDragged() && !travelled(e))
+        toggleWeekRow(wr.dataset.display, Number(wr.dataset.day));
       return;
     }
     // A block on the day bar opens its lineup.
     const blk = e.target.closest(".lu-blk:not(.hold)");
-    if (blk && !justDragged) {
+    if (blk && !edit.justDragged()) {
       openRow(blk.dataset.lineup, blk.dataset.display);
       return;
     }
@@ -1911,10 +2146,11 @@
     if (!t) {
       // The whole row header / display header folds, except its own
       // controls. Ignore text selections and the end of a drag.
-      if (justDragged || String(window.getSelection ? window.getSelection() : "") !== "") return;
+      if (edit.justDragged() || String(window.getSelection ? window.getSelection() : "") !== "")
+        return;
       if (
         e.target.closest(
-          "input, select, textarea, label, .lu-win-edit, .lu-days, .lu-more, .lu-peek, .lu-today, .lu-row-actions"
+          "input, select, textarea, label, .lu-win-edit, .lu-name-edit, .lu-days, .lu-more, .lu-peek, .lu-today, .lu-row-actions"
         )
       )
         return;
@@ -2011,6 +2247,8 @@
       toggleDay(t);
     } else if (ds.winEdit) {
       openWinEdit(t);
+    } else if (ds.nameEdit) {
+      openNameEdit(t);
     } else if (ds.undo !== undefined && t.matches("[data-undo]")) {
       const ids = Object.keys(st.pending[ds.undo] || {});
       Object.keys(st.pending).forEach((did) => {
@@ -2036,7 +2274,7 @@
       document.activeElement &&
       document.activeElement.closest &&
       document.activeElement.closest(".lu-tlg-row.is-open");
-    if (openRowEl && !drag) {
+    if (openRowEl && !edit.active()) {
       toggleWeekRow(openRowEl.dataset.display, Number(openRowEl.dataset.day), false);
       const lab = openRowEl.querySelector(".lu-tlg-lab");
       if (lab) lab.focus();
@@ -2167,11 +2405,13 @@
     const wizard = document.getElementById("timed-wizard");
     return (
       document.hidden ||
-      !!drag ||
+      edit.active() ||
+      !!sdrag ||
+      moving ||
       (wizard && wizard.open) ||
       // A tile's "Queued · picks up ~3:48 PM" note is read before a redraw drops it.
       !!root.querySelector(
-        ".lu-peek, .lu-dp-pop, details.lu-more[open], .lu-win-edit, .lu-tile.push-queued"
+        ".lu-peek, .lu-dp-pop, details.lu-more[open], .lu-win-edit, .lu-name-edit, .lu-tile.push-queued"
       ) ||
       Object.values(st.saving).some(Boolean)
     );
@@ -2291,7 +2531,7 @@
   if ("ResizeObserver" in window) {
     new ResizeObserver(() =>
       requestAnimationFrame(() => {
-        if (barReadOnly() !== lastRO && !drag && !busy()) render();
+        if (barReadOnly() !== lastRO && !edit.active() && !busy()) render();
         else fit();
       })
     ).observe(host);
