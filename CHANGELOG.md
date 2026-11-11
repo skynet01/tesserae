@@ -6,38 +6,62 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Keep selection marks and reorder handles visible when selecting items in a list.
+- Add a Show tags toggle to query previews.
+- Fix contextual help icons in the canvas editor's configuration drawer.
+- Fix query previews in the canvas editor and place Preview query after the widget options.
+- Let image widgets preview their current query in the dashboard editors.
+
 ### Added
 
-- Lineup editor: rebuilt as When it runs, Dashboards and Timing, under what is on screen and the display's day bar.
-- Lineup editor: each dashboard says what it is ("Gallery · 412 photos") and opens to its items in a searchable grid, its first eight in the display's own shape.
-- Lineup editor: only the options that apply are shown; Priority when lineups overlap, Min hold when something can cut a dashboard short.
-- Lineup editor: Push now and a ... menu (Move to another display, Delete) sit top right by the On switch; a move applies on Save.
-- Lineup editor: drag or arrow-key this lineup's block on the day bar to set its time, click another lineup's block to open it, and Show all puts every day's bar in the header.
-- Lineup editor: a gear by a dashboard's name opens it in the dashboard editor; its arrows pick the item Push now sends, and the item control reads Rotate items or Show chosen.
-- Lineups: New lineup, and the + beside each display, open a three-step new-lineup page.
-- Lineups: album widgets that draw a random photo show as a stack badged "random" (or x N), with a Recent photos strip in the editor.
-- Widgets: item hooks can return a preview `thumb` per item and take a `ctx` (cell size, display); see the widget guide.
-- Lineups: a + beside each display's chevron starts a new lineup for that display.
+- Lineups: album widgets that draw a random photo show as a stack badged "random" (or ×N), with a Recent photos strip in the editor; NOW/NEXT pills stay above the stack.
+- Lineups: New lineup, and the + beside each display's chevron, open a three-step new-lineup page.
 - Lineups: a day tile you click shows a check (runs) or an x (off) for a moment, and a small one until the change is saved.
 - Lineups: click a lineup's name to rename it in place; Enter or clicking away saves, Escape cancels.
-- Lineups: a daily push can take an end time ("06:00-18:00"); with several dashboards it then steps through them in that window. Remove the end to go back to a single push.
+- Lineup editor: a gear by a dashboard's name opens it in the dashboard editor; the item line says "Rotates through them" or "Shows the chosen one".
+- Lineups: a daily push can take an end time ("06:00–18:00"); with several dashboards it then steps through them in that window. Remove the end to go back to a single push.
 - Lineups: drag a lineup's dashboards left or right to reorder them, or press Alt+Left / Alt+Right on one; it saves on drop.
+- Lineup editor: rebuilt as When it runs, Dashboards and Timing, under what is on screen and the display's day bar.
+- Lineup editor: each dashboard says what it is ("Gallery · 412 photos") and opens to its items in a searchable grid.
+- Lineup editor: only the options that apply are shown; Priority when lineups overlap, Min hold when something can cut a dashboard short, Touch also flips on touch displays.
+- Lineup editor: Move… and Delete sit in a ⋯ menu by Push now and the On switch; a move applies on Save.
+- Lineup editor: drag or arrow-key this lineup's block on the day bar to set its time; it applies on Save; click another lineup's block to open its editor.
+- Lineup editor: Show all puts every day's bar in the header, so the whole week can be edited from one page.
+- Lineup editor: dashboards are big Lineups-style tiles; click one for its details and use its arrows to pick the item Push now sends. A dashboard's first eight items show in the display's own shape, then +N more.
+- Widgets: item hooks can return a preview `thumb` per item and take a `ctx` (cell size, display); see the widget guide.
+- Widgets: image widgets can preview their current query in the dashboard editors.
+- Device kinds can place a config field in a named group (`group`) and show it only for some values (`show_if`); Samsung The Frame uses them for its Power and Art Mode settings.
+- Samsung The Frame: the TV's own slideshow setting reads "Managed by Tesserae" or "Managed by the TV".
 
 ### Fixed
 
-- Lineups: the quiet-hours warning says what happens and only shows when a save changes the times, days or display.
+- Lineups: the quiet-hours warning says what happens ("Starts at 8 AM: 6–8 AM is in …") and only shows when a save changes the times, days or display.
+- Thumbnails fill their frame-shaped box on every page, so no thin light line shows along an edge.
+- A lineup send that failed is retried on the next tick instead of being counted as done, so a failed 06:00 send no longer misses its whole slot.
+- Smart sync waits for the displays a lineup sends to, not every display its dashboards are bound to.
+- A timer-only lineup ("Taps also flip" off) no longer follows its page links or touch zones.
+- The lineup's current step follows its conditions and priority mode, and reads as held when every rule fails, instead of showing the clock's slot.
+- The Lineups Next pill, tick and countdown follow what the scheduler will send: minimum hold, rules, priority mode and a sleeping display's check-in.
+- "Next update" counts a dashboard's own Updates refresh, not only the next lineup change.
 - Lineups: widget preview images (e.g. Immich) load under Home Assistant ingress instead of showing "?".
-- Lineups and the lineup editor: a short block on the day bar is a sliver of its own, 1px from its neighbours, never under them.
-- Lineup editor: a daily or interval lineup edits its own time, a window with several dashboards takes them in turn, and cut to one it keeps its pace.
-- Lineup editor: Smart sync can be switched off again, and a daily or interval lineup set to also take taps now runs.
-- Lineup editor: saving keeps a lineup's other displays and the settings it doesn't show, and a save from a stale tab is refused instead of undoing newer edits.
-- Lineup editor: Timing follows each dashboard's own time and quiet hours count only on their days.
 - Lineups: a greyed row says why in a small tag (Not today, Done for today, Off, Not playing), so grey pictures aren't mistaken for black and white.
 - Lineups: a long day tag such as "Mon Tue Wed Sat Sun" no longer runs under the lineup's title.
 - Lineups: the time editor shows AM or PM in full.
 - Lineups: a display's day bar stays when you fold it; only its lineup rows fold.
 - Lineups: the day picker's calendar icon sits level with the middle of the day bar, at any width.
-- Lineups: reordering a live rotation sends the dashboard now in its slot.
+- Lineups and the lineup editor: a short block on the day bar is a sliver of its own, 1px from its neighbours, never under them.
+- Lineups: a dashboard bound to displays of different shapes shows each display its own ratio and picture, not the largest panel's.
+- Device page: dashboard schedules have their own list instead of sitting in the Lineups list.
+- Device cards and Lineups thumbnails fill to the border, so no thin light line shows along one edge.
+- Lineup editor: a daily or interval lineup edits its own time, and a window with several dashboards takes them in turn, and cut to one it keeps its pace.
+- Lineup editor: Smart sync can be switched off again.
+- Lineup editor: the on-screen picture takes the display's shape, and Discard resets everything.
+- Lineup editor: a daily or interval lineup set to also take taps now runs.
+- Lineup editor: Background refresh is Keep ready, in the display's options, and no longer claims to replace Updates.
+- Lineup editor: Timing follows each dashboard's own time, quiet hours count only on their days, and NOW / NEXT stay current.
+- Lineup editor: saving keeps a lineup's other displays and the settings it doesn't show.
+- Lineup editor: a save from a stale tab is refused instead of undoing newer edits.
+- Dashboards: a dashboard shared by displays of different shapes shows, under each display, that display's own ratio, picture and size.
 
 ## [0.510.0], 2026-11-10
 
