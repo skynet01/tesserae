@@ -171,23 +171,32 @@ def test_real_canvas_drawer_opens_preview_from_unsaved_options(app, browser, tmp
             return
         if parsed.path.endswith("/query-preview"):
             posts.append(parse_qs(request.post_data))
-        with client.open(
+        response = client.open(
             path,
             method=request.method,
             data=request.post_data_buffer,
             content_type=request.headers.get("content-type"),
-        ) as response:
-            route.fulfill(
-                status=response.status_code,
-                body=response.get_data(),
-                headers={"Content-Type": response.content_type},
-            )
+        )
+        route.fulfill(
+            status=response.status_code,
+            body=response.get_data(),
+            headers={"Content-Type": response.content_type},
+        )
 
     page.route("http://preview.test/**", serve)
     page.route("https://example.com/**", lambda route: route.fulfill(status=404))
     page.goto(f"http://preview.test{location}")
     page.locator('#panels-artboard [data-id="art"]').click()
     page.get_by_role("button", name="Configure").click()
+    info = page.locator("#panels-drawer-body .info-pop").first
+    info.click()
+    help_text = page.get_by_role("tooltip", name="Search for artwork with these words.")
+    help_text.wait_for(state="visible")
+    assert info.get_attribute("aria-expanded") == "true"
+    page.keyboard.press("Escape")
+    help_text.wait_for(state="hidden")
+    assert info.get_attribute("aria-expanded") == "false"
+    assert info.evaluate("el => el === document.activeElement")
     page.fill('[name="opt_query"]', "unsaved city")
     page.get_by_role("button", name="Preview query", exact=True).click()
     page.wait_for_function("document.querySelectorAll('.query-preview-item').length === 20")

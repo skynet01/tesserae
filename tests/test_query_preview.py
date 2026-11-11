@@ -21,7 +21,13 @@ def app(tmp_path):
         "supports": {"sizes": ["lg"]},
         "requires": ["network:example.com"],
         "cell_options": [
-            {"name": "query", "type": "string", "label": "Query", "default": "saved"},
+            {
+                "name": "query",
+                "type": "string",
+                "label": "Query",
+                "default": "saved",
+                "help": "Search for artwork with these words.",
+            },
             {"name": "minimum", "type": "number", "label": "Minimum", "default": 2},
         ],
     }

@@ -116,17 +116,7 @@ SURFACES: dict[str, dict[str, Any]] = {
     },
     "lineup-editor-cards": {
         "path": "/decks/night/edit",
-        "frame": ".dxe-thumb",
-    },
-    "history": {
-        "path": "/history",
-        "frame": ".dx-hist-thumb",
-        "ar": (3840, 2160),
-    },
-    "events": {
-        "path": "/events",
-        "frame": ".dx-event-thumb-link",
-        "ar": (4, 3),
+        "frame": ".lu.dxe .lu-thumb",
     },
     "devices-list": {
         "path": "/settings/devices",
@@ -176,6 +166,10 @@ async ({frame, img, rgb, ar, hover}) => {
     if (m) return [Number(m[1]), Number(m[2])];
     const w = Number(cs.getPropertyValue('--arw')), h = Number(cs.getPropertyValue('--arh'));
     if (w && h) return [w, h];
+    // The lineup editor's item pictures take the display's shape from its own variables.
+    const ew = Number(getComputedStyle(el).getPropertyValue('--dxe-arw'));
+    const eh = Number(getComputedStyle(el).getPropertyValue('--dxe-arh'));
+    if (ew && eh) return [ew, eh];
     m = (cs.aspectRatio || '').match(/([\\d.]+)\\s*\\/\\s*([\\d.]+)/);
     if (m && ar === null) return [Number(m[1]), Number(m[2])];
     return ar;
