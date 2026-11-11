@@ -35,6 +35,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
+- Blank pictures on a frame: a page whose images fail to load is rendered once more, and a scheduled, lineup or refresh send that still has broken pictures keeps the previous frame instead of replacing it. The log names the host and the HTTP status or error of each failed image; a manual send still goes out, with a warning in History.
 - Lineups: the quiet-hours warning says what happens ("Starts at 8 AM: 6–8 AM is in …") and only shows when a save changes the times, days or display.
 - Thumbnails fill their frame-shaped box on every page, so no thin light line shows along an edge.
 - A lineup send that failed is retried on the next tick instead of being counted as done, so a failed 06:00 send no longer misses its whole slot.
