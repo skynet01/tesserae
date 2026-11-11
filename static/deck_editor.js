@@ -1199,7 +1199,7 @@
     const tag = mark
       ? `<span class="dxe-tag ${mark === "Chosen" ? "now" : "mute"}">${esc(mark)}</span>`
       : "";
-    const inner = `<span class="dxe-it-pic">${pic}</span><span class="dxe-it-l">${esc(`#${it.index + 1} ${it.thumb_url ? label : ""}`.trim())}</span>${tag}`;
+    const inner = `<span class="thumb-frame dxe-it-pic">${pic}</span><span class="dxe-it-l">${esc(`#${it.index + 1} ${it.thumb_url ? label : ""}`.trim())}</span>${tag}`;
     return pinMode
       ? `<button type="button" class="dxe-it${mark ? " is-marked" : ""}" data-pin-item="${esc(p.id)}" data-key="${esc(it.key)}" data-fk="pin-${esc(p.id)}-${esc(it.key)}" aria-pressed="${mark === "Chosen"}" title="Show ${esc(label)}">${inner}</button>`
       : `<span class="dxe-it${mark ? " is-marked" : ""}" title="${esc(label)}">${inner}</span>`;
@@ -1228,7 +1228,7 @@
         tiles = Array.from(
           { length: Math.min(STRIP, it.count || STRIP) },
           () =>
-            `<span class="dxe-it is-ghost" aria-hidden="true"><span class="dxe-it-pic"></span></span>`
+            `<span class="dxe-it is-ghost" aria-hidden="true"><span class="thumb-frame dxe-it-pic"></span></span>`
         ).join("");
       else if (strip.err) tiles = `<span class="dxe-soft">${esc(strip.err)}</span>`;
       else {
@@ -1252,7 +1252,7 @@
       const tiles = sent
         .map(
           (r, k) =>
-            `<span class="dxe-it is-render" title="${k === 0 ? lastLabel : "Sent earlier"}"><span class="dxe-it-pic"><img src="${esc(r.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span><span class="dxe-it-l">${k === 0 ? lastLabel : "Sent earlier"}</span></span>`
+            `<span class="dxe-it is-render" title="${k === 0 ? lastLabel : "Sent earlier"}"><span class="thumb-frame dxe-it-pic"><img src="${esc(r.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer"></span><span class="dxe-it-l">${k === 0 ? lastLabel : "Sent earlier"}</span></span>`
         )
         .join("");
       return (
@@ -1268,7 +1268,7 @@
       const pos = c && c.mode === "draw" ? c.pos : -1;
       const ok = canPick(s.id);
       const tile = (k, pic, label, on) =>
-        `<button type="button" class="dxe-it is-render${on ? " is-marked" : ""}" data-draw-pos="${esc(p.id)}" data-pos="${k}" data-fk="dpos-${esc(p.id)}-${k}" aria-pressed="${on}"${ok ? "" : " disabled"} title="${esc(label)}"><span class="dxe-it-pic">${pic}</span><span class="dxe-it-l">${esc(label)}</span></button>`;
+        `<button type="button" class="dxe-it is-render${on ? " is-marked" : ""}" data-draw-pos="${esc(p.id)}" data-pos="${k}" data-fk="dpos-${esc(p.id)}-${k}" aria-pressed="${on}"${ok ? "" : " disabled"} title="${esc(label)}"><span class="thumb-frame dxe-it-pic">${pic}</span><span class="dxe-it-l">${esc(label)}</span></button>`;
       // Newest first: pictures drawn here and not sent yet, then what this dashboard
       // actually sent (the push log), the latest marked. Up to STRIP in all.
       const sent = Array.isArray(p.recent) ? p.recent : [];
@@ -1289,7 +1289,7 @@
         const pic = `<img src="${esc(r.thumb)}" alt="" loading="lazy" referrerpolicy="no-referrer">`;
         return k === 0
           ? tile(-1, pic, lastLabel, pos < 0)
-          : `<span class="dxe-it is-render" title="Sent earlier"><span class="dxe-it-pic">${pic}</span><span class="dxe-it-l">Sent earlier</span></span>`;
+          : `<span class="dxe-it is-render" title="Sent earlier"><span class="thumb-frame dxe-it-pic">${pic}</span><span class="dxe-it-l">Sent earlier</span></span>`;
       });
       const strip = [...drawn, ...sentTiles].slice(0, STRIP).join("");
       return (
