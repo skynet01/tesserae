@@ -6,6 +6,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Let gallery widgets preview matches for the current editor options.
+
 ## [0.510.0], 2026-11-10
 
 ### Added
