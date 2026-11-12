@@ -7,6 +7,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 ## [Unreleased]
 
 - Fix HA dashboard clipping and add capture controls, fresh preview, and display-aware dithering.
+- Close Fraimic HTTP-error responses after reading them.
 - Keep selection marks and reorder handles visible when selecting items in a list.
 - Add a Show tags toggle to query previews.
 - Fix contextual help icons in the canvas editor's configuration drawer.
@@ -15,6 +16,11 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
+- Fraimic: wakes closer than an hour and more than four a day. **Wake every** goes down to 5 minutes with a **Counted from** anchor, and **At set times each day** takes any number of times. The frame's own schedule can't express these, so Tesserae leads the frame along: at each wake it writes the next four wake times, the first being the wake it wants and the rest a fallback if one is missed. Hourly-or-slower intervals from midnight and up to four times still use the frame's own schedule.
+- Fraimic: a **When the picture is due to change** wake schedule, which wakes the frame for the next lineup step, schedule or page refresh rather than on a fixed interval, with a ceiling (6 hours by default) between wakes.
+- Fraimic: wakes skip quiet hours, follow a wake interval the page on the glass declares (down to 15 minutes), and with **Wake less often on a low battery** stretch to twice the gap below 20% and four times below 10%.
+- Fraimic: the frame's next wake feeds smart sync, the device page's next check-in and Home Assistant's online flag. A frame that wakes on time three times is trusted, and schedules and rotations with smart sync then render just before its wake. A tap doesn't count against it.
+- Fraimic: **On a tap** can step the display to its next page, **Redraw a picture that hasn't changed** redraws after a day or a week to clear ghosting, and a wake the frame doesn't answer is logged and counted (`missed_wakes` in its status).
 - Lineups: album widgets that draw a random photo show as a stack badged "random" (or ×N), with a Recent photos strip in the editor; NOW/NEXT pills stay above the stack.
 - Lineups: New lineup, and the + beside each display's chevron, open a three-step new-lineup page.
 - Lineups: a day tile you click shows a check (runs) or an x (off) for a moment, and a small one until the change is saved.
@@ -34,14 +40,6 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Device kinds can place a config field in a named group (`group`) and show it only for some values (`show_if`); Samsung The Frame uses them for its Power and Art Mode settings.
 - Samsung The Frame: the TV's own slideshow setting reads "Managed by Tesserae" or "Managed by the TV".
 
-### Added
-
-- Fraimic: wakes closer than an hour and more than four a day. **Wake every** goes down to 5 minutes with a **Counted from** anchor, and **At set times each day** takes any number of times. The frame's own schedule can't express these, so Tesserae leads the frame along: at each wake it writes the next four wake times, the first being the wake it wants and the rest a fallback if one is missed. Hourly-or-slower intervals from midnight and up to four times still use the frame's own schedule.
-- Fraimic: a **When the picture is due to change** wake schedule, which wakes the frame for the next lineup step, schedule or page refresh rather than on a fixed interval, with a ceiling (6 hours by default) between wakes.
-- Fraimic: wakes skip quiet hours, follow a wake interval the page on the glass declares (down to 15 minutes), and with **Wake less often on a low battery** stretch to twice the gap below 20% and four times below 10%.
-- Fraimic: the frame's next wake feeds smart sync, the device page's next check-in and Home Assistant's online flag. A frame that wakes on time three times is trusted, and schedules and rotations with smart sync then render just before its wake. A tap doesn't count against it.
-- Fraimic: **On a tap** can step the display to its next page, **Redraw a picture that hasn't changed** redraws after a day or a week to clear ghosting, and a wake the frame doesn't answer is logged and counted (`missed_wakes` in its status).
-
 ### Changed
 
 - Fraimic: wake times are in the app's timezone and converted to the frame's own clock, which keeps a fixed offset with no daylight saving. They were sent as typed, so in summer a frame an hour behind woke an hour late. Intervals longer than an hour are kept on the app's midnight the same way.
@@ -50,11 +48,6 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 ### Fixed
 
 - Fraimic: a scheduled wake with nothing new to send put the frame back to sleep within a few seconds of waking, which can stop it setting its next alarm (seen on firmware 0.2.31 with wakes minutes apart: the frame then slept until tapped). It is now left up for 40 seconds first.
-
-
-
-### Fixed
-
 - Blank pictures on a frame: a page whose images fail to load is rendered once more, and a scheduled, lineup or refresh send that still has broken pictures keeps the previous frame instead of replacing it. The log names the host and the HTTP status or error of each failed image; a manual send still goes out, with a warning in History.
 - Lineups: the quiet-hours warning says what happens ("Starts at 8 AM: 6–8 AM is in …") and only shows when a save changes the times, days or display.
 - Thumbnails fill their frame-shaped box on every page, so no thin light line shows along an edge.
