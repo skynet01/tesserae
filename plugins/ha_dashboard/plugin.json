@@ -19,9 +19,9 @@
     {
       "name": "zoom",
       "type": "select",
-      "label": "Zoom",
+      "label": "Dashboard zoom",
       "default": "1",
-      "help": "Scales the dashboard before capture. Larger values make cards bigger and easier to read on e-ink, fewer of them fit.",
+      "help": "Scales Home Assistant cards and text before capture. 75% fits more cards; 125% makes them larger. Applies to this dashboard capture.",
       "choices": [
         {
           "value": "0.75",
@@ -58,7 +58,7 @@
       "label": "Kiosk query",
       "default": true,
       "advanced": true,
-      "help": "Appends ?kiosk to the URL so the kiosk-mode integration, if installed, strips the remaining chrome. Harmless without it."
+      "help": "Adds ?kiosk for the HA kiosk-mode integration, if installed. Hide HA header works independently of this option."
     },
     {
       "name": "settle_seconds",
@@ -73,12 +73,56 @@
     {
       "name": "refresh_seconds",
       "type": "number",
-      "label": "Refresh",
-      "help": "Seconds a captured frame may age before the next render replaces it. Each render opens a browser for a few seconds, so keep this near the panel's own wake interval.",
+      "label": "Capture interval",
+      "help": "Reuse the last capture for this many seconds. A later preview or display update requests a new one. Refresh preview captures immediately without sending it to the display.",
       "default": 300,
       "advanced": true,
       "min": 30,
       "max": 86400
+    },
+    {
+      "name": "hide_header",
+      "type": "boolean",
+      "label": "Hide HA header",
+      "default": true,
+      "advanced": true,
+      "help": "Hides Home Assistant navigation and its empty space before capture. Turn off to include the header. Dashboards that already hide it keep their full content."
+    },
+    {
+      "name": "offset_x",
+      "type": "number",
+      "label": "Canvas offset X (px)",
+      "default": 0,
+      "min": -4096,
+      "max": 4096,
+      "advanced": true,
+      "help": "Moves the captured dashboard horizontally. Positive moves right; negative moves left. Content beyond the cell edge is clipped."
+    },
+    {
+      "name": "offset_y",
+      "type": "number",
+      "label": "Canvas offset Y (px)",
+      "default": 0,
+      "min": -4096,
+      "max": 4096,
+      "advanced": true,
+      "help": "Moves the captured dashboard vertically. Positive moves down; negative moves up. Empty space uses the light or dark background."
+    },
+    {
+      "name": "ha_theme",
+      "type": "string",
+      "label": "Home Assistant theme",
+      "default": "",
+      "advanced": true,
+      "help": "Exact name of an installed HA theme, such as Graphite. Leave blank to use the HA account's theme. Applies only to this capture session; a dashboard theme can override it."
+    },
+    {
+      "name": "language",
+      "type": "string",
+      "label": "Home Assistant language",
+      "default": "",
+      "advanced": true,
+      "help": "Language code for the capture, such as en, es, or de. Leave blank to use the HA account preference."
     }
   ],
   "render": { "dither": "ordered", "needs_network": true }

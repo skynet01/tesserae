@@ -856,6 +856,118 @@ def test_compose_panel_preview_unknown_page_404(client: FlaskClient) -> None:
     assert client.get("/compose/nope/panel.png").status_code == 404
 
 
+def test_panel_preview_uses_device_dither_and_invalidates_on_setting_change(app: Flask) -> None:
+    import io
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from app.quantizer import quantize_for_gamut_to_png
+    from app.state.page_store import Page, Panel
+
+    device = SimpleNamespace(
+        id="mini", panel={"w": 32, "h": 24, "gamut": "gray_4"}, renderer_ids=["esp32_gray2_bin"]
+    )
+    app.config["DEVICE_REGISTRY"] = SimpleNamespace(
+        get=lambda key: device if key == "mini" else None
+    )
+    settings = app.config["SETTINGS_STORE"]
+    settings.patch_section("renderers", {"esp32_gray2_bin": {"dither": "none"}})
+    page = Page(id="dither", name="Dither", panel=Panel(w=32, h=24), device_ids=["mini"])
+    app.config["PAGE_STORE"].save(page)
+    token = composer.page_preview_token(page, (32, 24))
+    cache_dir = app.config["DATA_ROOT"] / "core" / "previews"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    source = io.BytesIO()
+    Image.new("RGB", (32, 24), (125, 125, 125)).save(source, "PNG")
+    (cache_dir / f"dither~panel32x24__{token}.png").write_bytes(source.getvalue())
+    client = app.test_client()
+    first = client.get("/compose/dither/panel.png?w=32&h=24&device=mini")
+    expected = quantize_for_gamut_to_png(source.getvalue(), gamut="gray_4", dither="none")
+    assert (
+        Image.open(io.BytesIO(first.data)).tobytes() == Image.open(io.BytesIO(expected)).tobytes()
+    )
+    settings.patch_section("renderers", {"esp32_gray2_bin": {"dither": "atkinson"}})
+    second = client.get("/compose/dither/panel.png?w=32&h=24&device=mini")
+    assert second.headers["ETag"] != first.headers["ETag"]
+    assert second.data != first.data
+    white = io.BytesIO()
+    Image.new("RGB", (32, 24), "white").save(white, "PNG")
+    (cache_dir / f"dither~panel32x24__{token}.png").write_bytes(white.getvalue())
+    third = client.get("/compose/dither/panel.png?w=32&h=24&device=mini")
+    assert third.headers["ETag"] != second.headers["ETag"]
+    assert set(Image.open(io.BytesIO(third.data)).getdata()) == {(255, 255, 255)}
+
+
+def test_panel_preview_honors_flat_colour_cell_regions(app: Flask) -> None:
+    import io
+
+    from PIL import Image
+
+    from app.state.page_store import Cell, Page, Panel
+
+    page = Page(
+        id="flat",
+        name="Flat",
+        panel=Panel(w=32, h=24),
+        cells=[
+            Cell(id="flat-cell", plugin="clock", x=0, y=0, w=16, h=24, dither="none"),
+        ],
+    )
+    app.config["PAGE_STORE"].save(page)
+    token = composer.page_preview_token(page, (32, 24))
+    cache_dir = app.config["DATA_ROOT"] / "core" / "previews"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    source = io.BytesIO()
+    Image.new("RGB", (32, 24), (125, 125, 125)).save(source, "PNG")
+    (cache_dir / f"flat~panel32x24__{token}.png").write_bytes(source.getvalue())
+    response = app.test_client().get("/compose/flat/panel.png?w=32&h=24&gamut=gray_4")
+    with Image.open(io.BytesIO(response.data)) as image:
+        assert len(set(image.crop((0, 0, 16, 24)).getdata())) == 1
+        assert len(set(image.crop((16, 0, 32, 24)).getdata())) > 1
+
+
+def test_bound_preview_inherits_renderer_contrast_and_rejects_virtual_overrides(app: Flask) -> None:
+    import io
+    from types import SimpleNamespace
+
+    from PIL import Image
+
+    from app.state.page_store import Page, Panel
+
+    renderer = app.config["RENDERER_REGISTRY"].get("trmnl_png_gray16")
+    device = SimpleNamespace(
+        id="frame", panel={"w": 32, "h": 24, "gamut": "gray_16"}, renderer_ids=[renderer.id]
+    )
+    app.config["DEVICE_REGISTRY"] = SimpleNamespace(
+        get=lambda key: device, devices={"frame": device}
+    )
+    settings = {"dither": "none", "contrast": 2.0}
+    app.config["SETTINGS_STORE"].patch_section("renderers", {renderer.id: settings})
+    page = Page(id="inherit", name="Inherit", panel=Panel(w=32, h=24), device_ids=["frame"])
+    app.config["PAGE_STORE"].save(page)
+    source = Image.new("RGB", (32, 24))
+    for x in range(32):
+        source.paste((x * 8,) * 3, (x, 0, x + 1, 24))
+    out = io.BytesIO()
+    source.save(out, "PNG")
+    token = composer.page_preview_token(page, (32, 24))
+    cache_dir = app.config["DATA_ROOT"] / "core" / "previews"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    (cache_dir / f"inherit~panel32x24__{token}.png").write_bytes(out.getvalue())
+    response = app.test_client().get(
+        "/compose/inherit/panel.png?w=32&h=24&device=frame&gamut=waveshare_e6&dither=floyd-steinberg"
+    )
+    expected = renderer.transform(
+        out.getvalue(), panel=Panel(w=32, h=24, gamut="gray_16"), settings=settings
+    )
+    with (
+        Image.open(io.BytesIO(response.data)) as actual,
+        Image.open(io.BytesIO(expected)) as wanted,
+    ):
+        assert actual.convert("RGB").tobytes() == wanted.convert("RGB").tobytes()
+
+
 # -- secret cell options stay out of the DOM (#234) ----------------------
 
 
