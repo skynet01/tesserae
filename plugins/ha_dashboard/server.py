@@ -11,10 +11,10 @@ This widget goes around both. The server opens the dashboard as a
 top-level page in headless Chromium (no iframe, so the frame header never
 applies), and an init script seeds ``localStorage`` with a session built
 from the same long-lived token ``ha_core`` already holds, plus the
-frontend's own "sidebar always hidden" preference. The 56 px app header is
-rendered off the top of the viewport and cropped away, the same approach
-the Puppet add-on takes, which is the closest thing to a reference for how
-the frontend expects to be driven.
+frontend's own "sidebar always hidden" preference. The app header and its
+layout space are hidden inside the Lovelace shadow root before capture.
+Headerless dashboards keep their first row, and the viewport stays at the
+cell's exact size.
 
 Timing is the constraint that shapes the rest. A widget ``fetch()`` runs
 inside the composer's 6 s hydrate budget and a cold Chromium plus a
@@ -44,6 +44,7 @@ import base64
 import io
 import json
 import logging
+import math
 import threading
 import time
 from typing import Any, NamedTuple
@@ -53,9 +54,6 @@ from flask import current_app
 
 logger = logging.getLogger(__name__)
 
-# Height of the Home Assistant app header at zoom 1. Puppet uses the same
-# constant; the frontend has kept it since the Material redesign.
-HEADER_PX = 56
 # How long a first-ever render for a cell may hold the fetch. Under the
 # composer's 6 s per-widget budget with room for the return trip.
 FIRST_WAIT_S = 5.0
@@ -111,10 +109,11 @@ class Params(NamedTuple):
     dark: bool
     kiosk: bool
     settle_s: float
-
-    @property
-    def header_px(self) -> int:
-        return round(HEADER_PX * self.zoom)
+    offset_x: int = 0
+    offset_y: int = 0
+    hide_header: bool = True
+    ha_theme: str = ""
+    language: str = ""
 
 
 class Frame(NamedTuple):
@@ -184,6 +183,8 @@ def _float_option(
         value = float(options.get(name, default))
     except (TypeError, ValueError):
         value = default
+    if not math.isfinite(value):
+        value = default
     return min(max(value, lo), hi)
 
 
@@ -198,6 +199,11 @@ def _params(options: dict[str, Any], ctx: dict[str, Any]) -> Params:
         dark=options.get("dark_mode") is True,
         kiosk=options.get("kiosk", True) is not False,
         settle_s=_float_option(options, "settle_seconds", DEFAULT_SETTLE_S, 0.0, 12.0),
+        offset_x=round(_float_option(options, "offset_x", 0, -4096, 4096)),
+        offset_y=round(_float_option(options, "offset_y", 0, -4096, 4096)),
+        hide_header=options.get("hide_header", True) is not False,
+        ha_theme=str(options.get("ha_theme") or "").strip()[:200],
+        language=str(options.get("language") or "").strip()[:35],
     )
 
 
@@ -219,8 +225,7 @@ def init_script(base_url: str, token: str, params: Params) -> str:
     sidebar closed; ``selectedTheme`` pins light or dark so the capture does
     not depend on the browser's colour scheme.
 
-    The zoom is applied on ``<body>`` once it exists, matching Puppet, so
-    the header stays ``HEADER_PX * zoom`` tall and the crop below lines up."""
+    The zoom is applied on ``<body>`` once it exists, before capture."""
     root = base_url.rstrip("/") + "/"
     tokens = {
         "access_token": token,
@@ -231,11 +236,16 @@ def init_script(base_url: str, token: str, params: Params) -> str:
         "expires": 9999999999999,
         "refresh_token": "",
     }
+    theme: dict[str, Any] = {"dark": params.dark}
+    if params.ha_theme:
+        theme["theme"] = params.ha_theme
     entries = {
         "hassTokens": json.dumps(tokens),
         "dockedSidebar": json.dumps("always_hidden"),
-        "selectedTheme": json.dumps({"dark": params.dark}),
+        "selectedTheme": json.dumps(theme),
     }
+    if params.language:
+        entries["selectedLanguage"] = json.dumps(params.language)
     return (
         "(() => {\n"
         f"  const entries = {json.dumps(entries)};\n"
@@ -258,14 +268,64 @@ def dashboard_url(base_url: str, params: Params) -> str:
     return url
 
 
-def crop_header(png: bytes, params: Params) -> bytes:
-    """Drop the app header from the top of the capture and return a PNG of
-    exactly ``params.w × params.h``."""
+def ready_script(params: Params) -> str:
+    """Hide HA's own header without cropping dashboard content or resizing it."""
+    preferences: dict[str, Any] = {"dark": params.dark}
+    if params.ha_theme:
+        preferences["theme"] = params.ha_theme
+    header_style = (
+        """
+  const root = panel.shadowRoot?.querySelector("hui-root")?.shadowRoot;
+  if (!root) return false;
+  if (!root.querySelector("#tesserae-capture-style")) {
+    const style = document.createElement("style");
+    style.id = "tesserae-capture-style";
+    style.textContent = `:host { --header-height: 0px !important; }
+      .header { display: none !important; }
+      #view { padding-top: 0 !important; }`;
+    root.appendChild(style);
+  }
+"""
+        if params.hide_header
+        else ""
+    )
+    body = (
+        'if ("_loading" in panel && panel._loading) return false;\n'
+        f"  const preferences = {json.dumps(preferences)};\n"
+        f"  const language = {json.dumps(params.language)};\n"
+        + """
+  // HA can load account preferences after localStorage. Pin capture-only
+  // preferences on this browser instance without saving them to the account.
+  if (!haEl.__tesseraePreferences && haEl.hass && haEl._applyTheme) {
+    haEl.__tesseraePreferences = true;
+    const applyTheme = haEl._applyTheme.bind(haEl);
+    haEl._applyTheme = (dark) => {
+      haEl._updateHass({selectedTheme: {...haEl.hass.selectedTheme, ...preferences}});
+      return applyTheme(dark);
+    };
+    haEl._applyTheme(false);
+    if (language && haEl._selectLanguage) {
+      const selectLanguage = haEl._selectLanguage.bind(haEl);
+      haEl._selectLanguage = () => selectLanguage(language, false);
+      haEl._selectLanguage();
+    }
+  }
+"""
+        + header_style
+        + "  return true;"
+    )
+    return READY_JS.replace('return !("_loading" in panel) || !panel._loading;', body)
+
+
+def offset_frame(png: bytes, params: Params) -> bytes:
+    """Translate the captured canvas in output pixels, clipping at the cell edges."""
     from PIL import Image
 
+    if not params.offset_x and not params.offset_y:
+        return png
     with Image.open(io.BytesIO(png)) as im:
-        top = params.header_px
-        frame = im.convert("RGB").crop((0, top, params.w, top + params.h))
+        frame = Image.new("RGB", (params.w, params.h), "black" if params.dark else "white")
+        frame.paste(im.convert("RGB"), (params.offset_x, params.offset_y))
         out = io.BytesIO()
         frame.save(out, format="PNG", optimize=True)
         return out.getvalue()
@@ -295,7 +355,7 @@ def render_frame(
     verify_tls: bool = True,
     timezone_id: str | None = None,
 ) -> bytes:
-    """Open the dashboard, capture it, crop the header. Raises on a login
+    """Open the dashboard and capture it at the cell's size. Raises on a login
     redirect (bad token) or a renderer failure; callers decide what the
     cell shows."""
     from app.renderer import RenderRequest
@@ -303,13 +363,13 @@ def render_frame(
     request = RenderRequest(
         url=dashboard_url(base_url, params),
         viewport_w=params.w,
-        viewport_h=params.h + params.header_px,
+        viewport_h=params.h,
         timeout_ms=RENDER_TIMEOUT_MS,
         max_attempts=1,
         is_composer=False,
         timezone_id=timezone_id,
         init_script=init_script(base_url, token, params),
-        ready_js=READY_JS,
+        ready_js=ready_script(params),
         ready_timeout_ms=READY_TIMEOUT_MS,
         settle_ms=int(params.settle_s * 1000),
         ignore_https_errors=not verify_tls,
@@ -321,7 +381,7 @@ def render_frame(
             "Home Assistant showed the login page instead of the dashboard; "
             "check the access token in Settings -> Plugins -> Home Assistant Core"
         )
-    return crop_header(png, params)
+    return offset_frame(png, params)
 
 
 def _run_job(params: Params, job: _Job, render_kwargs: dict[str, Any]) -> None:
@@ -362,14 +422,23 @@ def _start_render(params: Params, render_kwargs: dict[str, Any]) -> _Job:
 
 
 def _shape(frame: Frame, params: Params, *, stale: bool) -> dict[str, Any]:
-    return {
+    with _state_lock:
+        capturing = params in _jobs
+        error = _errors.get(params)
+    data = {
         "frame": "data:image/png;base64," + base64.b64encode(frame.png).decode("ascii"),
         "w": frame.w,
         "h": frame.h,
         "path": params.path,
         "rendered_at": frame.rendered_at,
         "stale": stale,
+        "capturing": capturing,
     }
+    if error is not None:
+        data["capture_error"] = error[1]
+    if capturing:
+        data["live_refresh_s"] = 2
+    return data
 
 
 def fetch(
@@ -395,9 +464,11 @@ def fetch(
     if fresh and frame is not None:
         return _shape(frame, params, stale=False)
 
-    if error is not None and frame is None and not ctx.get("fresh"):
+    if error is not None and not ctx.get("fresh"):
         age = time.monotonic() - error[0]
         if age < ERROR_RETRY_S:
+            if frame is not None:
+                return _shape(frame, params, stale=True)
             return {"error": error[1], "path": params.path}
 
     render_kwargs = {
@@ -407,7 +478,7 @@ def fetch(
         "timezone_id": _timezone_id(),
     }
     job = _start_render(params, render_kwargs)
-    if frame is not None:
+    if frame is not None and not ctx.get("fresh"):
         # Stale-while-revalidate: the previous frame goes out now, the one
         # rendering lands for the next refresh.
         return _shape(frame, params, stale=True)
@@ -417,11 +488,12 @@ def fetch(
         frame = _frames.get(params)
         error = _errors.get(params)
     if frame is not None:
-        return _shape(frame, params, stale=False)
+        return _shape(frame, params, stale=not job.done.is_set())
     if error is not None:
         return {"error": error[1], "path": params.path}
     return {
         "pending": True,
+        "live_refresh_s": 2,
         "path": params.path,
         "next_change_at": time.time() + PENDING_RETRY_S,
     }

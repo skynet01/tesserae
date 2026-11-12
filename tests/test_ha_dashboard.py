@@ -1,10 +1,9 @@
 """ha_dashboard: an existing Home Assistant dashboard captured as a frame.
 
 The plugin module is loaded standalone (the test_ha_cache pattern) with a
-bare Flask app carrying a stub ha_core in the plugin registry. The browser
-is replaced by a fake ``_capture`` that returns a synthetic PNG whose top
-``header_px`` rows are red, so the crop is checked by pixel rather than by
-trusting the arithmetic.
+bare Flask app carrying a stub ha_core in the plugin registry. Pixel checks
+cover the capture size and offsets; Chromium exercises header visibility
+and capture-only preferences across Home Assistant's shadow roots.
 """
 
 from __future__ import annotations
@@ -13,8 +12,10 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -170,10 +171,10 @@ def test_first_fetch_renders_and_crops_the_header(
     (request,) = browser.requests
     assert request.url == BASE + "/lovelace/0?kiosk"
     assert request.viewport_w == 800
-    assert request.viewport_h == 480 + 56
+    assert request.viewport_h == 480
     assert request.is_composer is False
     assert request.max_attempts == 1
-    assert request.ready_js == widget.READY_JS
+    assert request.ready_js == widget.ready_script(widget._params({}, _ctx()))
     assert request.settle_ms == 2000
     assert request.timezone_id == "Europe/London"
     assert request.ignore_https_errors is False
@@ -182,12 +183,128 @@ def test_first_fetch_renders_and_crops_the_header(
     assert TOKEN not in json.dumps(data)
 
 
-def test_zoom_scales_the_header_crop(widget: Any, browser: _FakeBrowser, app: Flask) -> None:
+def test_zoom_preserves_the_requested_viewport(
+    widget: Any, browser: _FakeBrowser, app: Flask
+) -> None:
     with app.app_context():
         data = widget.fetch({"zoom": "1.5"}, {}, ctx=_ctx())
     (request,) = browser.requests
-    assert request.viewport_h == 480 + 84
+    assert request.viewport_h == 480
     assert _decode(data).size == (800, 480)
+
+
+def test_headerless_dashboard_keeps_its_first_row(
+    widget: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def capture(request: RenderRequest, script: str) -> tuple[bytes, Any]:
+        im = Image.new("RGB", (request.viewport_w, request.viewport_h), "white")
+        im.paste("lime", (0, 0, 800, 8))
+        out = io.BytesIO()
+        im.save(out, "PNG")
+        return out.getvalue(), BASE + "/office-eink-status/0"
+
+    monkeypatch.setattr(widget, "_capture", capture)
+    png = widget.render_frame(widget._params({}, _ctx()), base_url=BASE, token=TOKEN)
+    with Image.open(io.BytesIO(png)) as image:
+        assert image.size == (800, 480)
+        assert image.getpixel((0, 0)) == (0, 255, 0)
+
+
+@pytest.mark.parametrize("x,y", [(12, 7), (-12, -7)])
+def test_canvas_offsets_move_pixels_without_resizing(
+    widget: Any, monkeypatch: pytest.MonkeyPatch, x: int, y: int
+) -> None:
+    def capture(request: RenderRequest, script: str) -> tuple[bytes, Any]:
+        im = Image.new("RGB", (request.viewport_w, request.viewport_h), "white")
+        im.putpixel((40, 30), (255, 0, 0))
+        out = io.BytesIO()
+        im.save(out, "PNG")
+        return out.getvalue(), BASE + "/lovelace/0"
+
+    monkeypatch.setattr(widget, "_capture", capture)
+    params = widget._params({"offset_x": x, "offset_y": y}, _ctx())
+    png = widget.render_frame(params, base_url=BASE, token=TOKEN)
+    with Image.open(io.BytesIO(png)) as image:
+        assert image.size == (800, 480)
+        assert image.getpixel((40 + x, 30 + y)) == (255, 0, 0)
+        assert image.getpixel((40, 30)) == (255, 255, 255)
+
+
+def test_pending_capture_tells_the_editor_to_poll(
+    widget: Any, browser: _FakeBrowser, app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(widget, "FIRST_WAIT_S", 0.01)
+    browser.delay_s = 0.2
+    with app.app_context():
+        data = widget.fetch({}, {}, ctx=_ctx())
+    assert data["live_refresh_s"] == 2
+    for job in list(widget._jobs.values()):
+        job.done.wait(3)
+
+
+@pytest.mark.parametrize("header_visible,hide_header", [(True, True), (False, True), (True, False)])
+def test_capture_hides_only_header_and_seeds_theme_language(
+    widget: Any, header_visible: bool, hide_header: bool
+) -> None:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        executable = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE", pw.chromium.executable_path)
+        if not Path(executable).exists():
+            pytest.skip("Playwright Chromium not installed")
+        browser = pw.chromium.launch(executable_path=executable)
+        page = browser.new_page(viewport={"width": 800, "height": 480})
+        page.route("http://ha.test/", lambda route: route.fulfill(body="<body></body>"))
+        page.goto("http://ha.test/")
+        params = widget._params(
+            {"ha_theme": "Graphite", "language": "es", "hide_header": hide_header}, _ctx()
+        )
+        page.evaluate(widget.init_script(BASE, TOKEN, params))
+        assert page.evaluate("JSON.parse(localStorage.selectedTheme).theme") == "Graphite"
+        assert page.evaluate("JSON.parse(localStorage.selectedLanguage)") == "es"
+        page.evaluate(
+            """visible => {
+          function child(parent, tag) {
+            const el = document.createElement(tag); parent.appendChild(el);
+            el.attachShadow({mode:'open'}); return el;
+          }
+          const ha = child(document.body, 'home-assistant');
+          ha.hass = {selectedTheme: {theme:'Account theme'}};
+          ha._updateHass = delta => Object.assign(ha.hass, delta);
+          ha._applyTheme = () => { ha.appliedTheme = ha.hass.selectedTheme.theme; };
+          ha._selectLanguage = (language, save) => { ha.appliedLanguage = language; ha.backendSaved = save; };
+          const main = child(ha.shadowRoot, 'home-assistant-main');
+          const resolver = document.createElement('partial-panel-resolver');
+          main.shadowRoot.appendChild(resolver);
+          const panel = child(resolver, 'ha-panel-lovelace');
+          const root = child(panel.shadowRoot, 'hui-root');
+          root.shadowRoot.innerHTML = `<style>:host {--header-height:56px}
+            .header{height:56px;background:red;display:${visible ? 'block' : 'none'}}
+            #view{padding-top:${visible ? '56px' : '0'};background:lime;height:480px}
+            </style><div class="header"></div><div id="view">First dashboard row</div>`;
+        }""",
+            header_visible,
+        )
+        page.wait_for_function(widget.ready_script(params))
+        metrics = page.evaluate("""() => {
+          const root=document.querySelector('home-assistant').shadowRoot.querySelector('home-assistant-main')
+            .shadowRoot.querySelector('partial-panel-resolver').firstElementChild.shadowRoot.querySelector('hui-root').shadowRoot;
+          return {header:getComputedStyle(root.querySelector('.header')).display,
+                  padding:getComputedStyle(root.querySelector('#view')).paddingTop};
+        }""")
+        assert metrics == (
+            {"header": "none", "padding": "0px"}
+            if hide_header
+            else {"header": "block", "padding": "56px"}
+        )
+        assert page.evaluate("""() => {
+          const ha = document.querySelector('home-assistant');
+          ha.hass.selectedTheme = {theme:'Account theme'};
+          ha._applyTheme(false);
+          ha._selectLanguage('fr', true);
+          return [ha.appliedTheme, ha.appliedLanguage, ha.backendSaved];
+        }""") == ["Graphite", "es", False]
+        browser.close()
 
 
 def test_self_signed_tls_follows_ha_core(widget: Any, browser: _FakeBrowser) -> None:
@@ -274,7 +391,7 @@ def test_slow_first_render_returns_pending_then_the_frame(
     # re-renders the page once the frame lands rather than keeping the
     # placeholder until the next Send.
     retry_at = data.pop("next_change_at")
-    assert data == {"pending": True, "path": "/lovelace/0"}
+    assert data == {"pending": True, "live_refresh_s": 2, "path": "/lovelace/0"}
     assert before + widget.PENDING_RETRY_S <= retry_at <= time.time() + widget.PENDING_RETRY_S
     params = next(iter(widget._jobs))
     widget._jobs[params].done.wait(3.0)

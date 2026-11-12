@@ -6,6 +6,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Fix HA dashboard clipping and add capture controls, fresh preview, and display-aware dithering.
 - Keep selection marks and reorder handles visible when selecting items in a list.
 - Add a Show tags toggle to query previews.
 - Fix contextual help icons in the canvas editor's configuration drawer.

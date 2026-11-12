@@ -2064,10 +2064,11 @@ def compose_panel_preview(page_id: str) -> Response:
 
     Reuses the same rendered composition as ``preview.png`` (returning ``202``
     while that render is in flight), then runs it through the quantiser.
-    ``?device=<id>`` selects the panel's gamut (falls back to the page's first
-    bound device, then 6-colour Spectra); ``?dither=<mode>`` overrides the dither
-    (default floyd-steinberg). The quantised result is cached per
-    (token, gamut, dither)."""
+    ``?device=<id>`` selects the panel's gamut and dither (falls back to the
+    page's first bound device, then 6-colour Spectra and Floyd-Steinberg).
+    Bound previews inherit the device renderer's picture settings. Explicit
+    ``?gamut`` and ``?dither`` choices apply only to a virtual preview.
+    The cache also tracks the hydrated draft and source-image revision."""
     from typing import cast, get_args
 
     from app.panel import device_panel
@@ -2091,25 +2092,36 @@ def compose_panel_preview(page_id: str) -> Response:
         width, height = preview_dims(page, devices, settings_store)
     prefix = f"{page_id}~panel{width}x{height}"
     token = page_preview_token(page, (width, height))
+    revision = current_app.config.get("PREVIEW_PANEL_VERSIONS", {}).get(page_id)
+    if revision:
+        token = hashlib.sha256(f"{token}:{revision}".encode()).hexdigest()[:16]
 
-    # An explicit ?gamut wins (the editor passes the preview group's gamut);
-    # else resolve it from ?device or the page's first bound device. "First
+    # Bound previews resolve the palette from the chosen device. "First
     # LIVE binding", not first id: a deleted device can leave its id at the head
     # of the list, and taking it blind resolved to nothing and dropped Panel
     # view to the default gamut while a real bound device sat behind it (#229).
-    gamut = (request.args.get("gamut") or "").strip()
-    if not gamut:
-        device_id = (request.args.get("device") or "").strip()
-        if not device_id:
-            device_id = _preview_target_device(page, devices)
-        if device_id and devices is not None:
-            dev = devices.get(device_id)
-            panel = device_panel(dev) if dev is not None else None
-            if panel is not None and getattr(panel, "gamut", None):
-                gamut = str(panel.gamut)
+    device_id = (request.args.get("device") or "").strip() or _preview_target_device(page, devices)
+    device = devices.get(device_id) if device_id and devices is not None else None
+    target_panel = device_panel(device) if device is not None else None
+    if target_panel is None:
+        device = None
+    gamut = "" if device is not None else (request.args.get("gamut") or "").strip()
+    if not gamut and device is not None:
+        panel = device_panel(device)
+        if panel is not None and getattr(panel, "gamut", None):
+            gamut = str(panel.gamut)
     gamut = canonicalise_gamut(gamut or "waveshare_e6")
 
-    dither = (request.args.get("dither") or "floyd-steinberg").strip()
+    from app.display_color import display_color_mode
+
+    device_color = display_color_mode(
+        device, current_app.config.get("RENDERER_REGISTRY"), settings_store
+    )
+    dither = (
+        (None if device is not None else request.args.get("dither"))
+        or device_color.dither
+        or "floyd-steinberg"
+    ).strip()
     if dither not in get_args(DitherMode):
         dither = "floyd-steinberg"
 
@@ -2132,19 +2144,80 @@ def compose_panel_preview(page_id: str) -> Response:
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
-    panel_path = cache_dir / f"{prefix}__{token}__{gamut}__{dither}.png"
+    renderer_registry = current_app.config.get("RENDERER_REGISTRY")
+    renderer = (
+        renderer_registry.get(device.renderer_ids[0])
+        if device is not None and device.renderer_ids and renderer_registry is not None
+        else None
+    )
+    render_settings: dict[str, Any] = {}
+    if renderer is not None:
+        render_settings = current_app.config["PUSH_MANAGER"]._resolve_render_settings(renderer)
+        render_settings = {**render_settings, **(renderer.manifest.get("render_overrides") or {})}
+    settings_key = hashlib.sha256(
+        json.dumps(
+            [renderer.id if renderer else None, device.panel if device else None, render_settings],
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()[:16]
+    source_revision = comp_path.stat().st_mtime_ns
+    panel_path = (
+        cache_dir / f"{prefix}__{token}__{gamut}__{source_revision}__{settings_key}__{dither}.png"
+    )
     if not panel_path.exists():
         # ``kaleido3`` (colour e-readers) has no ink palette: it is dithered
         # per channel to 16 levels, which this dispatches to; every other
         # gamut is a palette match.
-        quantised = quantize_for_gamut_to_png(
-            comp_path.read_bytes(),
-            gamut=gamut,
-            dither=cast(DitherMode, dither),
-        )
+        if renderer is not None:
+            from app.dither_regions import regions_from_page
+            from app.panel_preview import render_panel_preview
+
+            assert target_panel is not None
+            target = target_panel.model_copy(update={"w": width, "h": height})
+            if renderer.extension == "bin":
+                render_settings = {**render_settings, "_dither_regions": regions_from_page(page)}
+            preview_renderer = renderer
+            if renderer.id.split("__", 1)[0] == "fraimic_bin":
+                # Fraimic uses the same Spectra packer, then scrambles the
+                # raster into controller blocks. Preview the raster stage.
+                preview_renderer = renderer_registry.get("esp32_bin") or renderer
+                render_settings.pop("_dither_regions", None)
+            quantised = render_panel_preview(
+                comp_path.read_bytes(),
+                renderer=preview_renderer,
+                panel=target,
+                settings=render_settings,
+            )
+        else:
+            quantised = quantize_for_gamut_to_png(
+                comp_path.read_bytes(),
+                gamut=gamut,
+                dither=cast(DitherMode, dither),
+            )
+        # The push path lets a cell opt out of dithering. Apply the same
+        # composition-space regions to the preview, including overlap order.
+        from app.dither_regions import has_nearest_region, rasterize_region_mask, regions_from_page
+
+        regions = regions_from_page(page)
+        if renderer is None and dither != "none" and has_nearest_region(regions):
+            import io
+
+            from PIL import Image
+
+            with Image.open(io.BytesIO(quantised)) as diffuse:
+                flat_png = quantize_for_gamut_to_png(
+                    comp_path.read_bytes(), gamut=gamut, dither="none"
+                )
+                with Image.open(io.BytesIO(flat_png)) as flat:
+                    mask = rasterize_region_mask(regions, diffuse.width, diffuse.height)
+                    merged = Image.composite(flat.convert("RGB"), diffuse.convert("RGB"), mask)
+                    out = io.BytesIO()
+                    merged.save(out, "PNG")
+                    quantised = out.getvalue()
         panel_path.write_bytes(quantised)
 
-    etag = f"{token}-{gamut}-{dither}"
+    etag = f"{token}-{source_revision}-{settings_key}-{gamut}-{dither}"
     if request.if_none_match and etag in request.if_none_match:
         resp = current_app.response_class(status=304)
     else:
