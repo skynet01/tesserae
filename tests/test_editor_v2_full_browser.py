@@ -305,6 +305,68 @@ def test_new_lineup_round_trip_keeps_dashboard_and_returns_to_open_step(
         browser.close()
 
 
+@pytest.mark.parametrize("width", [1440, 390])
+def test_look_warning_updates_and_reset_keeps_widget_options(
+    server: tuple[str, Flask], pw: Any, width: int
+) -> None:
+    base, app = server
+    store = app.config["PAGE_STORE"]
+    original = store.get(PAGE_ID)
+    cells = [
+        c.model_copy(
+            update={
+                "plugin": "ha_dashboard",
+                "options": {"ha_theme": "Graphite"},
+                "theme": "dark",
+                "padding_override": 8,
+            }
+        )
+        if c.id == "c1"
+        else c
+        for c in original.cells
+    ]
+    store.save(original.model_copy(update={"cells": cells}))
+    browser, page, errors = _open(pw, base)
+    try:
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.locator('[data-ev2-toggle="look"]').click()
+        box = page.locator("[data-ev2-ovbox]")
+        assert "uses Home Assistant's theme" in box.inner_text()
+        assert "own padding" in box.inner_text()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        page.locator("[data-ev2-resetov]").click()
+        _wait_for(
+            lambda: (
+                _cell(app, PAGE_ID, "c1").padding_override is None
+                and _cell(app, PAGE_ID, "c1").theme is None
+            ),
+            "cell look reset",
+            page=page,
+        )
+        assert _cell(app, PAGE_ID, "c1").options["ha_theme"] == "Graphite"
+        assert "uses Home Assistant's theme" in box.inner_text()
+        box.locator('[data-ev2-setting="opt_ha_theme"]').click()
+        theme = page.locator('[name="opt_ha_theme"]')
+        assert theme.evaluate("el => document.activeElement === el")
+        theme.fill("")
+        theme.dispatch_event("change")
+        _wait_for(
+            lambda: _cell(app, PAGE_ID, "c1").options.get("ha_theme") == "",
+            "widget theme cleared",
+            page=page,
+        )
+        assert box.get_attribute("hidden") is not None
+        assert "override" not in page.locator('[data-ev2-sum="look"]').inner_text()
+        theme.fill("Graphite")
+        theme.dispatch_event("change")
+        page.locator('[data-ev2-toggle="look"]').click()
+        assert "uses Home Assistant's theme" in box.inner_text()
+        assert "1 widget overrides it" in page.locator('[data-ev2-sum="look"]').inner_text()
+        assert not errors
+    finally:
+        browser.close()
+
+
 def test_replace_stops_when_the_pending_save_fails(server: tuple[str, Flask], pw: Any) -> None:
     """A failed autosave must not be papered over by Replace, a reload or "Saved"."""
     base, app = server

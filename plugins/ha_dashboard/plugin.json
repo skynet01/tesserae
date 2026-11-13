@@ -48,6 +48,7 @@
     },
     {
       "name": "dark_mode",
+      "overrides_look": "uses its own dark mode",
       "type": "boolean",
       "label": "Dark theme",
       "default": false,
@@ -111,6 +112,7 @@
     },
     {
       "name": "ha_theme",
+      "overrides_look": "uses Home Assistant's theme",
       "placeholder": "Google Dark Theme",
       "type": "string",
       "label": "Home Assistant theme",

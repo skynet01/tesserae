@@ -131,6 +131,14 @@ lowercase `[a-z0-9_]` is convention, not enforced. Name it `<family>_<role>`
   cross-widget shape selection. If a widget needs a genuine layout
   shape choice (e.g. `stack` vs `side`), name the option `layout` and
   use shape-describing values.
+* **`overrides_look`**, a plain-text description such as
+  `"uses its own dark mode"`. Add it to a cell option that changes
+  appearance independently of the dashboard look. The editor warns when
+  that option is visible and differs from its default. Put it on the
+  widget manifest itself to warn whenever the widget is used, as with an
+  embedded website. Warning links open the relevant settings. Resetting
+  cell look overrides clears cell theme, style, font and padding; widget
+  options stay unchanged.
 * **Pictures on a `select`'s choices.** A choice may carry `image`, a
   path on the server (`/plugins/<plugin_id>/static/styles/poster.jpg`,
   served from the plugin's own `static/` folder) or an `https` URL. When

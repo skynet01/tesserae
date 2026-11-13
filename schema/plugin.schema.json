@@ -25,6 +25,11 @@
     "description": {
       "type": "string"
     },
+    "overrides_look": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Describe a widget whose appearance is independent of the dashboard look. The editor always shows this warning; it never changes widget options when resetting cell look overrides."
+    },
     "icon": {
       "type": "string",
       "description": "Phosphor icon class (e.g. 'ph-list-checks').",
@@ -83,6 +88,11 @@
           "label": { "type": "string" },
           "placeholder": { "type": "string", "description": "An example value shown while the field is empty; never saved as its value." },
           "default": {},
+          "overrides_look": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Describe how this option overrides the dashboard look, e.g. 'uses its own dark mode'. The editor warns only when the visible option differs from its default, and links to the option without resetting it."
+          },
           "secret": {
             "type": "boolean",
             "description": "The value is sensitive: it is stripped from the render context handed to the browser and redacted (with an installer question suggested in its place) when the dashboard is shared to the catalog."

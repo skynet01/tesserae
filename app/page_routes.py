@@ -75,6 +75,7 @@ from app.state.deck_model import Deck, DeckPage
 from app.state.legacy_projections import is_timed_view_deck
 from app.state.page_store import Cell, Page, PageStore, Panel, clean_custom_css
 from app.state.settings_store import SettingsStore
+from app.widget_look import editor_look_context
 from app.widget_picker import CATEGORIES as WIDGET_CATEGORIES
 from app.widget_picker import display_name as widget_display_name
 from app.widget_picker import picker_entries as widget_picker_entries
@@ -756,6 +757,7 @@ def _editor_context(page: Page) -> dict[str, Any]:
 
     return {
         "page": page,
+        **editor_look_context(page, widgets),
         "editor_version": _editor_version(),
         "is_new": is_new,
         "new_lineup_url": url_for(

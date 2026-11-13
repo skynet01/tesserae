@@ -1532,8 +1532,9 @@ details.ev2-adv[open] > summary .ev2-caret {
 }
 .ev2-ovbox li {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 8px;
+  gap: 2px 8px;
 }
 .ev2-ovbox li span {
   color: var(--t-fg-soft);
