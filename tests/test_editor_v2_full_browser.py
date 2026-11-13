@@ -264,10 +264,9 @@ def test_new_lineup_round_trip_keeps_dashboard_and_returns_to_open_step(
             page.wait_for_function("() => window.EV2 && EV2.steps")
         step = "lineup" if is_new else "schedules"
         page.evaluate("key => EV2.steps.open(key)", step)
-        if not is_new:
-            page.locator("[data-ev2-lopen]").click()
+        page.locator("[data-ev2-lopen]").click()
         page.get_by_role(
-            "link", name="Make a new lineup" if is_new else "New lineup", exact=True
+            "link", name="Make a new lineup", exact=True
         ).click()
         query = parse_qs(urlsplit(page.url).query)
         assert query["page_id"] == [PAGE_ID]
@@ -278,10 +277,9 @@ def test_new_lineup_round_trip_keeps_dashboard_and_returns_to_open_step(
         page.evaluate("() => sessionStorage.removeItem('ev2-step:full')")
         page.locator('[data-fk="f-cancel"]').click()
         page.wait_for_function("key => EV2.steps.current() === key", arg=step)
-        if not is_new:
-            page.locator("[data-ev2-lopen]").click()
+        page.locator("[data-ev2-lopen]").click()
         page.get_by_role(
-            "link", name="Make a new lineup" if is_new else "New lineup", exact=True
+            "link", name="Make a new lineup", exact=True
         ).click()
         page.locator("#dxe-title").fill("Dashboard round trip")
         if is_new:
@@ -362,6 +360,87 @@ def test_look_warning_updates_and_reset_keeps_widget_options(
         page.locator('[data-ev2-toggle="look"]').click()
         assert "uses Home Assistant's theme" in box.inner_text()
         assert "1 widget overrides it" in page.locator('[data-ev2-sum="look"]').inner_text()
+        assert not errors
+    finally:
+        browser.close()
+
+
+@pytest.mark.parametrize("is_new", [False, True])
+def test_unified_lineups_create_return_edit_and_remove_schedule(
+    server: tuple[str, Flask], pw: Any, is_new: bool
+) -> None:
+    from app.state.deck_model import Deck, DeckPage
+
+    base, app = server
+    app.config["PAGE_STORE"].save(Page(id="companion", name="Companion"))
+    decks = app.config["DECK_STORE"]
+    decks.upsert(
+        Deck(
+            id="rotation",
+            name="Rotation",
+            pages=[DeckPage(page_id=PAGE_ID), DeckPage(page_id="companion")],
+        )
+    )
+    decks.upsert(
+        Deck(
+            id="morning",
+            name="Morning",
+            pages=[DeckPage(page_id=PAGE_ID)],
+            advance="timer",
+            advance_trigger="daily",
+            advance_fires_at="07:00",
+            advance_days_of_week=[0, 1, 2, 3, 4],
+        )
+    )
+    browser, page, errors = _open(pw, base)
+    try:
+        if is_new:
+            page.set_viewport_size({"width": 390, "height": 1000})
+            page.goto(f"{base}/pages/{PAGE_ID}?new=1#lineup", wait_until="domcontentloaded")
+            page.wait_for_function("() => EV2.steps.current() === 'lineup'")
+        else:
+            page.locator('[data-ev2-toggle="schedules"]').click()
+        joined = page.locator("[data-ev2-joined]")
+        assert joined.locator("[data-ev2-lrow]").count() == 2
+        assert "Schedule · Weekdays at " in joined.locator('[data-ev2-lrow="morning"]').inner_text()
+        assert "Lineup · by hand" in joined.locator('[data-ev2-lrow="rotation"]').inner_text()
+        assert (
+            joined.locator('[data-ev2-lrow="rotation"] a').get_attribute("href")
+            == "/decks/rotation/edit"
+        )
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        page.get_by_role("button", name="New scheduled lineup", exact=True).click()
+        dialog = page.locator("#schedule-dialog-new")
+        dialog.locator('[name="name"]').fill("Evening schedule")
+        with page.expect_navigation():
+            dialog.locator('button[type="submit"]').click()
+        target = f"/pages/{PAGE_ID}{'?new=1#lineup' if is_new else '#schedules'}"
+        assert page.url.endswith(target)
+        page.wait_for_function(
+            "key => EV2.steps.current() === key", arg="lineup" if is_new else "schedules"
+        )
+        assert joined.locator("[data-ev2-lrow]").count() == 3
+        assert "Evening schedule" in joined.inner_text()
+        joined.locator('[data-open-schedule-dialog="schedule-dialog-morning"]').click()
+        assert page.locator("#schedule-dialog-morning").is_visible()
+        page.locator("#schedule-dialog-morning [data-schedule-dialog-close]").first.click()
+        messages = []
+
+        def reject(d):
+            messages.append(d.message)
+            d.dismiss()
+
+        page.once("dialog", reject)
+        joined.locator('[data-ev2-lremove="morning"]').click()
+        assert decks.get("morning") is not None
+        assert "delete" in messages[0].lower() and "schedule" in messages[0].lower()
+        page.once("dialog", lambda d: d.accept())
+        with page.expect_navigation():
+            joined.locator('[data-ev2-lremove="morning"]').click()
+        assert joined.locator('[data-ev2-lrow="morning"]').count() == 0
+        assert decks.get("morning") is None
+        assert app.config["SCHEDULE_STORE"].get("morning") is None
+        assert decks.get("rotation") is not None
         assert not errors
     finally:
         browser.close()
@@ -625,6 +704,7 @@ def test_phone_new_dashboard_by_touch(phone_server: tuple[str, Flask], pw: Any) 
     assert page.locator("#ev2-step-look").get_attribute("data-state") == "open"
     page.locator("[data-ev2-next=look]").scroll_into_view_if_needed()
     page.locator("[data-ev2-next=look]").tap()
+    page.locator("[data-ev2-lopen]").tap()
     row = page.locator("[data-ev2-ladd]").first
     row.scroll_into_view_if_needed()
     row.tap()

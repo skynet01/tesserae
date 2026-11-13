@@ -296,7 +296,9 @@ def test_schedule_form_asks_before_saving(real: tuple[str, Flask], editor: str) 
         page.goto(base + "/pages/photos", wait_until="load")
         if editor == "new":
             page.locator("#ev2-h-schedules").click()  # the step is collapsed to a summary
-        page.locator('[data-open-schedule-dialog="schedule-dialog-new"]').click()
+            page.get_by_role("button", name="New scheduled lineup", exact=True).click()
+        else:
+            page.locator('[data-open-schedule-dialog="schedule-dialog-new"]').click()
         dlg = page.locator("#schedule-dialog-new")
         dlg.locator('input[name="name"]').fill("Photos hourly")
         dlg.locator('label:has(input[name="device_ids"][value="hallway"])').click()

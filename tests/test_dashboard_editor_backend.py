@@ -267,7 +267,7 @@ def _lineup(app, *, page_ids=("other",), devices=()):
 
 @pytest.mark.parametrize("trigger", ["daily", "interval"])
 @pytest.mark.parametrize("legacy_kind", [None, "schedule"])
-def test_editor_keeps_schedule_projections_out_of_lineups(app, trigger, legacy_kind):
+def test_editor_includes_schedules_in_the_unified_lineup_list(app, trigger, legacy_kind):
     _lineup(app)
     schedule = Deck(
         id="morning",
@@ -280,13 +280,18 @@ def test_editor_keeps_schedule_projections_out_of_lineups(app, trigger, legacy_k
     )
     app.config["DECK_STORE"].upsert(schedule)
     context = _editor(app)[1]
-    assert [row["id"] for row in context["lineups"]] == ["loop"]
+    assert [row["id"] for row in context["lineups"]] == ["loop", "morning"]
+    row = context["lineups"][1]
+    assert row["is_schedule"] is True
+    assert row["joined"] is True
+    assert row["schedule_dialog"] == "schedule-dialog-morning"
+    assert row["when"]
     assert [row.id for row in context["schedules_for_page"]] == ["morning"]
 
 
 @pytest.mark.parametrize("action", ["join", "leave"])
 @pytest.mark.parametrize("trigger", ["daily", "interval"])
-def test_lineup_mutations_reject_schedule_projections(app, action, trigger):
+def test_schedule_can_be_removed_but_cannot_gain_extra_dashboards(app, action, trigger):
     schedule = Deck(
         id="morning",
         name="Morning",
@@ -299,8 +304,8 @@ def test_lineup_mutations_reject_schedule_projections(app, action, trigger):
     response = app.test_client().post(
         f"/pages/home/lineups/morning/{action}", json={"add_device": False}
     )
-    assert response.status_code == 404
-    assert app.config["DECK_STORE"].get("morning") == schedule
+    assert response.status_code == (404 if action == "join" else 200)
+    assert app.config["DECK_STORE"].get("morning") == (schedule if action == "join" else None)
 
 
 def test_lineups_are_filtered_by_shape_not_migration_marker(app):
@@ -322,19 +327,19 @@ def test_lineup_join_is_idempotent_and_preserves_settings(app):
         response = client.post("/pages/home/lineups/loop/join", json={"add_device": False})
         assert response.status_code == 200
         body = response.get_json()
-        assert body == {
-            "ok": True,
+        assert body["ok"] is True and body["device_ids"] == []
+        assert len(body["lineups"]) == 1
+        row = body["lineups"][0]
+        assert {
+            k: row[k]
+            for k in ("id", "name", "device_ids", "device_names", "same_display", "joined")
+        } == {
+            "id": "loop",
+            "name": "Loop",
             "device_ids": [],
-            "lineups": [
-                {
-                    "id": "loop",
-                    "name": "Loop",
-                    "device_ids": [],
-                    "device_names": [],
-                    "same_display": True,
-                    "joined": True,
-                }
-            ],
+            "device_names": [],
+            "same_display": True,
+            "joined": True,
         }
     deck = app.config["DECK_STORE"].get("loop")
     assert deck.page_ids == ["other", "home"]

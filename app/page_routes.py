@@ -760,6 +760,7 @@ def _editor_context(page: Page) -> dict[str, Any]:
         **editor_look_context(page, widgets),
         "editor_version": _editor_version(),
         "is_new": is_new,
+        "lineups_return_url": lineup_return,
         "new_lineup_url": url_for(
             "decks.editor", display=first_display, page_id=page.id, **{"return": lineup_return}
         ),
@@ -828,17 +829,27 @@ def _lineup_displays(deck: Deck) -> list[str]:
 
 
 def _editor_lineups(page: Page) -> list[dict[str, Any]]:
-    """Lineups the dashboard can join, with their effective display bindings."""
+    """Joined and available lineups, including this dashboard's schedules."""
+    from app.deck_routes import _lineup_input, _time_cycle
     from app.lineup_binding import display_label
+    from app.lineups_view import days_label, dur_short, using_time_cycle, window_label
 
     store = current_app.config.get("DECK_STORE")
     if store is None:
         return []
     rows = []
     for deck in store.all():
-        if is_timed_view_deck(deck):
-            continue
         device_ids = _lineup_displays(deck)
+        schedule = is_timed_view_deck(deck) and len(deck.pages) == 1
+        with using_time_cycle(_time_cycle()):
+            when = window_label(_lineup_input(deck, with_urls=False))
+            if deck.advance != "manual":
+                cadence = (
+                    f"every {dur_short(deck.advance_interval_minutes)} · "
+                    if deck.advance_trigger == "interval"
+                    else ""
+                )
+                when = f"{days_label(deck.advance_days_of_week)} {cadence}{when}"
         rows.append(
             {
                 "id": deck.id,
@@ -847,6 +858,16 @@ def _editor_lineups(page: Page) -> list[dict[str, Any]]:
                 "device_names": [display_label(did) for did in device_ids],
                 "same_display": set(device_ids) <= set(page.device_ids),
                 "joined": page.id in deck.page_ids,
+                "is_schedule": schedule,
+                "when": when,
+                "enabled": deck.enabled,
+                "edit_url": url_for("decks.editor", deck_id=deck.id),
+                "schedule_dialog": (
+                    f"schedule-dialog-{deck.id}"
+                    if schedule and page.id in deck.page_ids
+                    else ""
+                ),
+                "deletes_on_leave": set(deck.page_ids) == {page.id},
             }
         )
     return rows
@@ -1342,7 +1363,7 @@ def join_lineup(page_id: str, deck_id: str) -> Response:
     page = _store().get(page_id)
     deck_store = current_app.config["DECK_STORE"]
     deck = deck_store.get(deck_id)
-    if page is None or deck is None or is_timed_view_deck(deck):
+    if page is None or deck is None or (is_timed_view_deck(deck) and len(deck.pages) == 1):
         abort(404)
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or not isinstance(body.get("add_device", False), bool):
@@ -1374,7 +1395,7 @@ def leave_lineup(page_id: str, deck_id: str) -> Response:
     page = _store().get(page_id)
     deck_store = current_app.config["DECK_STORE"]
     deck = deck_store.get(deck_id)
-    if page is None or deck is None or is_timed_view_deck(deck):
+    if page is None or deck is None:
         abort(404)
     if page_id in deck.page_ids:
         updated = deck_without_page(deck, page_id)

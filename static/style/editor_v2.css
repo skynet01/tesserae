@@ -2286,3 +2286,45 @@ details.ev2-adv[open] > summary .ev2-caret {
     min-height: 44px;
   }
 }
+
+/* Joined schedules and rotating lineups share step 5. */
+.ev2-lineups .ev2-lineups-joined {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+}
+.ev2-lineups .ev2-lineups-joined > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--t-border-strong);
+}
+.ev2-lineups .ev2-lineups-joined b {
+  overflow-wrap: anywhere;
+}
+.ev2-lineups .ev2-lineups-joined small {
+  display: block;
+  margin-top: 3px;
+  color: var(--t-muted);
+}
+.ev2-lineups .ev2-lineups-joined .is-off {
+  opacity: .65;
+}
+.ev2-lineups .ev2-lineups-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.ev2-lineups .ev2-lineups-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+.ev2-lineups .ev2-lineups-actions > a {
+  margin-right: auto;
+}

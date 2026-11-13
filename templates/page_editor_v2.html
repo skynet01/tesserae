@@ -629,9 +629,15 @@
       {% endfor %}
       {%- endmacro %}
       {% macro joined_list() -%}
-      <ul class="ev2-sched" data-ev2-joined>
+      <ul class="ev2-lineups-joined" data-ev2-joined>
         {% for l in _joined %}
-        <li><b>{{ l.name }}</b><span>{{ l.device_names | join(', ') }}</span><button type="button" class="ev2-link ev2-link--quiet" data-ev2-lremove="{{ l.id }}">Remove</button></li>
+        <li data-ev2-lrow="{{ l.id }}"{% if not l.enabled %} class="is-off"{% endif %}>
+          <div><b>{{ l.name }}</b><small>{{ 'Schedule' if l.is_schedule else 'Lineup' }} · {{ l.when }}{% if not l.enabled %} · off{% endif %}</small></div>
+          <div class="ev2-lineups-row-actions">
+            {% if l.schedule_dialog %}<button type="button" class="ev2-link" data-open-schedule-dialog="{{ l.schedule_dialog }}">Edit</button>{% else %}<a class="ev2-link" href="{{ l.edit_url }}">Edit</a>{% endif %}
+            <button type="button" class="ev2-link ev2-link--quiet" data-ev2-lremove="{{ l.id }}" data-schedule="{{ '1' if l.is_schedule else '0' }}" data-deletes="{{ '1' if l.deletes_on_leave else '0' }}">Remove</button>
+          </div>
+        </li>
         {% endfor %}
       </ul>
       {%- endmacro %}
@@ -642,62 +648,33 @@
         <div class="ev2-row-btns"><button type="button" class="ev2-link ev2-link--quiet" data-ev2-lcancel>Cancel</button><button type="button" class="ev2-btn ev2-btn--primary ev2-btn--sm" data-ev2-ljoin></button></div>
       </div>
       {%- endmacro %}
-      {% set _avail = _lineups | rejectattr('joined') | list %}
-      {% if _is_new %}
-      <section class="ev2-step" id="ev2-step-lineup" data-step="lineup" data-index="5">
-        {{ step_head('lineup', 5, 'Lineup', (_joined | map(attribute='name') | join(', ')) or 'Not in a lineup', opt=True) }}
-        <p class="ev2-st-wait" data-ev2-wait></p>
-        <div class="ev2-st-body" id="ev2-b-lineup" role="region" aria-labelledby="ev2-h-lineup" hidden>
-          <p class="ev2-lead">Want it to rotate with other dashboards? Add it to a lineup. You can skip this and do it later.</p>
+      {% set _avail = _lineups | rejectattr('joined') | rejectattr('is_schedule') | list %}
+      {% set _lineup_step = 'lineup' if _is_new else 'schedules' %}
+      {% set _schedule_count = _joined | selectattr('is_schedule') | list | length %}
+      {% set _lineup_summary = 'In ' ~ (_joined | length) ~ ' lineup' ~ ('' if _joined | length == 1 else 's') if _joined else 'Not in any lineup' %}
+      {% if _schedule_count %}{% set _lineup_summary = _lineup_summary ~ ' · ' ~ _schedule_count ~ ' schedule' ~ ('' if _schedule_count == 1 else 's') %}{% endif %}
+      <section class="ev2-step ev2-lineups" id="ev2-step-{{ _lineup_step }}" data-step="{{ _lineup_step }}" data-index="5">
+        <span id="{{ _lineup_step }}" class="ev2-anchor"></span>
+        {{ step_head(_lineup_step, 5, 'Lineups', _lineup_summary, opt=_is_new, icon='clock') }}
+        {% if _is_new %}<p class="ev2-st-wait" data-ev2-wait></p>{% endif %}
+        <div class="ev2-st-body" id="ev2-b-{{ _lineup_step }}" role="region" aria-labelledby="ev2-h-{{ _lineup_step }}" hidden>
+          <p class="ev2-lead">Lineups decide when this dashboard shows: on its own schedule, or rotating with others.</p>
           <div class="ev2-st-b" data-ev2-lineups>
-            {% if _joined %}{{ joined_list() }}{% endif %}
-            {% if _avail %}<div class="ev2-lpick" data-ev2-lpick>{{ lineup_rows(_avail) }}</div>
-            {% elif _lineups %}<p class="ev2-help muted">It's already in every lineup.</p>
-            {% else %}<p class="ev2-help muted">No lineups yet.</p>{% endif %}
+            {% if _joined %}{{ joined_list() }}{% else %}<p class="ev2-none">Not in any lineup.</p>{% endif %}
+            <div class="ev2-lpick" data-ev2-lpick hidden>
+              {{ lineup_rows(_avail) }}
+              {% if not _avail %}<p class="ev2-none">No other lineups to join.</p>{% endif %}
+              <div class="ev2-row-btns"><a class="ev2-link ev2-link--quiet" href="{{ new_lineup_url }}">Make a new lineup</a><button type="button" class="ev2-link ev2-link--quiet" data-ev2-lclose>Cancel</button></div>
+            </div>
             {{ lineup_confirm() }}
-            <div class="ev2-st-next"><a class="ev2-link ev2-link--quiet" href="{{ new_lineup_url }}">Make a new lineup</a></div>
-          </div>
-        </div>
-      </section>
-      {% else %}
-      {% set _sched_parts = [] %}
-      {% for s in schedules_for_page %}{% set _ = _sched_parts.append(('every ' ~ s.interval_minutes ~ ' min' ~ ((' · ' ~ (s.time_of_day_start or '00:00')|clock_time ~ '–' ~ (s.time_of_day_end or '23:59')|clock_time) if (s.time_of_day_start or s.time_of_day_end) else '')) if s.type == 'interval' else ('daily ' ~ ((s.fires_at|clock_time) if s.fires_at else '??:??'))) %}{% endfor %}
-      {% set _ssum = [] %}
-      {% if _sched_parts %}{% set _ = _ssum.append(_sched_parts | join(', ')) %}{% endif %}
-      {% if _joined %}{% set _ = _ssum.append('in “' ~ _joined[0].name ~ '”' if _joined | length == 1 else 'in ' ~ (_joined | length) ~ ' lineups') %}{% endif %}
-      <section class="ev2-step" id="ev2-step-schedules" data-step="schedules" data-index="5">
-        <span id="schedules" class="ev2-anchor"></span>
-        {{ step_head('schedules', 5, 'Schedules and lineups', (_ssum | join(' · ')) or 'Not scheduled and not in a lineup.', icon='clock') }}
-        <div class="ev2-st-body" id="ev2-b-schedules" role="region" aria-labelledby="ev2-h-schedules" hidden>
-          <p class="ev2-lead">When does this dashboard show? Push it on its own schedule, or add it to a lineup that rotates it with others.</p>
-          <div class="ev2-st-b">
-            <h3 class="ev2-sub-h">Own schedules</h3>
-            {% if schedules_for_page %}
-            <ul class="ev2-sched">
-              {% for s in schedules_for_page %}
-              <li{% if not s.enabled %} class="is-off"{% endif %}><b>{% if not s.enabled %}{{ ico('pause-circle') }} {% endif %}{{ s.name }}</b><span>{{ _sched_parts[loop.index0] }}{% if not s.enabled %} · off{% endif %}</span><button type="button" class="ev2-link" data-open-schedule-dialog="schedule-dialog-{{ s.id }}">Edit</button></li>
-              {% endfor %}
-            </ul>
-            {% else %}
-            <p class="ev2-none">None.</p>
-            {% endif %}
-            <div class="ev2-st-next"><a class="ev2-link ev2-link--quiet" href="{{ url_for('schedules.index') }}">All schedules</a><button type="button" class="ev2-btn ev2-btn--sm" data-open-schedule-dialog="schedule-dialog-new">{{ ico('plus') }}<span>Add schedule</span></button></div>
-
-            <h3 class="ev2-sub-h ev2-sub-h--gap">Lineups</h3>
-            <div data-ev2-lineups>
-              {% if _joined %}{{ joined_list() }}{% else %}<p class="ev2-none">Not in any lineup.</p>{% endif %}
-              <div class="ev2-lpick" data-ev2-lpick hidden>
-                {{ lineup_rows(_avail) }}
-                {% if not _avail %}<p class="ev2-none">{{ "It's already in every lineup." if _lineups else 'No lineups yet.' }}</p>{% endif %}
-                <div class="ev2-row-btns"><button type="button" class="ev2-link ev2-link--quiet" data-ev2-lclose>Cancel</button><a class="ev2-link ev2-link--quiet" href="{{ new_lineup_url }}">New lineup</a></div>
-              </div>
-              {{ lineup_confirm() }}
-              <div class="ev2-st-next" data-ev2-ladd-row><button type="button" class="ev2-btn ev2-btn--sm" data-ev2-lopen>{{ ico('plus') }}<span>Add to a lineup</span></button></div>
+            <div class="ev2-lineups-actions">
+              <a class="ev2-link ev2-link--quiet" href="{{ url_for('decks.index') }}">All lineups</a>
+              <button type="button" class="ev2-btn ev2-btn--sm" data-ev2-lopen data-ev2-ladd-row>{{ ico('plus') }}<span>Add to a lineup</span></button>
+              <button type="button" class="ev2-btn ev2-btn--primary ev2-btn--sm" data-open-schedule-dialog="schedule-dialog-new">{{ ico('plus') }}<span>New scheduled lineup</span></button>
             </div>
           </div>
         </div>
       </section>
-      {% endif %}
     </div>
 
     <section id="ev2-preview" class="ev2-pv" aria-label="Preview">
@@ -755,8 +732,7 @@
 </div>
 
 {#- ---------------------------------------------------------- schedule dialogs (#280) -#}
-{% if not _is_new %}
-{% set _schedule_next = _edit_url ~ '#schedules' %}
+{% set _schedule_next = lineups_return_url %}
 {% macro schedule_dialog(dialog_id, title, icon, s, edit_mode, next_url) %}
 <dialog id="{{ dialog_id }}" class="wizard-dialog schedule-dialog" aria-labelledby="{{ dialog_id }}-title" data-schedule-dialog>
   <div class="wizard-head">
@@ -776,11 +752,10 @@
 </dialog>
 {% endmacro %}
 {% set _blank_schedule = {'id': '', 'name': '', 'page_id': page.id, 'enabled': true, 'type': 'interval', 'interval_minutes': 30, 'fires_at': none, 'device_ids': [], 'time_of_day_start': '', 'time_of_day_end': '', 'priority': 0, 'days_of_week': [0,1,2,3,4,5,6], 'smart_sync': false, 'smart_sync_lead_s': 10} %}
-{{ schedule_dialog('schedule-dialog-new', 'New schedule', 'plus-circle', _blank_schedule, false, _schedule_next) }}
+{{ schedule_dialog('schedule-dialog-new', 'New scheduled lineup', 'plus-circle', _blank_schedule, false, _schedule_next) }}
 {% for s in schedules_for_page %}
-{{ schedule_dialog('schedule-dialog-' ~ s.id, 'Edit schedule', 'pencil-simple', s, true, _schedule_next) }}
+{{ schedule_dialog('schedule-dialog-' ~ s.id, 'Edit scheduled lineup', 'pencil-simple', s, true, _schedule_next) }}
 {% endfor %}
-{% endif %}
 
 {#- Catalog data: the contract's widget_catalog when the backend sends it,
     otherwise the classic picker's entries (same fields, older names). -#}
@@ -792,5 +767,5 @@
 <script src="{{ url_for('static', filename='pages/editor_v2/catalog.js') }}"></script>
 <script src="{{ url_for('static', filename='pages/editor_v2/look.js') }}"></script>
 <script src="{{ url_for('static', filename='pages/editor_v2/lineup.js') }}"></script>
-{% if not _is_new %}{{ schedule_form_scripts() }}{% endif %}
+{{ schedule_form_scripts() }}
 {% endblock %}

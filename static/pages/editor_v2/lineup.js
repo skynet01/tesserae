@@ -1,6 +1,5 @@
-// Dashboard editor v2: step 5. New dashboards get "Lineup (optional)";
-// editing gets "Schedules and lineups" with the existing schedule list and
-// add/edit dialog (#280). Joining a lineup on another display asks first,
+// Dashboard editor v2: step 5 lists rotating and scheduled lineups together,
+// with the quick schedule dialog (#280). Joining a lineup on another display asks first,
 // then adds that display (POST /pages/<id>/lineups/<deck>/join).
 (function () {
   "use strict";
@@ -95,8 +94,11 @@
       const rm = ev.target.closest("[data-ev2-lremove]");
       if (rm) {
         const name = rm.closest("li")?.querySelector("b")?.textContent || "this lineup";
-        if (emptied.includes(name)) {
-          if (!window.confirm(`${name} has no other dashboard, so leaving it deletes the lineup too. Leave and delete it?`)) return;
+        if (rm.dataset.deletes === "1" || emptied.includes(name)) {
+          const message = rm.dataset.schedule === "1"
+            ? `Remove ${name}? This deletes this dashboard's schedule.`
+            : `${name} has no other dashboard, so leaving it deletes the lineup too. Leave and delete it?`;
+          if (!window.confirm(message)) return;
         }
         EV2.flush()
           .then(() => EV2.post(`${base}/${encodeURIComponent(rm.dataset.ev2Lremove)}/leave`, {}, { json: true }))
@@ -164,6 +166,6 @@
     params.delete("schedule_error");
     params.delete("schedule_edit");
     const rest = params.toString();
-    history.replaceState(null, "", location.pathname + (rest ? "?" + rest : "") + "#schedules");
+    history.replaceState(null, "", location.pathname + (rest ? "?" + rest : "") + (EV2.isNew ? "#lineup" : "#schedules"));
   }
 })();
