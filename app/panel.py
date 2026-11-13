@@ -295,7 +295,7 @@ def resolve_panel_for_page(
       Ties (two panels with identical area) break by panel id /
       ``(w, h)`` tuple for stability.
     * Otherwise use the page's test display, with unset axes inherited
-      from the virtual panel in settings.
+      from its legacy panel override or the virtual panel in settings.
 
     Previously this returned ``panels[0]`` (first targeted device),
     which meant a layout designed against device A would get
@@ -313,9 +313,11 @@ def resolve_panel_for_page(
 
 
 def resolve_test_display(page: Page, settings: SettingsStore) -> Panel:
-    """The test display's saved size, with unset axes inherited from settings."""
-    panel = resolve_settings_panel(settings)
-    return Panel(w=page.test_display_w or panel.w, h=page.test_display_h or panel.h)
+    """Override only explicit test dimensions, keeping the inherited panel metadata."""
+    panel = page.panel or resolve_settings_panel(settings)
+    return panel.model_copy(
+        update={"w": page.test_display_w or panel.w, "h": page.test_display_h or panel.h}
+    )
 
 
 def panel_groups_for_push(

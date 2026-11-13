@@ -14,7 +14,7 @@ from app import device_service
 from app.main import REPO_ROOT, create_app
 from app.panel import panel_groups_for_push, preview_groups_for_page, resolve_panel_for_page
 from app.state.deck_model import Deck, DeckLink, DeckPage
-from app.state.page_store import Page, PageStore, Panel
+from app.state.page_store import Cell, Page, PageStore, Panel
 
 
 @pytest.fixture
@@ -160,14 +160,14 @@ def test_page_model_validates_test_display_size(value):
         Page(id="p", name="P", test_display_w=value)
 
 
-def test_unbound_panel_uses_test_display_instead_of_legacy_page_panel(app):
+def test_unbound_panel_keeps_legacy_size_until_test_display_is_set(app):
     settings = app.config["SETTINGS_STORE"]
     devices = app.config["DEVICE_REGISTRY"]
     old = Page(id="old", name="Old", panel=Panel(w=800, h=480))
     custom = Page(
         id="custom", name="Custom", panel=old.panel, test_display_w=1920, test_display_h=1080
     )
-    for page, dims in [(old, (1024, 768)), (custom, (1920, 1080))]:
+    for page, dims in [(old, (800, 480)), (custom, (1920, 1080))]:
         panel = resolve_panel_for_page(page, devices, settings)
         assert (panel.w, panel.h) == dims
         push_panel = panel_groups_for_push(page, devices, settings)[0][0]
@@ -180,12 +180,58 @@ def test_unbound_editor_and_compose_agree_with_test_display(app):
     page = Page(id="home", name="Home", panel=Panel(w=800, h=480))
     app.config["PAGE_STORE"].save(page)
     _, context = _editor(app)
-    assert context["test_display"] == {"w": 1024, "h": 768}
-    assert (context["panel"].w, context["panel"].h) == (1024, 768)
+    assert context["test_display"] == {"w": 800, "h": 480}
+    assert (context["panel"].w, context["panel"].h) == (800, 480)
     group = context["preview_groups"][0]
-    assert (group["w"], group["h"]) == (1024, 768)
+    assert (group["w"], group["h"]) == (800, 480)
     body = app.test_client().get("/compose/home").text
-    assert "width: 1024px;" in body and "height: 768px;" in body
+    assert "width: 800px;" in body and "height: 480px;" in body
+
+
+@pytest.mark.parametrize("editor_version", ["new", "classic"])
+def test_opening_legacy_portrait_dashboard_leaves_stored_cells_byte_identical(app, editor_version):
+    app.config["SETTINGS_STORE"].update_section("ui", {"dashboard_editor": editor_version})
+    app.config["PAGE_STORE"].save(
+        Page(
+            id="home",
+            name="Home",
+            panel=Panel(w=480, h=800),
+            cells=[
+                Cell(id="top", x=0, y=0, w=480, h=400),
+                Cell(id="bottom", x=0, y=400, w=480, h=400),
+            ],
+        )
+    )
+    path = app.config["DATA_ROOT"] / "core" / "pages.json"
+    before = path.read_bytes()
+    _, context = _editor(app)
+    assert path.read_bytes() == before
+    assert context["test_display"] == {"w": 480, "h": 800}
+    assert (context["panel"].w, context["panel"].h) == (480, 800)
+
+
+@pytest.mark.parametrize("editor_version", ["new", "classic"])
+@pytest.mark.parametrize("status_bar", [False, True])
+def test_refit_rotated_cells_follow_reading_order_without_changing_widgets(
+    app, editor_version, status_bar
+):
+    app.config["SETTINGS_STORE"].update_section("ui", {"dashboard_editor": editor_version})
+    client = app.test_client()
+    client.post("/pages/home", data={"test_display_w": "800", "test_display_h": "480"})
+    client.post("/pages/home/layout", data={"layout": "2x2_grid"})
+    if status_bar:
+        client.post("/pages/home/status-bar/toggle")
+    before = app.config["PAGE_STORE"].get("home")
+    widgets = {c.id: c.model_dump(exclude={"x", "y", "w", "h"}) for c in before.cells}
+    client.post("/pages/home", data={"test_display_w": "480", "test_display_h": "800"})
+    response = client.post("/pages/home/refit", headers={"X-Requested-With": "fetch"})
+    assert response.get_json()["ok"] is True
+    after = app.config["PAGE_STORE"].get("home")
+    positions = [(c.y, c.x) for c in after.cells]
+    assert positions == sorted(positions)
+    assert {c.id: c.model_dump(exclude={"x", "y", "w", "h"}) for c in after.cells} == widgets
+    if status_bar:
+        assert after.cells[0].id == before.status_bar_cell_id
 
 
 @pytest.mark.parametrize("editor_version", ["new", "classic"])

@@ -2380,12 +2380,13 @@ def refit_cells(page_id: str) -> Response:
     coords = [(c.x, c.y, c.w, c.h) for c in page.cells]
     top_strip_index = _status_bar_cell_index(page)
     fitted = fit_cells_to_panel(coords, panel.w, panel.h, top_strip_index=top_strip_index)
-    if fitted == coords:
-        return _flash_save(True, "Cells already fit the current panel.")
     new_cells = [
         cell.model_copy(update={"x": nx, "y": ny, "w": nw, "h": nh})
         for cell, (nx, ny, nw, nh) in zip(page.cells, fitted, strict=True)
     ]
+    new_cells.sort(key=lambda cell: (cell.y, cell.x))
+    if new_cells == page.cells:
+        return _flash_save(True, "Cells already fit the current panel.")
     _store().save(page.model_copy(update={"cells": new_cells}))
     current_app.config.get("PREVIEW_CACHE", {}).pop(page_id, None)
     return _flash_save(True, f"Refitted {len(new_cells)} cell(s) to {panel.w}×{panel.h}.")
