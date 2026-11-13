@@ -158,13 +158,19 @@
     // swap once: the server resets the options to the new widget's defaults.
     // (Changing the field first would post the old form's values twice and
     // wipe the new widget's default-on options.)
+    const field = form.querySelector("[data-ev2-plugin]");
+    const was = field.value;
     EV2.flush()
       .then(() => {
-        form.querySelector("[data-ev2-plugin]").value = key;
+        field.value = key;
         return EV2.saveForm(form);
       })
       .then(() => EV2.reload({ open: "widgets", cell: cellId }))
+      .then((reloaded) => {
+        if (reloaded === false) throw new Error("not reloaded");
+      })
       .catch(() => {
+        field.value = was; // the swap didn't save: the form keeps the current widget
         listEl.querySelectorAll("button").forEach((b) => (b.disabled = false));
       });
   }

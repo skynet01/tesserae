@@ -1013,6 +1013,7 @@
       const EV2 = window.EV2;
       let body;
       if (EV2 && typeof EV2.post === "function") {
+        await EV2.flush(); // a pending autosave that fails stops the layout change too
         body = await EV2.post(data.urls.batch, payload, { json: true });
       } else {
         const res = await fetch(data.urls.batch, {

@@ -73,7 +73,15 @@ def server(tmp_path: Path) -> Iterator[tuple[str, Flask]]:
             name="Full editor",
             panel=Panel(w=800, h=480),
             cells=[
-                Cell(id="c1", plugin="weather_now", x=0, y=0, w=400, h=480),
+                Cell(
+                    id="c1",
+                    plugin="weather_now",
+                    options={"label": "Home"},
+                    x=0,
+                    y=0,
+                    w=400,
+                    h=480,
+                ),
                 Cell(id="c2", plugin="clock_word", x=400, y=0, w=400, h=480),
             ],
         )
@@ -105,12 +113,19 @@ def _cell(app: Flask, page_id: str, cell_id: str) -> Cell:
     return next(c for c in page.cells if c.id == cell_id)
 
 
-def _wait_for(check: Callable[[], bool], what: str, timeout: float = 15.0) -> None:
+def _wait_for(
+    check: Callable[[], bool], what: str, timeout: float = 15.0, page: Any = None
+) -> None:
+    """Poll ``check``. Pass ``page`` when the page has a route handler: that only
+    runs while Playwright is being pumped (``time.sleep`` would starve it)."""
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if check():
             return
-        time.sleep(0.1)
+        if page is not None:
+            page.wait_for_timeout(100)
+        else:
+            time.sleep(0.1)
     raise AssertionError(f"timed out waiting for {what}")
 
 
@@ -212,4 +227,56 @@ def test_padding_preset_saves(server: tuple[str, Flask], pw: Any) -> None:
         lambda: _cell(app, PAGE_ID, "c1").padding_override is None, "the padding reset to save"
     )
     assert not errors
+    browser.close()
+
+
+def test_replace_stops_when_the_pending_save_fails(server: tuple[str, Flask], pw: Any) -> None:
+    """A failed autosave must not be papered over by Replace, a reload or "Saved"."""
+    base, app = server
+    browser, page, errors = _open(pw, base)
+    failing = {"on": True, "hits": 0}
+
+    def intercept(route: Any) -> None:
+        if failing["on"] and route.request.method == "POST":
+            failing["hits"] += 1
+            time.sleep(0.4)  # still running when Replace asks to flush
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"ok": false, "message": "boom"}',
+            )
+        else:
+            route.continue_()
+
+    page.route(f"**/pages/{PAGE_ID}/cells/c1", intercept)
+    page.evaluate("() => { window.__same_page = true; }")
+    page.locator('.ev2-cl[data-cell-id="c1"] [data-ev2-row]').click()
+    label = page.locator("#ev2-c1-opt-label")
+    label.fill("Trip")
+    # Replace blurs the box, which starts the (failing) save, then picks Hourly.
+    page.locator('.ev2-cl[data-cell-id="c1"] [data-ev2-replace]').click()
+    page.locator("[data-ev2-pk-q]").fill("weather_hourly")
+    page.locator('[data-ev2-pk] [data-widget="weather_hourly"]').click()
+    page.wait_for_function(
+        "() => document.querySelector('[data-ev2-status]').dataset.state === 'error'"
+    )
+    page.wait_for_timeout(1500)  # a reload, if one were coming, would have happened
+    assert page.evaluate("() => window.__same_page === true")  # no reload
+    assert page.locator("[data-ev2-status]").get_attribute("data-state") == "error"
+    cell = _cell(app, PAGE_ID, "c1")
+    assert cell.plugin == "weather_now"
+    assert cell.options.get("label") == "Home"
+    assert label.input_value() == "Trip"  # the edit is still in the form
+    assert page.locator('[data-ev2-pk] [data-widget="weather_hourly"]').is_enabled()
+
+    # Retry once the server is back: the label and the swap both land.
+    failing["on"] = False
+    page.locator('[data-ev2-pk] [data-widget="weather_hourly"]').click()
+    _wait_for(
+        lambda: _cell(app, PAGE_ID, "c1").plugin == "weather_hourly",
+        "the retry to save",
+        page=page,
+    )
+    assert _cell(app, PAGE_ID, "c1").options.get("label") == "Trip"
+    assert not [e for e in errors if "boom" in e]
     browser.close()

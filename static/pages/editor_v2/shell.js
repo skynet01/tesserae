@@ -75,6 +75,9 @@
     return out;
   }
 
+  const jobs = new Set(); // one promise per queued save, settled with its outcome
+  const failedForms = new Set(); // forms whose last save failed; they still hold the edit
+
   // Queue a POST. Resolves with the JSON body; rejects (and shows the error
   // in the Saved indicator) when the server refuses.
   function post(url, data, opts) {
@@ -83,7 +86,7 @@
     setStatus("saving");
     const p = chain.then(() => send(url, data, opts));
     chain = p.catch(() => {});
-    return p.then(
+    const tracked = p.then(
       (out) => {
         inFlight--;
         if (!inFlight) setStatus(lastError ? "error" : "saved");
@@ -101,11 +104,26 @@
         throw err;
       }
     );
+    // The real outcome of every queued save, for flush() to wait on.
+    jobs.add(tracked);
+    const done = () => jobs.delete(tracked);
+    tracked.then(done, done);
+    return tracked;
   }
 
   // Debounced autosave per form. ``delay`` 0 saves on the next tick.
   const timers = new Map();
   const formSaved = new Map();
+  // Save a form now. A failure keeps the form on the retry list: its fields
+  // still hold what the user typed, and the next flush sends them again.
+  function postForm(form) {
+    const p = post(form.action, new FormData(form));
+    p.then(
+      () => failedForms.delete(form),
+      () => failedForms.add(form)
+    );
+    return p;
+  }
   function saveForm(form, delay) {
     clearTimeout(timers.get(form));
     lastError = "";
@@ -115,7 +133,7 @@
         setTimeout(
           () => {
             timers.delete(form);
-            post(form.action, new FormData(form)).then(
+            postForm(form).then(
               (out) => {
                 formSaved.set(form, Date.now());
                 (form.__ev2after || []).forEach((fn) => fn(out));
@@ -134,23 +152,28 @@
     (form.__ev2after = form.__ev2after || []).push(fn);
   }
 
-  // Send anything still waiting on a debounce, then wait for the chain, and
-  // keep going until nothing new was queued while we waited (an edit made
-  // during a slow save must not be left behind by the caller's reload or
-  // submit). Rejects when one of those saves failed.
+  // Send anything still waiting on a debounce (and retry forms whose last
+  // save failed), then wait for the outcome of every queued save, and keep
+  // going until nothing new was queued while we waited. Rejects when any of
+  // them failed, so the caller (Replace, reload, Duplicate, Push, a layout
+  // change) stops and the error state stays up.
   async function flush() {
     let failed = null;
     for (let round = 0; round < 50; round++) {
-      [...timers.keys()].forEach((form) => {
+      const forms = new Set(timers.keys());
+      if (round === 0) failedForms.forEach((f) => forms.add(f));
+      if (forms.size && round === 0 && failedForms.size) lastError = "";
+      forms.forEach((form) => {
         clearTimeout(timers.get(form));
         timers.delete(form);
-        post(form.action, new FormData(form)).catch((err) => {
-          failed = failed || err;
-        });
+        postForm(form).catch(() => {});
       });
-      const seen = chain;
-      await seen;
-      if (!timers.size && chain === seen) break;
+      if (!jobs.size && !timers.size) break;
+      const results = await Promise.allSettled([...jobs]);
+      results.forEach((r) => {
+        if (r.status === "rejected") failed = failed || r.reason;
+      });
+      if (!jobs.size && !timers.size) break;
     }
     if (failed) throw failed;
   }
@@ -161,11 +184,13 @@
   // Leaving with a debounce still pending: send it with keepalive so it
   // survives the navigation.
   function flushOnLeave() {
-    timers.forEach((t, form) => {
-      clearTimeout(t);
+    const forms = new Set([...timers.keys(), ...failedForms]);
+    timers.forEach((t) => clearTimeout(t));
+    forms.forEach((form) => {
       send(form.action, new FormData(form), { keepalive: true }).catch(() => {});
     });
     timers.clear();
+    failedForms.clear();
   }
   window.addEventListener("pagehide", flushOnLeave);
   document.addEventListener("visibilitychange", () => {
@@ -204,17 +229,20 @@
   // changes re-render the steps and the preview).
   let reloading = false;
   async function reload(extra) {
-    if (reloading) return;
+    if (reloading) return true;
+    // A save that failed leaves the edit in its form: stay on the page (the
+    // error state is already showing) so the user can retry.
     try {
       await flush();
     } catch (e) {
-      /* the indicator already says so */
+      return false;
     }
     // Past this point nothing may queue a save the reload would drop.
     reloading = true;
     root.inert = true;
     stash(extra);
     location.reload();
+    return true;
   }
   if (restored && typeof restored.y === "number") {
     const y = restored.y;
@@ -385,6 +413,7 @@
       }
       timers.forEach((t) => clearTimeout(t));
       timers.clear();
+      failedForms.clear();
       try {
         sessionStorage.removeItem("ev2-step:" + pageId);
       } catch (e) {
@@ -396,14 +425,14 @@
     ev.preventDefault();
     const href = ev.currentTarget.href;
     try {
+      await flush();
+    } catch (e) {
+      return; // stay: the error state is showing and the edits are still in their forms
+    }
+    try {
       sessionStorage.removeItem("ev2-step:" + pageId);
     } catch (e) {
       /* ignore */
-    }
-    try {
-      await flush();
-    } catch (e) {
-      /* keep going: the indicator shows the failure */
     }
     location.href = href;
   });
