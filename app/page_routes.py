@@ -531,10 +531,11 @@ def _materialize_cell_options(plugins: list[Any]) -> dict[str, list[dict[str, An
     impossible to diagnose from the UI, see issue #29."""
     from app.secret_box import SecretBoxError
     from app.widget_choices import choice_rows
+    from app.widget_options import localized_option_specs
 
     out: dict[str, list[dict[str, Any]]] = {}
     for plugin in plugins:
-        options = list(plugin.manifest.get("cell_options", []))
+        options = localized_option_specs(plugin, "cell_options")
         resolver = getattr(plugin.server_module, "choices", None) if plugin.server_module else None
         materialized: list[dict[str, Any]] = []
         plugin_label = str(plugin.manifest.get("name") or plugin.id)
