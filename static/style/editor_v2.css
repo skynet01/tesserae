@@ -8,7 +8,6 @@
 .ev2 {
   --ev2-r: var(--t-radius-sm, 6px);
   --ev2-ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --ev2-ring: 0 0 0 2px color-mix(in oklab, var(--p-focus, var(--t-accent)) 45%, transparent);
   --ev2-bezel: #dedad2;
   --ev2-paper: #e9e7e1;
   font-size: 14px;
@@ -28,7 +27,47 @@
 .ev2-pk-pop {
   --ev2-r: var(--t-radius-sm, 6px);
   --ev2-ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --ev2-ring: 0 0 0 2px color-mix(in oklab, var(--p-focus, var(--t-accent)) 45%, transparent);
+}
+
+/* Focus ring: solid 2px, 3:1 or better on every surface in light and dark
+   (Paper's --p-focus is #2b4e9b / #7c9be0). Text that used to borrow the
+   accent, and the muted greys, get editor-scoped values that clear 4.5:1;
+   the shared Paper tokens stay as they are. */
+.ev2,
+.ev2-bar,
+.ev2-pk-pop {
+  --ev2-focus: var(--p-focus, var(--t-accent));
+  --ev2-ring: 0 0 0 2px var(--ev2-focus);
+  --ev2-acc: var(--t-accent);
+  --ev2-acc-hover: var(--t-accent-hover);
+}
+:root[data-ui="paper"]:not([data-theme="dark"]) .ev2,
+:root[data-ui="paper"]:not([data-theme="dark"]) .ev2-bar,
+:root[data-ui="paper"]:not([data-theme="dark"]) .ev2-pk-pop {
+  --t-muted: #6b675f;
+  --t-ok: #2f6a2c;
+  --t-warn: #7a560a;
+}
+:root[data-ui="paper"][data-theme="dark"] .ev2,
+:root[data-ui="paper"][data-theme="dark"] .ev2-bar,
+:root[data-ui="paper"][data-theme="dark"] .ev2-pk-pop {
+  --t-muted: #9b968b;
+  --t-danger: #e46a5b;
+  --ev2-acc: #e46a5b;
+  --ev2-acc-hover: #f08272;
+}
+/* Text on the amber boxes reads in the ink colours. */
+.ev2 .ev2-ovbox,
+.ev2 .ev2-confirm {
+  --t-muted: var(--t-fg-soft);
+}
+.ev2 .ev2-ovbox .ev2-link,
+.ev2 .ev2-confirm .ev2-link {
+  color: var(--t-fg);
+}
+.ev2 .ev2-ovbox .ev2-link:hover,
+.ev2 .ev2-confirm .ev2-link:hover {
+  color: var(--t-fg-soft);
 }
 
 /* The page takes the full width next to the sidebar. */
@@ -184,7 +223,7 @@ textarea.ev2-input {
   background: none;
   padding: 0;
   height: auto;
-  color: var(--t-accent);
+  color: var(--ev2-acc);
   font-weight: 600;
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -195,7 +234,7 @@ textarea.ev2-input {
 .ev2-bar .ev2-link:hover,
 .ev2-pk-pop .ev2-link:hover {
   background: none;
-  color: var(--t-accent-hover);
+  color: var(--ev2-acc-hover);
 }
 .ev2 .ev2-link--quiet,
 .ev2-pk-pop .ev2-link--quiet {
@@ -207,7 +246,7 @@ textarea.ev2-input {
   color: var(--t-fg);
 }
 .ev2-bar .ev2-link--danger {
-  color: var(--t-accent);
+  color: var(--ev2-acc);
   font-weight: 500;
   text-decoration: none;
   padding: 0 8px;
@@ -289,8 +328,78 @@ textarea.ev2-input {
 .ev2-switch-l {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   cursor: pointer;
+}
+
+/* Switch fields from the shared form macro: label (with its info button)
+   on the left, the switch on the right, like the hand-built rows. */
+.ev2-cl-b .ev2-opts .field.field--switch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+}
+.ev2-opts .field--switch label.switch {
+  display: contents;
+}
+.ev2-opts .field--switch .switch-label {
+  order: 1;
+  flex: 0 1 auto;
+  font-size: 13px;
+  font-weight: 600;
+}
+.ev2-opts .field--switch .info-pop-wrap {
+  order: 2;
+  margin-left: 0;
+  line-height: 1;
+}
+.ev2-opts .field--switch .switch-track {
+  order: 3;
+  margin-left: auto;
+  width: 36px;
+  height: 20px;
+  background: var(--t-border-strong);
+}
+.ev2-opts .field--switch .switch-thumb {
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  box-shadow: none;
+}
+.ev2-opts .field--switch input:checked ~ .switch-track {
+  background: var(--t-accent);
+}
+.ev2-opts .field--switch input:checked ~ .switch-track .switch-thumb {
+  transform: translateX(16px);
+}
+.ev2-opts .field--switch input:focus-visible ~ .switch-track {
+  box-shadow: var(--ev2-ring);
+}
+.ev2 .ev2-opts .info-pop:focus-visible {
+  outline: none;
+  box-shadow: var(--ev2-ring);
+}
+
+/* Announcements for screen readers (keyboard swap, reset). */
+.ev2-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+/* A step body takes focus after "Next"; it is a landing spot, not a control. */
+.ev2 .ev2-st-body:focus,
+.ev2 .ev2-st-body:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 .ev2-seg {
@@ -603,7 +712,7 @@ textarea.ev2-input {
   margin-right: 12px;
 }
 .ev2-chg {
-  color: var(--t-accent);
+  color: var(--ev2-acc);
   font-weight: 600;
   font-size: 13.5px;
   text-decoration: underline;
@@ -761,7 +870,10 @@ textarea.ev2-input {
 .ev2 .ev2-pcard {
   position: relative;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: 78px auto;
+  justify-content: stretch;
+  align-content: start;
   gap: 8px;
   padding: 10px;
   border: 1px solid var(--t-border-strong);
@@ -1128,11 +1240,11 @@ textarea.ev2-input {
   transition: transform 0.18s var(--ev2-ease);
 }
 .ev2 .ev2-cl-go--pick {
-  color: var(--t-accent);
+  color: var(--ev2-acc);
   font-weight: 600;
 }
 .ev2 .ev2-cl-go--pick:hover {
-  color: var(--t-accent-hover);
+  color: var(--ev2-acc-hover);
 }
 .ev2-cl.open {
   background: var(--t-surface-soft);
@@ -1572,6 +1684,9 @@ details.ev2-adv[open] > summary .ev2-caret {
   color: var(--t-fg-soft);
   font-weight: 600;
 }
+.ev2-short {
+  display: none;
+}
 .ev2-inline {
   display: inline-flex;
   margin: 0;
@@ -1689,7 +1804,7 @@ details.ev2-adv[open] > summary .ev2-caret {
   font-weight: 600;
 }
 .ev2-pk-cats small {
-  color: var(--t-muted);
+  color: var(--t-fg-soft);
   font-size: 12px;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
@@ -1810,11 +1925,42 @@ details.ev2-adv[open] > summary .ev2-caret {
   .ev2-st-vis {
     display: none;
   }
-  .ev2-bar-st {
+  .ev2-long {
     display: none;
+  }
+  .ev2-short {
+    display: inline;
   }
   .ev2-bar {
     justify-content: flex-end;
+  }
+  /* 44px hit areas; the icons keep their size. */
+  .ev2 .ev2-cl-go {
+    min-width: 44px;
+    min-height: 44px;
+    justify-content: center;
+  }
+  .ev2 .ev2-info-btn {
+    width: 44px;
+    height: 44px;
+    margin: -8px -8px -8px 0;
+  }
+  .ev2 .ev2-iconbtn,
+  .ev2-bar .ev2-iconbtn,
+  .ev2-pk-pop .ev2-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .ev2-bar .ev2-btn {
+    height: 44px;
+  }
+  .ev2 .ev2-switch input {
+    inset: -12px -4px;
+    width: calc(100% + 8px);
+    height: calc(100% + 24px);
+  }
+  .ev2 .ev2-info-btn + .ev2-info-pop {
+    top: calc(100% - 2px);
   }
   .ev2-pk {
     grid-template-columns: minmax(0, 1fr);

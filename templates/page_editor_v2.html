@@ -102,27 +102,34 @@
 <span class="ev2-mshape {{ cls }}" title="{{ title }}" style="width:{{ [6, (w * k) | round | int] | max }}px;height:{{ [6, (h * k) | round | int] | max }}px"></span>
 {%- endmacro %}
 
-{#- One line under a widget row: the first option that has a readable value. -#}
+{#- One line under a widget row: the first option the user changed from its
+    default, readable. Numbers carry their label ("How many: 3"); nothing
+    changed means no line. -#}
 {% macro cell_summary(cell, plugin) -%}
 {% set ns = namespace(out='') %}
-{% for opt in plugin_cell_options.get(plugin.id, []) if not ns.out and not opt.get('advanced') %}
+{% for opt in plugin_cell_options.get(plugin.id, []) if not ns.out and not opt.get('advanced') and opt.name in cell.options %}
   {% set t = opt.get('type', 'string') %}
   {% if t not in ('boolean', 'switch', 'textarea', 'variables_textarea', 'entity_overrides', 'location_search', 'color', 'server_colour', 'days') and not opt.get('secret') and not opt.get('mask') %}
-    {% set v = cell.options.get(opt.name, opt.get('default')) %}
-    {% if t == 'select' %}
-      {% for c in opt.get('choices', []) %}
-        {% set cv = c.value if c is mapping else (c[0] if (c is not string and c is iterable) else c) %}
-        {% set cl = c.label if c is mapping else (c[1] if (c is not string and c is iterable) else c) %}
-        {% if cv|string == v|string and not ns.out %}{% set ns.out = cl|string %}{% endif %}
-      {% endfor %}
-    {% elif v is not none and v is not string and v is iterable %}
-      {% set ns.out = v | join(', ') %}
-    {% elif v not in (none, '') %}
-      {% set ns.out = v|string %}
+    {% set v = cell.options.get(opt.name) %}
+    {% set d = opt.get('default') %}
+    {% if (v if v is not none else '') | string != (d if d is not none else '') | string %}
+      {% if t == 'select' %}
+        {% for c in opt.get('choices', []) %}
+          {% set cv = c.value if c is mapping else (c[0] if (c is not string and c is iterable) else c) %}
+          {% set cl = c.label if c is mapping else (c[1] if (c is not string and c is iterable) else c) %}
+          {% if cv|string == v|string and not ns.out %}{% set ns.out = cl|string %}{% endif %}
+        {% endfor %}
+      {% elif v is not none and v is not string and v is iterable %}
+        {% set ns.out = v | join(', ') %}
+      {% elif v is number %}
+        {% set ns.out = (opt.get('label') ~ ': ' if opt.get('label') else '') ~ v %}
+      {% elif v not in (none, '') %}
+        {% set ns.out = v|string %}
+      {% endif %}
     {% endif %}
   {% endif %}
 {% endfor %}
-{{- ns.out or ((_wmap.get(plugin.id) or {}).get('desc') or '') -}}
+{{- ns.out -}}
 {%- endmacro %}
 
 {% macro shape_word(cell) -%}
@@ -343,6 +350,8 @@
     <span class="ev2-saved" data-ev2-status role="status" aria-live="polite" data-state="saved">{{ ico('check', 'ph-bold') }}<span>Saved</span></span>
   </div>
 
+  <div class="ev2-sr" role="status" aria-live="polite" data-ev2-live></div>
+
   <div class="ev2-titlerow">
     <form method="post" action="{{ url_for('pages.update', page_id=page.id) }}" class="ev2-title-form" data-ev2-name-form>
       <input type="text" name="name" class="ev2-title" value="{{ page.name }}" aria-label="Dashboard name" placeholder="Name it (or leave it for later)" autocomplete="off" spellcheck="false" data-ev2-name>
@@ -451,7 +460,7 @@
               <div class="ev2-drawbar" data-ev2-drawbar hidden>
                 <p class="ev2-drawhint">{{ ico('cursor-click') }} <span>Click a cell on the preview to split or remove it. Esc stops.</span></p>
                 <div class="ev2-drawrow">
-                  <label class="ev2-switch-l"><span class="ev2-switch"><input type="checkbox" role="switch" data-ev2-snap><span aria-hidden="true"></span></span> Snap to grid</label>
+                  <label class="ev2-switch-l">Snap to grid <span class="ev2-switch"><input type="checkbox" role="switch" data-ev2-snap><span aria-hidden="true"></span></span></label>
                   <span class="ev2-snapdims" data-ev2-snapdims hidden>
                     <input class="ev2-input ev2-num" inputmode="numeric" value="12" aria-label="Columns" data-ev2-snap-cols> × <input class="ev2-input ev2-num" inputmode="numeric" value="8" aria-label="Rows" data-ev2-snap-rows>
                   </span>
@@ -488,7 +497,7 @@
                     <span class="ev2-grip none" aria-hidden="true"></span>
                     <span class="ev2-cl-n"><b>{{ ico('bell') }}<span class="nm">Status bar</span></b><small>Time, battery, update dots</small></span>
                   </button>
-                  <button type="button" class="ev2-cl-go" aria-label="Open settings" aria-controls="ev2-cb-{{ _sb_cell.id }}" data-ev2-go>{{ ico('caret-right') }}</button>
+                  <button type="button" class="ev2-cl-go" tabindex="-1" aria-hidden="true" data-ev2-go>{{ ico('caret-right') }}</button>
                 </div>
                 <div class="ev2-cl-b" id="ev2-cb-{{ _sb_cell.id }}" hidden>{{ cell_body(_sb_cell, 0, True) }}</div>
               </li>
@@ -501,12 +510,13 @@
                   data-widget="{{ cell.plugin or '' }}" data-item="{{ e.item or (plugin.name if plugin else cell.plugin) or '' }}"
                   data-shape="{{ shape_word(cell) }}" data-cat="{{ e.category or '' }}">
                 <div class="ev2-cl-head">
-                  <button type="button" class="ev2-cl-row" aria-expanded="false" aria-controls="ev2-cb-{{ cell.id }}" data-ev2-row>
-                    <span class="ev2-grip" draggable="true" title="Drag onto another row to swap the widgets" aria-hidden="true">{{ ico('dots-six-vertical', 'ph-bold') }}</span>
+                  <button type="button" class="ev2-cl-row" aria-expanded="false" aria-controls="ev2-cb-{{ cell.id }}" aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown" data-ev2-row>
+                    <span class="ev2-grip" draggable="true" title="Drag onto another row to swap the widgets, or press Alt+Up or Alt+Down on the row" aria-hidden="true">{{ ico('dots-six-vertical', 'ph-bold') }}</span>
                     <span class="ev2-cl-n">
                       {% if cell.plugin %}
                       <b><i class="ph {{ e.icon or 'ph-squares-four' }}" aria-hidden="true"></i><span class="nm">{{ e.item or (plugin.name if plugin else cell.plugin) }}{% if e.family %} <span class="ev2-tag">{{ e.family }}</span>{% endif %}</span></b>
-                      <small>{{ cell_summary(cell, plugin) if plugin else 'Widget not installed' }}</small>
+                      {% set _sum = cell_summary(cell, plugin) | trim if plugin else 'Widget not installed' %}
+                      {% if _sum %}<small>{{ _sum }}</small>{% endif %}
                       {% else %}
                       <b><span>Empty</span></b>
                       <small data-ev2-shape-txt>Cell {{ loop.index }} · {{ shape_word(cell) }}</small>
@@ -515,9 +525,9 @@
                   </button>
                   {% if cell.plugin %}
                   <button type="button" class="ev2-btn ev2-btn--sm ev2-replace" data-ev2-replace hidden>Replace</button>
-                  <button type="button" class="ev2-cl-go" aria-label="Open settings" aria-controls="ev2-cb-{{ cell.id }}" data-ev2-go>{{ ico('caret-right') }}</button>
+                  <button type="button" class="ev2-cl-go" tabindex="-1" aria-hidden="true" data-ev2-go>{{ ico('caret-right') }}</button>
                   {% else %}
-                  <button type="button" class="ev2-cl-go ev2-cl-go--pick" data-ev2-choose>Choose {{ ico('caret-right') }}</button>
+                  <button type="button" class="ev2-cl-go ev2-cl-go--pick" tabindex="-1" aria-hidden="true" data-ev2-choose>Choose {{ ico('caret-right') }}</button>
                   {% endif %}
                 </div>
                 <div class="ev2-cl-b" id="ev2-cb-{{ cell.id }}" hidden>{% if cell.plugin %}{{ cell_body(cell, loop.index) }}{% else %}<form method="post" class="ev2-cell-form" action="{{ url_for('pages.update_cell', page_id=page.id, cell_id=cell.id) }}" data-ev2-cell-form data-cell-id="{{ cell.id }}"><input type="hidden" name="plugin" value="" data-ev2-plugin></form>{% endif %}</div>
@@ -679,14 +689,14 @@
 {% set _emptied = page_emptied_lineups | default([]) %}
 <div class="ev2-bar" data-ev2-bar>
   {% if _is_new %}
-  <span class="ev2-bar-st" data-ev2-bar-st>Step 1 of 5 · changes save as you go{% if _cells %} · <b>{{ _filled | length }} of {{ _cells | length }} cells filled</b>{% endif %}</span>
+  <span class="ev2-bar-st" data-ev2-bar-st><span class="ev2-long">Step 1 of 5 · changes save as you go{% if _cells %} · <b>{{ _filled | length }} of {{ _cells | length }} cell{{ '' if _cells | length == 1 else 's' }} filled</b>{% endif %}</span><span class="ev2-short">Step 1 of 5</span></span>
   <form method="post" action="{{ url_for('pages.delete', page_id=page.id) }}" class="ev2-inline" data-ev2-discard>
     <input type="hidden" name="remove_from_lineups" value="1">
     <button type="submit" class="ev2-link ev2-link--danger" title="Delete this new dashboard">Discard</button>
   </form>
   <a class="ev2-btn ev2-btn--primary" href="{{ _edit_url }}" data-ev2-finish>Done</a>
   {% else %}
-  <span class="ev2-bar-st">Changes save as you go.{% if _using_test %} <b>On a test display, so Push is off.</b>{% endif %}</span>
+  <span class="ev2-bar-st"><span class="ev2-long">Changes save as you go.{% if _using_test %} <b>On a test display, so Push is off.</b>{% endif %}</span><span class="ev2-short">{% if _using_test %}Test display · Push off{% else %}Saves as you go{% endif %}</span></span>
   <form method="post" action="{{ url_for('pages.duplicate', page_id=page.id) }}" class="ev2-inline">
     <button type="submit" class="ev2-iconbtn" title="Duplicate dashboard" aria-label="Duplicate dashboard">{{ ico('copy') }}</button>
   </form>
@@ -699,7 +709,7 @@
   <form method="post" action="{{ url_for('send.send_page') }}" class="ev2-inline">
     <input type="hidden" name="page_id" value="{{ page.id }}">
     <input type="hidden" name="return_to" value="editor">
-    <button type="submit" class="ev2-btn ev2-btn--primary" {% if _using_test %}disabled title="Pick a real display in step 1 to push"{% else %}title="Push this dashboard to {{ 'its display' if _bound | length == 1 else 'every ticked display' }}"{% endif %}>{{ ico('paper-plane-tilt') }}<span>{{ _push_label }}</span></button>
+    <button type="submit" class="ev2-btn ev2-btn--primary" {% if _using_test %}disabled title="Pick a real display in step 1 to push"{% else %}title="Push this dashboard to {{ 'its display' if _bound | length == 1 else 'every ticked display' }}"{% endif %}>{{ ico('paper-plane-tilt') }}<span class="ev2-long">{{ _push_label }}</span><span class="ev2-short">Push</span></button>
   </form>
   {% endif %}
 </div>

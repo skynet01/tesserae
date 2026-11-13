@@ -110,13 +110,35 @@
   font-size: 17px;
   cursor: pointer;
 }
+/* Before a layout is picked on a new dashboard: a screen-sized placeholder,
+   not the panel-pixel render (which is unreadable at 1920x1080). */
+.ev2pv-ph {
+  position: absolute;
+  inset: 0;
+  display: none;
+  place-items: center;
+  padding: 12px;
+  background: var(--t-surface-sunk);
+  color: var(--t-muted);
+  font-size: 13px;
+  text-align: center;
+}
+.ev2pv-group.is-placeholder .ev2pv-ph {
+  display: grid;
+}
+.ev2pv-group.is-placeholder .ev2pv-iframe,
+.ev2pv-group.is-placeholder .ev2pv-panel-img,
+.ev2pv-group.is-placeholder .ev2pv-throbber,
+.ev2pv-group.is-placeholder .ev2pv-overlay {
+  visibility: hidden;
+}
 .ev2pv-iconbtn:hover {
   background: var(--p-hover, var(--t-surface-sunk));
   color: var(--t-fg);
 }
 .ev2pv :focus-visible {
   outline: none;
-  box-shadow: var(--t-ring);
+  box-shadow: var(--ev2-ring, var(--t-ring));
 }
 
 /* ---------- the display ---------- */
@@ -206,7 +228,7 @@
 }
 .ev2pv-throbber > i {
   font-size: 36px;
-  color: var(--t-accent);
+  color: var(--ev2-acc, var(--t-accent));
   filter: drop-shadow(0 1px 2px rgba(20, 20, 15, 0.28));
   animation: ev2pv-spin 0.9s linear infinite;
 }
@@ -539,6 +561,19 @@
 @media (max-width: 1180px) {
   .ev2pv {
     --ev2pv-max-h: 48vh;
+  }
+}
+@media (max-width: 640px) {
+  /* 44px hit areas on the preview controls. */
+  .ev2pv-seg button {
+    height: 44px;
+  }
+  .ev2pv-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .ev2pv-icons {
+    margin-right: -10px;
   }
 }
 @media (max-width: 560px) {

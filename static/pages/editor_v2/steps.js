@@ -61,6 +61,17 @@
     });
     EV2.ui.open = open;
     renderBar();
+    syncPlaceholder();
+  }
+
+  // New dashboard that hasn't reached the layout step: the preview shows a
+  // screen-sized placeholder instead of the panel-pixel render.
+  function syncPlaceholder() {
+    const on =
+      EV2.isNew && progress < 2 && !root.querySelector(".ev2-cl[data-widget]:not([data-widget=''])");
+    if (EV2.placeholder === on) return;
+    EV2.placeholder = on;
+    EV2.emit("ev2:placeholder", { on });
   }
 
   function renderBar() {
@@ -71,13 +82,20 @@
     const lead = step > 5 ? "All steps done" : step === 5 ? "Last step, optional" : `Step ${step} of 5`;
     const rows = [...root.querySelectorAll(".ev2-cl[data-n]")];
     const filled = rows.filter((r) => r.dataset.widget).length;
-    st.innerHTML = "";
-    st.append(lead + " · changes save as you go");
+    // The long line is for wide screens; the short one keeps a status in the
+    // bar at phone width.
+    const long = document.createElement("span");
+    long.className = "ev2-long";
+    long.append(lead + " · changes save as you go");
     if (rows.length) {
       const b = document.createElement("b");
-      b.textContent = `${filled} of ${rows.length} cells filled`;
-      st.append(" · ", b);
+      b.textContent = `${filled} of ${rows.length} cell${rows.length === 1 ? "" : "s"} filled`;
+      long.append(" · ", b);
     }
+    const short = document.createElement("span");
+    short.className = "ev2-short";
+    short.textContent = lead;
+    st.replaceChildren(long, short);
   }
 
   function setProgress(n) {
@@ -101,8 +119,22 @@
     if (o.scroll && key) {
       document.getElementById("ev2-step-" + key)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
-    if (o.focus && key) {
-      document.getElementById("ev2-h-" + key)?.focus({ preventScroll: true });
+    if (o.focus && key) focusStep(key);
+  }
+
+  // Keyboard focus for a step you just moved to. A header that can't be
+  // pressed (the open step in new mode) can't take focus, so the step's body
+  // (a labelled region, tabindex -1) does.
+  function focusStep(key) {
+    const head = document.getElementById("ev2-h-" + key);
+    if (head && !head.disabled) {
+      head.focus({ preventScroll: true });
+      return;
+    }
+    const body = document.getElementById("ev2-b-" + key);
+    if (body && !body.hidden) {
+      body.tabIndex = -1;
+      body.focus({ preventScroll: true });
     }
   }
 
@@ -120,7 +152,7 @@
       setProgress(idx + 2);
       openStep(next, { scroll: true });
       if (next === "widgets" && EV2.widgets) EV2.widgets.openFirstEmpty();
-      else if (next) document.getElementById("ev2-h-" + next)?.focus({ preventScroll: true });
+      else if (next) focusStep(next);
     }
   });
 
@@ -217,6 +249,8 @@
   function setDraw(on) {
     if (!drawBtn || drawing === on) return;
     drawing = on;
+    // Split and remove reload the page; the reload brings edit mode back.
+    EV2.ui.draw = on;
     drawBtn.setAttribute("aria-pressed", on ? "true" : "false");
     drawBtn.classList.toggle("ev2-btn--primary", on);
     drawBtn.querySelector("span").textContent = on ? "Done drawing" : "Edit on preview";
@@ -332,6 +366,9 @@
       if (txt) txt.textContent = `Cell ${li.dataset.n} · ${li.dataset.shape}`;
     });
   });
+
+  // Back from a split / remove reload: edit mode was on, so it still is.
+  if (restored.draw && open === "layout" && drawBtn && !drawBtn.disabled) setDraw(true);
 
   EV2.steps = { open: openStep, current: () => open, render, renderBar, setProgress, keys: KEYS };
   render();

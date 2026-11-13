@@ -19,8 +19,6 @@
     const body = li.querySelector(".ev2-cl-b");
     if (body) body.hidden = !isOpen;
     li.querySelector("[data-ev2-row]")?.setAttribute("aria-expanded", isOpen ? "true" : "false");
-    const go = li.querySelector("[data-ev2-go]");
-    if (go) go.setAttribute("aria-label", isOpen ? "Close settings" : "Open settings");
     const rep = li.querySelector("[data-ev2-replace]");
     if (rep) rep.hidden = !isOpen;
     const grip = li.querySelector(".ev2-grip:not(.none)");
@@ -81,6 +79,13 @@
       return;
     }
     if (ev.target.closest("[data-ev2-empty]")) {
+      const name = li.dataset.item || li.dataset.widget || "this";
+      if (
+        !window.confirm(
+          `Empty cell ${li.dataset.n}? This removes its ${name} widget and the settings you made for it.`
+        )
+      )
+        return;
       const form = li.querySelector("[data-ev2-cell-form]");
       form.querySelector("[data-ev2-plugin]").value = "";
       EV2.saveForm(form)
@@ -229,6 +234,35 @@
       .then(() => EV2.reload({ cell: null }))
       .catch(() => {});
   });
+  // Keyboard: Alt+Up / Alt+Down on a row swaps it with its neighbour.
+  const live = root.querySelector("[data-ev2-live]");
+  function announce(msg) {
+    if (!live) return;
+    live.textContent = "";
+    setTimeout(() => (live.textContent = msg), 60);
+  }
+  EV2.announce = announce;
+  const rowName = (li) => (li.dataset.widget ? li.dataset.item || li.dataset.widget : "Empty cell");
+  list.addEventListener("keydown", (ev) => {
+    if (!ev.altKey || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
+    const btn = ev.target.closest && ev.target.closest("[data-ev2-row]");
+    const li = btn && btn.closest(".ev2-cl[data-swap-url]");
+    if (!li) return;
+    ev.preventDefault();
+    const swappable = rows().filter((r) => r.dataset.swapUrl);
+    const i = swappable.indexOf(li);
+    const other = swappable[i + (ev.key === "ArrowUp" ? -1 : 1)];
+    if (!other) {
+      announce(`${rowName(li)} is already ${ev.key === "ArrowUp" ? "first" : "last"}.`);
+      return;
+    }
+    const msg = `Swapped cell ${li.dataset.n} and cell ${other.dataset.n}. ${rowName(li)} is now in cell ${other.dataset.n}.`;
+    EV2.flush()
+      .then(() => EV2.post(li.dataset.swapUrl, { target: other.dataset.cellId }, { json: true }))
+      .then(() => EV2.reload({ cell: null, focusCell: other.dataset.cellId, announce: msg }))
+      .catch(() => {});
+  });
+
   list.addEventListener("dragend", () => {
     dragFrom = null;
     clearDrop();
@@ -267,6 +301,12 @@
 
   // Back from a reload: reopen the row that was open.
   EV2.ready(() => {
+    // After a keyboard swap: the moved widget keeps focus, and the result is said.
+    const moved = EV2.restored.focusCell;
+    if (moved && rowFor(moved)) {
+      rowFor(moved).querySelector("[data-ev2-row]")?.focus({ preventScroll: true });
+      if (EV2.restored.announce) announce(EV2.restored.announce);
+    }
     const id = EV2.restored.cell;
     if (id && rowFor(id) && EV2.steps && EV2.steps.current() === "widgets") {
       const li = rowFor(id);

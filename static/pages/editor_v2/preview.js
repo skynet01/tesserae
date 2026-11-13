@@ -477,6 +477,9 @@
     focused: null, // the cell whose row is open on the left
     drag: null,
     saving: false,
+    // A new dashboard that hasn't reached the layout step: a screen-sized
+    // placeholder instead of the panel-pixel render (steps.js decides).
+    placeholder: Boolean(window.EV2 && window.EV2.placeholder),
   };
   const frames = []; // per group: {wrap, canvas, iframe, img, throbber, overlay, loaded, stale}
 
@@ -547,6 +550,7 @@
       wrap.dataset.groupKey = g.key;
       wrap.style.setProperty("--ev2pv-ar", String(g.w / g.h));
       wrap.hidden = i !== state.group;
+      wrap.classList.toggle("is-placeholder", state.placeholder);
       const stage = make("div", "ev2pv-stage");
       const bezel = make("div", `ev2pv-bezel ev2pv-bezel--${g.kind}`);
       const canvas = make("div", "ev2pv-canvas");
@@ -570,7 +574,9 @@
       throbber.innerHTML = '<i class="ph ph-circle-notch"></i>';
       const overlay = make("div", "ev2pv-overlay");
       overlay.dataset.ev2pvOverlay = "";
-      canvas.append(iframe, img, throbber, overlay);
+      const ph = make("div", "ev2pv-ph");
+      ph.textContent = "Your dashboard appears here.";
+      canvas.append(iframe, img, throbber, overlay, ph);
       bezel.append(canvas);
       stage.append(bezel);
       const cap = make("p", "ev2pv-cap");
@@ -770,7 +776,7 @@
   function hint() {
     const f = frame();
     let text;
-    if (!data.cells.length) text = "Pick a layout to split the screen.";
+    if (state.placeholder || !data.cells.length) text = "Pick a layout to split the screen.";
     else if (f && f.map && f.map.rotated) {
       const flat = data.groups.find((g) => !G.axisMap(data.cells, g.w, g.h, sbId()).rotated);
       text = flat
@@ -1460,6 +1466,12 @@
       ? { cols: Math.round(s.cols), rows: Math.round(s.rows) }
       : null;
   }
+  document.addEventListener("ev2:placeholder", (ev) => {
+    state.placeholder = Boolean(ev.detail && ev.detail.on);
+    frames.forEach((f) => f.wrap.classList.toggle("is-placeholder", state.placeholder));
+    renderOverlay();
+  });
+
   document.addEventListener("ev2:snap", (ev) => {
     state.snap = readSnap(ev.detail);
     renderOverlay();
@@ -1495,6 +1507,12 @@
 
   // ------------------------------------------------------------------ start
   if (window.EV2 && window.EV2.snap) state.snap = readSnap(window.EV2.snap);
+  // Edit mode brought back after a split / remove reload: steps.js turned it
+  // on before this deferred script was listening, so read it here.
+  if (window.EV2 && window.EV2.ui && window.EV2.ui.draw) {
+    state.edit = true;
+    root.classList.add("is-edit");
+  }
   const savedTab = store.get(TAB_KEY);
   const startTab = savedTab ? data.groups.findIndex((g) => g.key === savedTab) : -1;
   state.group = startTab >= 0 ? startTab : 0;

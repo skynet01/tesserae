@@ -140,6 +140,10 @@
       });
       Promise.all(saves).catch(() => {});
       refreshOverrides();
+      // The button that was pressed is gone with the box: land on the first
+      // look control, and say what happened.
+      form.querySelector('[name="theme"]')?.focus({ preventScroll: true });
+      EV2.announce && EV2.announce("Every widget now uses the dashboard look.");
     }
   });
 
