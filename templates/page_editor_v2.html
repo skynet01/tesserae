@@ -291,6 +291,8 @@
   <div class="ev2-cv-foot">
     {% if not is_bar %}<button type="button" class="ev2-link ev2-link--quiet" data-ev2-empty>Empty this cell</button>{% endif %}
     <span class="sp"></span>
+    {#- Touch has no drag-to-swap: these two do the same on a phone. -#}
+    {% if not is_bar %}<span class="ev2-mv" role="group" aria-label="Move this widget"><button type="button" class="ev2-iconbtn" data-ev2-move="up" aria-label="Move up" title="Swap with the cell above">{{ ico('arrow-up') }}</button><button type="button" class="ev2-iconbtn" data-ev2-move="down" aria-label="Move down" title="Swap with the cell below">{{ ico('arrow-down') }}</button></span>{% endif %}
     <button type="button" class="ev2-btn ev2-btn--primary ev2-btn--sm" data-ev2-done>Done</button>
   </div>
   <noscript><button type="submit">Save</button></noscript>
@@ -413,9 +415,9 @@
                 <button type="button" data-ev2-size="{{ w }}x{{ h }}" aria-pressed="{{ 'true' if (w == _td.w and h == _td.h) else 'false' }}">{{ w }}×{{ h }}</button>
                 {% endfor %}
                 <span class="ev2-cust" data-on="{{ 'true' if _custom else 'false' }}">
-                  <input id="ev2-tw" inputmode="numeric" value="{{ _td.w }}" aria-label="Custom width" data-ev2-custom-size>
+                  <input id="ev2-tw" inputmode="numeric" pattern="[0-9]*" enterkeyhint="done" value="{{ _td.w }}" aria-label="Custom width" data-ev2-custom-size>
                   <i aria-hidden="true">×</i>
-                  <input id="ev2-th" inputmode="numeric" value="{{ _td.h }}" aria-label="Custom height" data-ev2-custom-size>
+                  <input id="ev2-th" inputmode="numeric" pattern="[0-9]*" enterkeyhint="done" value="{{ _td.h }}" aria-label="Custom height" data-ev2-custom-size>
                 </span>
               </div>
             </div>
@@ -487,7 +489,7 @@
         {{ step_head('widgets', 3, 'Widgets', _wsum, _wvis, warn=not _all_filled) }}
         <p class="ev2-st-wait" data-ev2-wait></p>
         <div class="ev2-st-body" id="ev2-b-widgets" role="region" aria-labelledby="ev2-h-widgets" hidden>
-          <p class="ev2-lead">What goes in each cell? Click a row, or <b>click a cell on the preview</b>. Drag rows to swap two widgets.</p>
+          <p class="ev2-lead">What goes in each cell? Click a row, or <b>click a cell on the preview</b>. <span class="ev2-nt">Drag rows to swap two widgets.</span><span class="ev2-t">Open a row to move its widget up or down.</span></p>
           <div class="ev2-st-b">
             <ul class="ev2-cells" data-ev2-cells>
               {% if _sb_cell %}

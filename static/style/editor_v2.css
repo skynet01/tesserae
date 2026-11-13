@@ -2032,3 +2032,256 @@ details.ev2-adv[open] > summary .ev2-caret {
     font-size: 23px !important;
   }
 }
+
+/* ----- phones and touch ------------------------------------------------ */
+/* Every control is a 44px target, text fields are 16px (iOS zooms the page
+   on anything smaller), the bottom bar clears the home indicator and steps
+   aside while a field has the on-screen keyboard. Hit areas only: icons and
+   drawn shapes keep their size. */
+@media (max-width: 640px) {
+  .ev2 .ev2-crumbs a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .ev2-crumbs {
+    margin-bottom: 4px;
+  }
+  .ev2 .ev2-titlerow .ev2-title {
+    min-height: 44px !important;
+  }
+  .ev2 .ev2-iconpick {
+    min-width: 44px;
+    height: 44px;
+  }
+  .ev2 .ev2-st-h {
+    min-height: 48px;
+  }
+  .ev2 .ev2-cl-row {
+    min-height: 48px;
+  }
+  details.ev2-adv > summary {
+    min-height: 44px;
+    padding: 6px 0;
+  }
+  .ev2 .ev2-btn,
+  .ev2 .ev2-btn--sm,
+  .ev2-bar .ev2-btn,
+  .ev2-pk-pop .ev2-btn {
+    height: auto;
+    min-height: 44px;
+  }
+  .ev2 .ev2-link,
+  .ev2-bar .ev2-link,
+  .ev2-pk-pop .ev2-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .ev2-bar .ev2-link--danger {
+    padding: 0 12px;
+  }
+  /* Text fields: 16px, 44px tall. */
+  .ev2 .ev2-select,
+  .ev2 .ev2-input,
+  .ev2-pk-pop .ev2-input,
+  .ev2 .ev2-cl-b .field input[type="text"],
+  .ev2 .ev2-cl-b .field input[type="number"],
+  .ev2 .ev2-cl-b .field input[type="time"],
+  .ev2 .ev2-cl-b .field input[type="url"],
+  .ev2 .ev2-cl-b .field input[type="password"],
+  .ev2 .ev2-cl-b .field select:not([multiple]),
+  .ev2 .ev2-cl-b .field textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+  .ev2 .ev2-select {
+    background-position:
+      calc(100% - 17px) 19px,
+      calc(100% - 12px) 19px;
+  }
+  .ev2 .ev2-time {
+    height: 44px;
+  }
+  .ev2 .ev2-numu,
+  :root[data-ui="paper"] .ev2-numu {
+    height: 44px;
+  }
+  .ev2 .ev2-numu .ev2-num {
+    width: 56px;
+    font-size: 16px !important;
+  }
+  /* Segmented controls and the test-size row. */
+  .ev2 .ev2-seg button,
+  .ev2 .ev2-seg--sm button {
+    height: 44px;
+    padding: 0 12px;
+  }
+  .ev2-sizeseg {
+    flex-wrap: wrap;
+    max-width: none;
+  }
+  .ev2 .ev2-sizeseg button {
+    flex: 1 1 40%;
+    font-size: 14px;
+  }
+  .ev2-cust {
+    flex: 1 1 100%;
+    justify-content: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-left: 0;
+    border-top: 1px solid var(--t-border-strong);
+    font-size: 16px;
+  }
+  .ev2-cust input,
+  .ev2 .ev2-cust input {
+    width: 84px;
+    min-height: 44px !important;
+    font-size: 16px !important;
+  }
+  /* Layout presets, display cards, swatches, lineup rows. */
+  .ev2-lgrid {
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  }
+  .ev2 .ev2-lt {
+    min-height: 44px;
+  }
+  .ev2 .ev2-lp-row {
+    min-height: 48px;
+  }
+  .ev2 .ev2-sw button {
+    width: 44px;
+    height: 44px;
+  }
+  .ev2-sw input[type="color"] {
+    width: 44px;
+    height: 44px;
+  }
+  .ev2-rng input[type="range"] {
+    min-height: 44px;
+  }
+  .ev2-radio {
+    min-height: 44px;
+  }
+  .ev2 .ev2-grip {
+    width: 24px;
+    min-height: 44px;
+  }
+  /* The row that holds the 44px switch. */
+  .ev2-lrow .c .ev2-switch,
+  .ev2-opts .field--switch {
+    min-height: 44px;
+  }
+
+  /* Bottom bar: clear the home indicator, and get out of the way of the
+     on-screen keyboard while a field is being typed in. */
+  .ev2-bar {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+  body:has(
+      .ev2 input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"]):focus,
+      .ev2 textarea:focus,
+      .ev2-pk-pop input:focus
+    )
+    .ev2-bar {
+    display: none;
+  }
+
+  /* The widget catalog fills the phone: header, search, a row of category
+     chips, then the list. */
+  .ev2-pk-pop {
+    left: 0;
+    top: 0;
+    transform: none;
+    width: 100vw;
+    height: 100dvh;
+    max-height: none;
+    border: 0;
+    border-radius: 0;
+    padding: calc(12px + env(safe-area-inset-top, 0px)) 14px calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+  .ev2-pk-pop .ev2-pk-cats button {
+    min-height: 44px;
+  }
+  .ev2-pk-pop .ev2-pk-row {
+    min-height: 56px;
+  }
+}
+@media (max-width: 640px) {
+  /* The content scrolling behind the bar must not show through its text. */
+  .ev2-bar {
+    background: var(--t-surface);
+  }
+}
+
+/* Move up / down: touch has no drag to swap, so a phone gets two buttons. */
+.ev2-mv {
+  display: none;
+}
+@media (pointer: coarse), (max-width: 640px) {
+  .ev2-mv {
+    display: inline-flex;
+  }
+  .ev2-grip:not(.none) {
+    visibility: hidden;
+  }
+}
+@media (max-width: 640px) {
+  /* Test sizes: a tidy two-column grid with hairlines, then the custom size. */
+  .ev2-sizeseg {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--t-border-strong);
+  }
+  .ev2 .ev2-sizeseg button,
+  .ev2 .ev2-sizeseg button + button {
+    border: 0;
+    flex: none;
+  }
+  .ev2-sizeseg .ev2-cust {
+    grid-column: 1 / -1;
+    border: 0;
+  }
+}
+.ev2-t {
+  display: none;
+}
+@media (pointer: coarse), (max-width: 640px) {
+  .ev2-nt {
+    display: none;
+  }
+  .ev2-t {
+    display: inline;
+  }
+}
+
+.ev2 .ev2-iconpick .icon-picker-current {
+  width: auto;
+}
+@media (max-width: 640px) {
+  .ev2 .ev2-iconpick {
+    white-space: nowrap;
+    padding: 0 12px;
+  }
+  /* The icon picker opens as a sheet under the header, inside the screen. */
+  .ev2-icon-picker .icon-picker-popover {
+    position: fixed;
+    top: 72px;
+    left: 12px;
+    right: 12px;
+    min-width: 0;
+    max-height: calc(100dvh - 72px - 150px);
+    overflow-y: auto;
+    z-index: 70;
+  }
+  .ev2-icon-picker .icon-picker-search input {
+    min-height: 44px;
+    font-size: 16px !important;
+  }
+  .ev2-icon-picker .icon-picker-grid button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

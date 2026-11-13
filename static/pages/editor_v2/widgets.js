@@ -247,17 +247,12 @@
   }
   EV2.announce = announce;
   const rowName = (li) => (li.dataset.widget ? li.dataset.item || li.dataset.widget : "Empty cell");
-  list.addEventListener("keydown", (ev) => {
-    if (!ev.altKey || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
-    const btn = ev.target.closest && ev.target.closest("[data-ev2-row]");
-    const li = btn && btn.closest(".ev2-cl[data-swap-url]");
-    if (!li) return;
-    ev.preventDefault();
+  // Swap a row with its neighbour above or below (keyboard and touch).
+  function moveRow(li, dir) {
     const swappable = rows().filter((r) => r.dataset.swapUrl);
-    const i = swappable.indexOf(li);
-    const other = swappable[i + (ev.key === "ArrowUp" ? -1 : 1)];
+    const other = swappable[swappable.indexOf(li) + (dir === "up" ? -1 : 1)];
     if (!other) {
-      announce(`${rowName(li)} is already ${ev.key === "ArrowUp" ? "first" : "last"}.`);
+      announce(`${rowName(li)} is already ${dir === "up" ? "first" : "last"}.`);
       return;
     }
     const msg = `Swapped cell ${li.dataset.n} and cell ${other.dataset.n}. ${rowName(li)} is now in cell ${other.dataset.n}.`;
@@ -265,6 +260,19 @@
       .then(() => EV2.post(li.dataset.swapUrl, { target: other.dataset.cellId }, { json: true }))
       .then(() => EV2.reload({ cell: null, focusCell: other.dataset.cellId, announce: msg }))
       .catch(() => {});
+  }
+  list.addEventListener("keydown", (ev) => {
+    if (!ev.altKey || (ev.key !== "ArrowUp" && ev.key !== "ArrowDown")) return;
+    const btn = ev.target.closest && ev.target.closest("[data-ev2-row]");
+    const li = btn && btn.closest(".ev2-cl[data-swap-url]");
+    if (!li) return;
+    ev.preventDefault();
+    moveRow(li, ev.key === "ArrowUp" ? "up" : "down");
+  });
+  list.addEventListener("click", (ev) => {
+    const mv = ev.target.closest("[data-ev2-move]");
+    const li = mv && mv.closest(".ev2-cl[data-swap-url]");
+    if (li) moveRow(li, mv.dataset.ev2Move);
   });
 
   list.addEventListener("dragend", () => {

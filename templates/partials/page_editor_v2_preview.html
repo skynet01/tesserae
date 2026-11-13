@@ -8,6 +8,7 @@
 
     Steps <-> preview events and window.EV2Preview are documented at the top
     of preview.js. -#}
+{%- from "_preview_color.html" import attrs as color_attrs with context -%}
 {%- set _ev2pv_groups = [] -%}
 {%- for g in preview_groups -%}
   {%- set _ids = g.device_ids | default([]) -%}
@@ -62,9 +63,19 @@
               title="Open at 100%" aria-label="Open at 100%">
         <i class="ph ph-corners-out" aria-hidden="true"></i>
       </button>
+      <button type="button" class="ev2pv-done" data-ev2pv-done hidden>Done drawing</button>
     </div>
   </div>
 
+  {# The display colour mode per shape, from the same macro the classic editor
+     and the dashboard list use (data-gamut / data-grey-levels). preview.js
+     reads it and puts it on each canvas, where preview-color.css greys or
+     thresholds the Live render to match a grey or black-and-white panel. #}
+  <span hidden aria-hidden="true">
+    {%- for g in _ev2pv_groups %}
+    <i data-ev2pv-color="{{ g.key }}" {{ color_attrs(g.deviceIds) }}></i>
+    {%- endfor %}
+  </span>
   <div class="ev2pv-groups" data-ev2pv-groups></div>
 
   <p class="ev2pv-hint" data-ev2pv-hint></p>

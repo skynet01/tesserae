@@ -567,6 +567,7 @@
   /* 44px hit areas on the preview controls. */
   .ev2pv-seg button {
     height: 44px;
+    min-width: 44px;
   }
   .ev2pv-iconbtn {
     width: 44px;
@@ -591,17 +592,21 @@
 }
 @media (pointer: coarse) {
   .ev2pv-edge {
-    --ev2pv-hit: 26px;
+    --ev2pv-hit: 36px;
   }
   /* No hover on touch: show the lines faintly so they can be found. */
   .ev2pv-edge::after {
     opacity: 0.45;
   }
   .ev2pv-seg button {
-    height: 32px;
+    height: 44px;
+  }
+  .ev2pv-iconbtn {
+    width: 44px;
+    height: 44px;
   }
   .ev2pv-tools-bar button {
-    height: 34px;
+    min-height: 44px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -614,4 +619,34 @@
   .ev2pv-throbber > i {
     animation: none;
   }
+}
+
+/* Done drawing, next to the preview's other controls (shown in edit mode). */
+.ev2pv-done {
+  height: 32px;
+  margin: 0 6px 0 8px;
+  padding: 0 12px;
+  border: 1px solid var(--t-border-strong);
+  border-radius: var(--t-radius, 2px);
+  background: var(--t-fg);
+  color: var(--t-surface);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ev2pv-done[hidden] {
+  display: none;
+}
+.ev2pv-icons {
+  align-items: center;
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .ev2pv-done {
+    min-height: 44px;
+    margin-right: 10px;
+  }
+}
+#ev2-preview {
+  scroll-margin-top: 64px;
 }

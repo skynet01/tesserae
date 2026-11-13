@@ -257,7 +257,17 @@
     if (drawbar) drawbar.hidden = !on;
     EV2.emit("ev2:edit-mode", { on });
     if (on) EV2.emit("ev2:snap", snapState());
+    // Stacked layout: the preview sits above the steps, out of sight from
+    // this switch. Take the user to it.
+    if (on && !restoring && window.matchMedia("(max-width: 1180px)").matches) {
+      document.getElementById("ev2-preview")?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
   }
+  let restoring = false;
+  EV2.on("ev2:edit-done", () => {
+    setDraw(false);
+    drawBtn?.focus({ preventScroll: true });
+  });
   drawBtn?.addEventListener("click", () => setDraw(!drawing));
   EV2.onEscape(() => {
     if (!drawing) return false;
@@ -368,7 +378,11 @@
   });
 
   // Back from a split / remove reload: edit mode was on, so it still is.
-  if (restored.draw && open === "layout" && drawBtn && !drawBtn.disabled) setDraw(true);
+  if (restored.draw && open === "layout" && drawBtn && !drawBtn.disabled) {
+    restoring = true;
+    setDraw(true);
+    restoring = false;
+  }
 
   EV2.steps = { open: openStep, current: () => open, render, renderBar, setProgress, keys: KEYS };
   render();

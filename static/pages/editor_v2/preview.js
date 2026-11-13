@@ -439,11 +439,22 @@
   function readData(scope) {
     const el = scope.querySelector("[data-ev2pv-data]");
     if (!el) return null;
+    let out;
     try {
-      return JSON.parse(el.textContent);
+      out = JSON.parse(el.textContent);
     } catch {
       return null;
     }
+    // Display colour mode per shape: the server's data-gamut / data-grey-levels
+    // (same macro as the classic editor) win over the JSON copy.
+    (out.groups || []).forEach((g) => {
+      const c = scope.querySelector(`[data-ev2pv-color="${CSS.escape(String(g.key))}"]`);
+      if (!c) return;
+      if (c.dataset.gamut) g.gamut = c.dataset.gamut;
+      const lv = Number(c.dataset.greyLevels);
+      if (Number.isFinite(lv)) g.greyLevels = lv;
+    });
+    return out;
   }
 
   let data = readData(root);
@@ -1496,8 +1507,14 @@
     if (!on) state.selected = null;
     state.edit = on;
     root.classList.toggle("is-edit", on);
+    doneBtn.hidden = !on;
     renderOverlay();
   });
+  // Stacked (phone) layout: the Edit on preview switch is far from the
+  // preview, so the preview carries its own way out.
+  const doneBtn = q("[data-ev2pv-done]");
+  doneBtn.hidden = !state.edit;
+  doneBtn.addEventListener("click", () => emit("ev2:edit-done", {}));
 
   document.addEventListener("ev2:saved", (ev) => {
     const d = ev.detail || {};
@@ -1523,6 +1540,7 @@
   if (window.EV2 && window.EV2.ui && window.EV2.ui.draw) {
     state.edit = true;
     root.classList.add("is-edit");
+    doneBtn.hidden = false;
   }
   const savedTab = store.get(TAB_KEY);
   const startTab = savedTab ? data.groups.findIndex((g) => g.key === savedTab) : -1;
