@@ -65,15 +65,19 @@ macro here instead.
 </div>
 {%- endmacro -%}
 
-{%- macro number_input(field_id, name, label, value=0, min=None, max=None, step=1, help=None, form=None, placeholder='') -%}
-<div class="field">
+{#- ``unit`` (the manifest's unit hint: s, px, h, %) shows after the box,
+   so the label stays a plain name ("Settle delay", not "(seconds)"). -#}
+{%- macro number_input(field_id, name, label, value=0, min=None, max=None, step=1, help=None, form=None, placeholder='', unit='') -%}
+<div class="field{% if unit %} field--unit{% endif %}">
   <label for="{{ field_id }}">{{ label }}{{ info_pop(help) }}</label>
+  {% if unit %}<span class="field-unit-wrap">{% endif %}
   <input type="number" id="{{ field_id }}" name="{{ name }}" value="{{ value }}"
          {% if placeholder %}placeholder="{{ placeholder }}"{% endif %}
          {% if form %}form="{{ form }}"{% endif %}
          {% if min is not none %}min="{{ min }}"{% endif %}
          {% if max is not none %}max="{{ max }}"{% endif %}
          step="{{ step }}">
+  {%- if unit %}<span class="field-unit">{{ unit }}</span></span>{% endif %}
 </div>
 {%- endmacro -%}
 
@@ -752,7 +756,8 @@ macro here instead.
                           step=spec.get('step', 1), help=help_text, form=form, placeholder=placeholder) }}
     {% else %}
       {{ number_input(field_id, name, label, value=value if value is not none else spec.get('default', 0),
-                      min=spec.get('min'), max=spec.get('max'), step=spec.get('step', 1), help=help_text, form=form, placeholder=placeholder) }}
+                      min=spec.get('min'), max=spec.get('max'), step=spec.get('step', 1), help=help_text, form=form, placeholder=placeholder,
+                      unit=spec.get('unit', '')) }}
     {% endif %}
   {% elif ftype == 'server_colour' %}
     {{ server_colour_field(field_id, name, label, value=value or '', help=help_text) }}

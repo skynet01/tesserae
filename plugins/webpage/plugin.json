@@ -78,6 +78,7 @@
     },
     {
       "name": "viewport_w",
+      "unit": "px",
       "type": "number",
       "label": "Render width",
       "help": "Logical viewport width the page sees, in pixels. Use a desktop width for responsive sites that hide content on narrow viewports.",
@@ -88,6 +89,7 @@
     },
     {
       "name": "settle_seconds",
+      "unit": "s",
       "type": "number",
       "label": "Settle delay",
       "help": "Seconds to wait after the page loads before capture, so scripts that fetch data and then update the page (weather pages, dashboards, SPAs) have time to render. Raise it for slow pages; 0 captures the instant the page finishes loading.",
@@ -108,6 +110,7 @@
     },
     {
       "name": "refresh_seconds",
+      "unit": "s",
       "type": "number",
       "label": "Refresh",
       "help": "Seconds between reloads. 0 turns auto-refresh off. Useful for status pages that change without a hard reload.",

@@ -228,6 +228,7 @@
     {
       "name": "horizon",
       "type": "number",
+      "unit": "min",
       "label": "Within",
       "default": 90,
       "help": "Minutes ahead. Arrivals further out than this are left off."
@@ -316,6 +317,7 @@
     {
       "name": "walk_minutes",
       "type": "number",
+      "unit": "min",
       "label": "Walk time",
       "default": 0,
       "advanced": true,

@@ -38,6 +38,7 @@
     },
     {
       "name": "life_expectancy_years",
+      "unit": "years",
       "type": "number",
       "label": "Life expectancy",
       "default": 80,

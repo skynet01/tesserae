@@ -26,6 +26,7 @@
     },
     {
       "name": "stale_hours",
+      "unit": "h",
       "placeholder": "24",
       "type": "number",
       "label": "Stale after",

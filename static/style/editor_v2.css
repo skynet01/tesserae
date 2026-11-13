@@ -892,7 +892,9 @@ textarea.ev2-input {
   box-shadow: inset 0 0 0 1.5px var(--t-fg);
 }
 .ev2 .ev2-pcard.on:focus-visible {
-  box-shadow: inset 0 0 0 1.5px var(--t-fg), var(--ev2-ring);
+  box-shadow:
+    inset 0 0 0 1.5px var(--t-fg),
+    var(--ev2-ring);
 }
 .ev2-pc-pic {
   display: grid;
@@ -1278,9 +1280,6 @@ textarea.ev2-input {
   gap: 16px;
   margin-top: 18px;
 }
-.ev2-opts--tail {
-  margin-top: 12px;
-}
 .ev2-of {
   display: grid;
   gap: 6px;
@@ -1451,13 +1450,201 @@ details.ev2-adv[open] > summary .ev2-caret {
   margin: 0;
 }
 .ev2-cv-foot {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
+  gap: 10px 14px;
   margin-top: 22px;
   padding-top: 18px;
   border-top: 1px solid var(--t-border);
+}
+/* The row's one status line (status.js): a full line above the actions.
+   Empty, it stays in the accessibility tree (a live region must exist
+   before its first message) but takes no room. */
+.ev2-cv-status {
+  flex: 1 0 100%;
+  margin: 0;
+  color: var(--t-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.ev2-cv-status:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.ev2-cv-status[data-tone="error"] {
+  color: var(--t-danger, var(--t-accent));
+}
+
+/* A choices provider that can't list anything, said once above the
+   options (page_editor_v2.html, choices_note). */
+.ev2-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 14px 0 0;
+  padding: 9px 12px;
+  background: var(--t-warn-bg);
+  border-radius: var(--ev2-r);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.ev2-note-ico {
+  flex: none;
+  margin-top: 2px;
+  color: var(--t-warn);
+}
+.ev2-of--act {
+  justify-items: start;
+}
+
+/* Sliders from the shared macro: the label like every other label, the
+   number and its unit in one box (the mockup's .numu). */
+.ev2-cl-b .field--slider .slider-header {
+  align-items: center;
+}
+.ev2-cl-b .field--slider .slider-header > label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--t-fg);
+}
+.ev2-cl-b .slider-value-wrap,
+.ev2-cl-b .field-unit-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  width: auto;
+  height: 34px;
+  padding-right: 8px;
+  border: 1px solid var(--t-border-strong);
+  border-radius: var(--ev2-r);
+  background: var(--t-surface);
+  justify-self: start;
+}
+.ev2-cl-b .slider-value-wrap:focus-within,
+.ev2-cl-b .field-unit-wrap:focus-within {
+  box-shadow: var(--ev2-ring);
+}
+.ev2 .ev2-cl-b .field .slider-value-wrap input[type="number"],
+.ev2 .ev2-cl-b .field .field-unit-wrap input[type="number"] {
+  width: 64px;
+  height: 32px;
+  min-height: 0;
+  padding: 0 4px 0 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--t-fg);
+  font-weight: 400;
+  text-align: right;
+}
+.ev2-cl-b .slider-unit,
+.ev2-cl-b .field-unit {
+  color: var(--t-muted);
+  font-size: 12.5px;
+}
+/* A plain number is sized for a number, like the ones with a unit. */
+.ev2 .ev2-cl-b .field > input[type="number"] {
+  width: 82px;
+  text-align: right;
+}
+
+/* The place search: one box with the icon inside, not a box in a box. */
+.ev2-cl-b .location-search-input {
+  height: 34px;
+  padding: 0 10px;
+  border-color: var(--t-border-strong);
+  border-radius: var(--ev2-r);
+}
+.ev2-cl-b .location-search-input:focus-within {
+  border-color: var(--t-fg-soft);
+  box-shadow: var(--ev2-ring);
+}
+.ev2 .ev2-cl-b .field input.location-search-display {
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* The touch editor (touch_interaction.js) in the same controls as the
+   rest of the row. */
+.ev2-cl-b .ti-root {
+  gap: 8px;
+}
+.ev2-cl-b .ti-root .plab {
+  padding-top: 9px;
+  font-size: 12.5px;
+}
+.ev2-cl-b .ti-root .psel,
+.ev2-cl-b .ti-root .dinput {
+  min-height: 34px;
+  padding: 0 10px;
+  border-color: var(--t-border-strong);
+  border-radius: var(--ev2-r);
+  font: inherit;
+  font-size: var(--t-size-base);
+}
+.ev2-cl-b .ti-root textarea.dinput {
+  padding: 8px 10px;
+}
+.ev2-cl-b .ti-root .psel {
+  height: 34px;
+  padding-right: 32px;
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--t-fg-soft) 50%),
+    linear-gradient(135deg, var(--t-fg-soft) 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) 50%,
+    calc(100% - 12px) 50%;
+  background-size: 6px 6px;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+.ev2-cl-b .ti-root .psel:focus,
+.ev2-cl-b .ti-root .dinput:focus {
+  border-color: var(--t-fg-soft);
+  box-shadow: var(--ev2-ring);
+}
+.ev2-cl-b .ti-root .minibtn {
+  min-height: 34px;
+  border-color: var(--t-border-strong);
+  border-radius: var(--ev2-r);
+  background: var(--t-surface);
+  font-size: 13px;
+}
+@media (max-width: 640px) {
+  .ev2-cl-b .slider-value-wrap,
+  .ev2-cl-b .field-unit-wrap,
+  .ev2-cl-b .location-search-input,
+  .ev2-cl-b .ti-root .psel,
+  .ev2-cl-b .ti-root .minibtn {
+    height: 44px;
+    min-height: 44px;
+  }
+  .ev2 .ev2-cl-b .field .slider-value-wrap input[type="number"],
+  .ev2 .ev2-cl-b .field .field-unit-wrap input[type="number"],
+  .ev2 .ev2-cl-b .field input.location-search-display {
+    height: 42px;
+    min-height: 0;
+  }
+  .ev2-cl-b .ti-root .psel {
+    font-size: 16px;
+  }
+  .ev2-cl-b .ti-root .plab {
+    padding-top: 14px;
+  }
 }
 
 /* ----- 4 · look -------------------------------------------------------- */
@@ -2015,17 +2202,37 @@ details.ev2-adv[open] > summary .ev2-caret {
   padding-block: 2px !important;
 }
 .ev2 .ev2-numu .ev2-num,
-.ev2 .ev2-cust input {
+.ev2 .ev2-cust input,
+.ev2 .ev2-cl-b .slider-value-wrap input,
+.ev2 .ev2-cl-b .field-unit-wrap input,
+.ev2 .ev2-cl-b .location-search-input input {
   height: 100% !important;
   min-height: 0 !important;
   font-size: inherit !important;
 }
-:root[data-ui="paper"] .ev2-numu {
+:root[data-ui="paper"] .ev2-numu,
+:root[data-ui="paper"] .ev2-cl-b .slider-value-wrap,
+:root[data-ui="paper"] .ev2-cl-b .field-unit-wrap,
+:root[data-ui="paper"] .ev2-cl-b .location-search-input,
+:root[data-ui="paper"] .ev2-cl-b .ti-root .psel,
+:root[data-ui="paper"] .ev2-cl-b .ti-root .minibtn {
   height: 40px;
 }
 @media (max-width: 900px) {
-  :root[data-ui="paper"] .ev2-numu {
+  :root[data-ui="paper"] .ev2-numu,
+  :root[data-ui="paper"] .ev2-cl-b .slider-value-wrap,
+  :root[data-ui="paper"] .ev2-cl-b .field-unit-wrap,
+  :root[data-ui="paper"] .ev2-cl-b .location-search-input,
+  :root[data-ui="paper"] .ev2-cl-b .ti-root .psel,
+  :root[data-ui="paper"] .ev2-cl-b .ti-root .minibtn {
     height: 44px;
+  }
+}
+@media (max-width: 640px) {
+  .ev2 .ev2-cl-b .slider-value-wrap input,
+  .ev2 .ev2-cl-b .field-unit-wrap input,
+  .ev2 .ev2-cl-b .location-search-input input {
+    font-size: 16px !important;
   }
 }
 @media (max-width: 640px) {
@@ -2200,7 +2407,8 @@ details.ev2-adv[open] > summary .ev2-caret {
     max-height: none;
     border: 0;
     border-radius: 0;
-    padding: calc(12px + env(safe-area-inset-top, 0px)) 14px calc(10px + env(safe-area-inset-bottom, 0px));
+    padding: calc(12px + env(safe-area-inset-top, 0px)) 14px
+      calc(10px + env(safe-area-inset-bottom, 0px));
   }
   .ev2-pk-pop .ev2-pk-cats button {
     min-height: 44px;
@@ -2310,7 +2518,7 @@ details.ev2-adv[open] > summary .ev2-caret {
   color: var(--t-muted);
 }
 .ev2-lineups .ev2-lineups-joined .is-off {
-  opacity: .65;
+  opacity: 0.65;
 }
 .ev2-lineups .ev2-lineups-row-actions {
   display: flex;

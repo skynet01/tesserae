@@ -618,6 +618,31 @@
   }
   if (!ro) window.addEventListener("resize", () => frames.forEach(fitFrame));
 
+  // Each cell's widget data as the frame got it (data-data on .cell), for
+  // editor-side status lines (status.js). Same-origin, so read it directly.
+  function emitFrameData(f) {
+    let doc;
+    try {
+      doc = f.iframe.contentDocument;
+    } catch {
+      return;
+    }
+    if (!doc) return;
+    const cells = [];
+    doc.querySelectorAll(".cell[data-cell-id]").forEach((el) => {
+      let cellData = null;
+      try {
+        cellData = JSON.parse(el.dataset.data || "null");
+      } catch {
+        cellData = null;
+      }
+      cells.push({ id: el.dataset.cellId, plugin: el.dataset.plugin || "", data: cellData });
+    });
+    const src = new URL(f.iframe.src, location.origin);
+    src.searchParams.delete("fresh");
+    emit("ev2:frame-data", { cells, src: src.pathname + src.search });
+  }
+
   function loadFrame(f, opts) {
     const fresh = Boolean(opts && opts.fresh);
     const blank = Boolean(opts && opts.blank);
@@ -631,6 +656,7 @@
           f.loaded = true;
           f.iframe.classList.remove("is-loading");
           if (state.mode !== "panel") f.throbber.hidden = true;
+          emitFrameData(f);
         },
         { once: true }
       );

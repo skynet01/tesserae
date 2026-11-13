@@ -531,7 +531,7 @@ def _materialize_cell_options(plugins: list[Any]) -> dict[str, list[dict[str, An
     empty-list fallback silently rendered an empty picker which was
     impossible to diagnose from the UI, see issue #29."""
     from app.secret_box import SecretBoxError
-    from app.widget_choices import choice_rows
+    from app.widget_choices import choice_rows, guidance_note
     from app.widget_options import localized_option_specs
 
     out: dict[str, list[dict[str, Any]]] = {}
@@ -569,6 +569,12 @@ def _materialize_cell_options(plugins: list[Any]) -> dict[str, list[dict[str, An
                         "plugin %s: choices(%r) raised; rendering as empty", plugin.id, source
                     )
                     spec["choices"] = []
+            # One blank row with a label is the provider saying why it can't
+            # list anything (Home Assistant not set up, a secret to re-enter).
+            # The v2 editor shows that once above the options.
+            note = guidance_note(spec.get("choices")) if source else None
+            if note:
+                spec["choices_note"] = note
             materialized.append(spec)
         out[plugin.id] = materialized
     return out

@@ -60,6 +60,7 @@
     {
       "name": "hours_ahead",
       "type": "number",
+      "unit": "h",
       "label": "Within",
       "default": 24,
       "help": "Hours ahead to include, within today."

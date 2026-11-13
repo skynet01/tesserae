@@ -136,6 +136,18 @@
 {% set r = cell.w / ([cell.h, 1] | max) %}{{ 'wide' if r > 1.6 else ('tall' if r < 0.7 else 'square-ish') }}
 {%- endmacro %}
 
+{#- One widget option. A field whose choices could not be listed says so in
+    a few words; the reason is the note above the options. -#}
+{% macro ev2_opt_field(cell, opt, cell_opts) -%}
+{% if opt.choices_note is defined %}{% set opt = dict(opt, choices=[{'value': '', 'label': 'Nothing to pick yet, see above'}]) %}{% endif %}
+{% set field_id = 'ev2-' ~ cell.id ~ '-opt-' ~ opt.name %}
+{% set fill = opt.get('fill_from') %}
+{% set filled = fill.get('map', {}).get(cell.options.get(fill.get('option'))) if fill else none %}
+{% set value = filled if filled is not none else cell.options.get(opt.name, opt.get('default', '')) %}
+{{ auto_field(field_id, 'opt_' ~ opt.name, opt, value, readonly=filled is not none,
+              visible=option_visible(opt, cell.options, cell_opts)) }}
+{%- endmacro %}
+
 {#- The widget settings that open in place under a filled row. -#}
 {% macro cell_body(cell, idx, is_bar=False) %}
 {% set plugin = (plugins | selectattr('id', 'equalto', cell.plugin) | list | first) if cell.plugin else None %}
@@ -152,35 +164,33 @@
   {% if plugin %}
   {% set cell_opts = plugin_cell_options.get(plugin.id, []) %}
   {% set secs = option_sections(cell_opts, cell.options) %}
-  {#- One loop over both sections (same as the classic editor): the main
-      options stack first, the manifest's ``advanced`` ones go inside
-      "More <widget> settings". -#}
-  {% set nb = secs.basic | length %}
-  {% for opt in secs.basic + secs.advanced %}
-    {% if loop.first and nb %}<div class="ev2-opts">{% endif %}
-    {% if loop.index0 == nb %}
-      {% if nb %}</div>{% endif %}
-  <details class="ev2-adv" data-opt-more {% if not secs.more_visible %}hidden{% endif %}>
-    <summary>{{ ico('caret-right', 'ev2-caret') }}<b>More {{ entry.item or plugin.name }} settings</b><span>{{ secs.advanced | length }}</span></summary>
-    <div class="ev2-adv-in"><div class="ev2-opts">
-    {% endif %}
-    {% set field_id = 'ev2-' ~ cell.id ~ '-opt-' ~ opt.name %}
-    {% set fill = opt.get('fill_from') %}
-    {% set filled = fill.get('map', {}).get(cell.options.get(fill.get('option'))) if fill else none %}
-    {% set value = filled if filled is not none else cell.options.get(opt.name, opt.get('default', '')) %}
-    {{ auto_field(field_id, 'opt_' ~ opt.name, opt, value, readonly=filled is not none,
-                  visible=option_visible(opt, cell.options, cell_opts)) }}
-    {% if loop.last %}
-      {% if secs.advanced %}</div></div></details>{% else %}</div>{% endif %}
-    {% endif %}
+  {#- A choices provider that can't list anything (Home Assistant not set up
+      or unreachable) answers with one blank row whose label says why. Say
+      that once, above the options, rather than in every field. -#}
+  {% set choice_notes = cell_opts | selectattr('choices_note', 'defined') | map(attribute='choices_note') | unique | list %}
+  {% for note in choice_notes %}
+  <p class="ev2-note" data-ev2-choices-note>{{ ico('plug', 'ev2-note-ico') }}<span>{{ note }}</span></p>
   {% endfor %}
-  {% if query_preview_button(plugin, cell.w, cell.h) | trim or cell.plugin == 'ha_dashboard' %}
-  <div class="ev2-opts ev2-opts--tail">
-    {{ query_preview_button(plugin, cell.w, cell.h) }}
-    {% if cell.plugin == 'ha_dashboard' %}
-    <p class="field-help capture-status" data-capture-status role="status">Checking capture status...</p>
-    {% endif %}
+  {#- The main options stack first; a query preview button (a widget that
+      declares ``query_preview``) is their last row. The manifest's
+      ``advanced`` options go inside "More <widget> settings", whose count is
+      what is showing now (components.js keeps it current with show_if). -#}
+  {% set qp = query_preview_button(plugin, cell.w, cell.h) | trim %}
+  {% if secs.basic or qp %}
+  <div class="ev2-opts">
+    {% for opt in secs.basic %}{{ ev2_opt_field(cell, opt, cell_opts) }}{% endfor %}
+    {% if qp %}<div class="ev2-of ev2-of--act">{{ qp | safe }}</div>{% endif %}
   </div>
+  {% endif %}
+  {% if secs.advanced %}
+  {% set n_vis = namespace(n=0) %}
+  {% for opt in secs.advanced if option_visible(opt, cell.options, cell_opts) %}{% set n_vis.n = n_vis.n + 1 %}{% endfor %}
+  <details class="ev2-adv" data-opt-more {% if not secs.more_visible %}hidden{% endif %}>
+    <summary>{{ ico('caret-right', 'ev2-caret') }}<b>More {{ entry.item or plugin.name }} settings</b><span data-opt-more-count>{{ n_vis.n }}</span></summary>
+    <div class="ev2-adv-in"><div class="ev2-opts" data-opt-more-list>
+    {% for opt in secs.advanced %}{{ ev2_opt_field(cell, opt, cell_opts) }}{% endfor %}
+    </div></div>
+  </details>
   {% endif %}
 
   {% if not is_bar %}
@@ -288,7 +298,12 @@
     </div></div>
   </details>
   {% endif %}
+  {#- The footer: the row's status line first (full width, static/pages/
+      editor_v2/status.js fills it), then "Empty this cell" (link, left),
+      the move buttons and Done (primary, last). -#}
+  {% set status_kind = {'ha_dashboard': 'capture'}.get(cell.plugin) %}
   <div class="ev2-cv-foot">
+    <p class="ev2-cv-status" data-ev2-cell-status role="status" aria-live="polite"{% if status_kind %} data-ev2-status-kind="{{ status_kind }}"{% endif %}>{% if status_kind == 'capture' %}Checking capture status…{% endif %}</p>
     {% if not is_bar %}<button type="button" class="ev2-link ev2-link--quiet" data-ev2-empty>Empty this cell</button>{% endif %}
     <span class="sp"></span>
     {#- Touch has no drag-to-swap: these two do the same on a phone. -#}
@@ -764,6 +779,7 @@
 <script src="{{ url_for('static', filename='pages/editor_v2/shell.js') }}"></script>
 <script src="{{ url_for('static', filename='pages/editor_v2/steps.js') }}"></script>
 <script src="{{ url_for('static', filename='pages/editor_v2/widgets.js') }}"></script>
+<script src="{{ url_for('static', filename='pages/editor_v2/status.js') }}"></script>
 <script src="{{ url_for('static', filename='pages/editor_v2/catalog.js') }}"></script>
 <script src="{{ url_for('static', filename='pages/editor_v2/look.js') }}"></script>
 <script src="{{ url_for('static', filename='pages/editor_v2/lineup.js') }}"></script>
