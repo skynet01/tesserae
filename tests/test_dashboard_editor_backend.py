@@ -160,21 +160,49 @@ def test_page_model_validates_test_display_size(value):
         Page(id="p", name="P", test_display_w=value)
 
 
-def test_panel_fallback_keeps_old_pages_and_honors_test_display(app):
+def test_unbound_panel_uses_test_display_instead_of_legacy_page_panel(app):
     settings = app.config["SETTINGS_STORE"]
     devices = app.config["DEVICE_REGISTRY"]
     old = Page(id="old", name="Old", panel=Panel(w=800, h=480))
-    assert resolve_panel_for_page(old, devices, settings) == old.panel
     custom = Page(
         id="custom", name="Custom", panel=old.panel, test_display_w=1920, test_display_h=1080
     )
-    for page, dims in [(old, (800, 480)), (custom, (1920, 1080))]:
+    for page, dims in [(old, (1024, 768)), (custom, (1920, 1080))]:
         panel = resolve_panel_for_page(page, devices, settings)
         assert (panel.w, panel.h) == dims
         push_panel = panel_groups_for_push(page, devices, settings)[0][0]
         assert (push_panel.w, push_panel.h) == dims
         group = preview_groups_for_page(page, devices, settings)[0]
         assert (group["w"], group["h"]) == dims
+
+
+def test_unbound_editor_and_compose_agree_with_test_display(app):
+    page = Page(id="home", name="Home", panel=Panel(w=800, h=480))
+    app.config["PAGE_STORE"].save(page)
+    _, context = _editor(app)
+    assert context["test_display"] == {"w": 1024, "h": 768}
+    assert (context["panel"].w, context["panel"].h) == (1024, 768)
+    group = context["preview_groups"][0]
+    assert (group["w"], group["h"]) == (1024, 768)
+    body = app.test_client().get("/compose/home").text
+    assert "width: 1024px;" in body and "height: 768px;" in body
+
+
+@pytest.mark.parametrize("editor_version", ["new", "classic"])
+@pytest.mark.parametrize("layout", ["1_cell", "2x2_grid", "hero_left", "hero_sandwich"])
+@pytest.mark.parametrize("gap", [0, 24])
+def test_status_bar_does_not_hide_the_active_preset(app, editor_version, layout, gap):
+    app.config["SETTINGS_STORE"].update_section("ui", {"dashboard_editor": editor_version})
+    client = app.test_client()
+    client.post("/pages/home", data={"gap": str(gap)})
+    client.post("/pages/home/layout", data={"layout": layout})
+    assert _editor(app)[1]["active_layout"] == layout
+    client.post("/pages/home/status-bar/toggle")
+    assert _editor(app)[1]["active_layout"] == layout
+    # Applying a preset while the strip exists must use its actual height,
+    # including the extra padding needed for the dashboard gap.
+    client.post("/pages/home/layout", data={"layout": layout})
+    assert _editor(app)[1]["active_layout"] == layout
 
 
 def _lineup(app, *, page_ids=("other",), devices=()):
@@ -189,6 +217,56 @@ def _lineup(app, *, page_ids=("other",), devices=()):
     )
     app.config["DECK_STORE"].upsert(deck)
     return deck
+
+
+@pytest.mark.parametrize("trigger", ["daily", "interval"])
+@pytest.mark.parametrize("legacy_kind", [None, "schedule"])
+def test_editor_keeps_schedule_projections_out_of_lineups(app, trigger, legacy_kind):
+    _lineup(app)
+    schedule = Deck(
+        id="morning",
+        name="Morning",
+        pages=[DeckPage(page_id="home")],
+        advance="timer",
+        advance_trigger=trigger,
+        advance_fires_at="08:00",
+        legacy_kind=legacy_kind,
+    )
+    app.config["DECK_STORE"].upsert(schedule)
+    context = _editor(app)[1]
+    assert [row["id"] for row in context["lineups"]] == ["loop"]
+    assert [row.id for row in context["schedules_for_page"]] == ["morning"]
+
+
+@pytest.mark.parametrize("action", ["join", "leave"])
+@pytest.mark.parametrize("trigger", ["daily", "interval"])
+def test_lineup_mutations_reject_schedule_projections(app, action, trigger):
+    schedule = Deck(
+        id="morning",
+        name="Morning",
+        pages=[DeckPage(page_id="home")],
+        advance="timer",
+        advance_trigger=trigger,
+        advance_fires_at="08:00",
+    )
+    app.config["DECK_STORE"].upsert(schedule)
+    response = app.test_client().post(
+        f"/pages/home/lineups/morning/{action}", json={"add_device": False}
+    )
+    assert response.status_code == 404
+    assert app.config["DECK_STORE"].get("morning") == schedule
+
+
+def test_lineups_are_filtered_by_shape_not_migration_marker(app):
+    deck = _lineup(app)
+    app.config["DECK_STORE"].upsert(deck.model_copy(update={"legacy_kind": "schedule"}))
+    assert [row["id"] for row in _editor(app)[1]["lineups"]] == ["loop"]
+    assert (
+        app.test_client()
+        .post("/pages/home/lineups/loop/join", json={"add_device": False})
+        .status_code
+        == 200
+    )
 
 
 def test_lineup_join_is_idempotent_and_preserves_settings(app):

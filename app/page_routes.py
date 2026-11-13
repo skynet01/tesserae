@@ -71,6 +71,7 @@ from app.panel import (
 )
 from app.plugin_loader import Plugin, PluginRegistry
 from app.state.deck_model import Deck, DeckPage
+from app.state.legacy_projections import is_timed_view_deck
 from app.state.page_store import Cell, Page, PageStore, Panel, clean_custom_css
 from app.state.settings_store import SettingsStore
 from app.widget_picker import CATEGORIES as WIDGET_CATEGORIES
@@ -475,7 +476,7 @@ def _apply_layout_to_cells(layout_slug: str, page: Page) -> list[Cell]:
     slots get unassigned cells; surplus existing cells are dropped.
 
     When ``page.status_bar_enabled`` is true, the auto-managed status
-    bar cell is preserved (kept at (0, 0, panel.w, STATUS_BAR_HEIGHT_PX))
+    bar cell keeps its stored height at the top left, at full panel width,
     and the preset's cells are rescaled to fit into the space below it
     so switching layouts doesn't drop the status bar or shove it into
     a random slot."""
@@ -491,8 +492,8 @@ def _apply_layout_to_cells(layout_slug: str, page: Page) -> list[Cell]:
             reusable = [c for c in reusable if c.id != bar_cell.id]
     positions = to_panel_pixels(layout, panel.w, panel.h)
     if bar_cell is not None:
-        # Rescale the preset's positions into (STATUS_BAR_HEIGHT_PX, panel.h).
-        bar_h = STATUS_BAR_HEIGHT_PX
+        # Use the actual strip height, including its gap-derived padding.
+        bar_h = bar_cell.h
         remaining = max(1, panel.h - bar_h)
         scale = remaining / panel.h
         positions = [
@@ -506,11 +507,9 @@ def _apply_layout_to_cells(layout_slug: str, page: Page) -> list[Cell]:
         else:
             out.append(_new_cell(x=x, y=y, w=w, h=h))
     if bar_cell is not None:
-        # Re-anchor the bar to full-width + fixed height in case the panel
-        # size changed since it was last positioned.
-        anchored = bar_cell.model_copy(
-            update={"x": 0, "y": 0, "w": panel.w, "h": STATUS_BAR_HEIGHT_PX}
-        )
+        # Re-anchor the bar to full width if the panel changed, preserving
+        # the gap-derived padding in its stored height.
+        anchored = bar_cell.model_copy(update={"x": 0, "y": 0, "w": panel.w})
         out.insert(0, anchored)
     return out
 
@@ -623,8 +622,14 @@ def _editor_context(page: Page) -> dict[str, Any]:
     """Shared context for the editor."""
     panel = resolve_panel_for_page(page, _devices(), _settings_store())
     page = _ensure_cells_fit_panel(page, panel)
-    panel_cells = [(c.x, c.y, c.w, c.h) for c in page.cells]
-    active_layout = detect_layout(panel_cells, panel.w, panel.h)
+    bar_index = _status_bar_cell_index(page)
+    strip_h = page.cells[bar_index].h if bar_index is not None else 0
+    panel_cells = [
+        (c.x, c.y - strip_h, c.w, c.h) for i, c in enumerate(page.cells) if i != bar_index
+    ]
+    active_layout = (
+        detect_layout(panel_cells, panel.w, panel.h - strip_h) if panel.h > strip_h else None
+    )
     widgets = sorted(_plugins().widgets(), key=lambda p: p.name.lower())
     picker_widgets = widget_picker_entries(widgets)
     test_display = resolve_test_display(page, _settings_store())
@@ -814,6 +819,8 @@ def _editor_lineups(page: Page) -> list[dict[str, Any]]:
         return []
     rows = []
     for deck in store.all():
+        if is_timed_view_deck(deck):
+            continue
         device_ids = _lineup_displays(deck)
         rows.append(
             {
@@ -1333,7 +1340,7 @@ def join_lineup(page_id: str, deck_id: str) -> Response:
     page = _store().get(page_id)
     deck_store = current_app.config["DECK_STORE"]
     deck = deck_store.get(deck_id)
-    if page is None or deck is None:
+    if page is None or deck is None or is_timed_view_deck(deck):
         abort(404)
     body = request.get_json(silent=True)
     if not isinstance(body, dict) or not isinstance(body.get("add_device", False), bool):
@@ -1365,7 +1372,7 @@ def leave_lineup(page_id: str, deck_id: str) -> Response:
     page = _store().get(page_id)
     deck_store = current_app.config["DECK_STORE"]
     deck = deck_store.get(deck_id)
-    if page is None or deck is None:
+    if page is None or deck is None or is_timed_view_deck(deck):
         abort(404)
     if page_id in deck.page_ids:
         updated = deck_without_page(deck, page_id)

@@ -212,8 +212,8 @@ class Page(BaseModel):
     """A saved dashboard.
 
     Bound devices supply the rendering dimensions (multi-head). Without
-    one, the optional test-display size wins, then the legacy ``panel``
-    override, then the virtual panel in app settings.
+    one, the optional test-display size wins, then the virtual panel in
+    app settings. The legacy ``panel`` field is retained as stored metadata.
 
     ``device_ids`` ties the page to one or more devices. When non-empty:
 
