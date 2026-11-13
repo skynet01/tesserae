@@ -32,7 +32,7 @@ import re
 import time
 import uuid
 from typing import Any, Final
-from urllib.parse import unquote, urlsplit
+from urllib.parse import urlsplit
 
 from flask import (
     Blueprint,
@@ -70,6 +70,7 @@ from app.panel import (
     resolve_test_display,
 )
 from app.plugin_loader import Plugin, PluginRegistry
+from app.redirects import local_return_path
 from app.state.deck_model import Deck, DeckPage
 from app.state.legacy_projections import is_timed_view_deck
 from app.state.page_store import Cell, Page, PageStore, Panel, clean_custom_css
@@ -742,10 +743,23 @@ def _editor_context(page: Page) -> dict[str, Any]:
         else []
     )
 
+    is_new = request.args.get("new") == "1"
+    real_ids = {d["id"] for d in device_options}
+    first_display = next((did for did in page.device_ids if did in real_ids), None)
+    lineup_return = url_for(
+        "pages.edit",
+        page_id=page.id,
+        new="1" if is_new else None,
+        _anchor="lineup" if is_new else "schedules",
+    )
+
     return {
         "page": page,
         "editor_version": _editor_version(),
-        "is_new": request.args.get("new") == "1",
+        "is_new": is_new,
+        "new_lineup_url": url_for(
+            "decks.editor", display=first_display, page_id=page.id, **{"return": lineup_return}
+        ),
         "test_display": {"w": test_display.w, "h": test_display.h},
         "test_display_presets": [[800, 480], [480, 800], [1200, 825], [1920, 1080]],
         "lineups": _editor_lineups(page),
@@ -1284,34 +1298,19 @@ def _editor_version() -> str:
     )
 
 
-def _editor_return_path(raw: str | None) -> str | None:
-    """Accept a local absolute path, including its query string."""
-    if not raw:
-        return None
-    decoded = unquote(raw)
-    if (
-        not decoded.startswith("/")
-        or decoded.startswith("//")
-        or "\\" in decoded
-        or any(ord(c) < 32 or ord(c) == 127 for c in decoded)
-    ):
-        return None
-    return raw
-
-
 @bp.post("/editor-version")
 def editor_version() -> Response:
     version = request.form.get("version")
     if version not in {"new", "classic"}:
         abort(400)
     _settings_store().update_section("ui", {"dashboard_editor": version})
-    target = _editor_return_path(request.form.get("next"))
+    target = local_return_path(request.form.get("next"))
     if target is None and request.referrer:
         try:
             referrer = urlsplit(request.referrer)
             origin = urlsplit(request.host_url)
             if (referrer.scheme, referrer.netloc) == (origin.scheme, origin.netloc):
-                target = _editor_return_path(
+                target = local_return_path(
                     referrer.path + (f"?{referrer.query}" if referrer.query else "")
                 )
         except ValueError:

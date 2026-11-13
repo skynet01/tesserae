@@ -235,6 +235,76 @@ def test_padding_preset_saves(server: tuple[str, Flask], pw: Any) -> None:
     browser.close()
 
 
+@pytest.mark.parametrize("is_new", [False, True])
+def test_new_lineup_round_trip_keeps_dashboard_and_returns_to_open_step(
+    server: tuple[str, Flask], pw: Any, is_new: bool
+) -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    from app import device_service
+
+    base, app = server
+    device_service.create_instance(
+        devices=app.config["DEVICE_REGISTRY"],
+        renderers=app.config["RENDERER_REGISTRY"],
+        data_root=app.config["DEVICE_DATA_ROOT"],
+        instance_id="hall",
+        kind_id="esp32_client",
+    )
+    store = app.config["PAGE_STORE"]
+    original = store.get(PAGE_ID)
+    # The new-dashboard case starts on the test display and must ask for one.
+    store.save(original.model_copy(update={"device_ids": [] if is_new else ["hall"]}))
+    store.save(Page(id="companion", name="Companion", device_ids=["hall"]))
+    browser, page, errors = _open(pw, base)
+    try:
+        if is_new:
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.goto(f"{base}/pages/{PAGE_ID}?new=1", wait_until="domcontentloaded")
+            page.wait_for_function("() => window.EV2 && EV2.steps")
+        step = "lineup" if is_new else "schedules"
+        page.evaluate("key => EV2.steps.open(key)", step)
+        if not is_new:
+            page.locator("[data-ev2-lopen]").click()
+        page.get_by_role(
+            "link", name="Make a new lineup" if is_new else "New lineup", exact=True
+        ).click()
+        query = parse_qs(urlsplit(page.url).query)
+        assert query["page_id"] == [PAGE_ID]
+        assert query.get("display") == (None if is_new else ["hall"])
+        target = query["return"][0]
+        assert page.locator('[data-fk="f-cancel"]').get_attribute("href") == target
+        assert page.get_by_role("link", name="Back to dashboard").get_attribute("href") == target
+        page.evaluate("() => sessionStorage.removeItem('ev2-step:full')")
+        page.locator('[data-fk="f-cancel"]').click()
+        page.wait_for_function("key => EV2.steps.current() === key", arg=step)
+        if not is_new:
+            page.locator("[data-ev2-lopen]").click()
+        page.get_by_role(
+            "link", name="Make a new lineup" if is_new else "New lineup", exact=True
+        ).click()
+        page.locator("#dxe-title").fill("Dashboard round trip")
+        if is_new:
+            page.locator('[data-pick-display="hall"]').click()
+        page.locator('[data-when="between"]').click()
+        page.locator('[data-time="end"]').fill("16:30")
+        page.locator('[data-time="end"]').dispatch_event("change")
+        page.locator('[data-goto="3"]').click()
+        assert page.locator(f'[data-step="{PAGE_ID}"]').count() == 1
+        page.locator('[data-add="companion"]').click()
+        page.evaluate("() => sessionStorage.removeItem('ev2-step:full')")
+        page.locator("[data-create]").click()
+        page.wait_for_url(f"**/pages/{PAGE_ID}{'?new=1' if is_new else ''}#{step}")
+        page.wait_for_function("key => EV2.steps.current() === key", arg=step)
+        joined = page.locator("[data-ev2-joined]")
+        assert "Dashboard round trip" in joined.inner_text()
+        assert joined.get_by_role("button", name="Remove").count() == 1
+        assert store.get(PAGE_ID).device_ids == ["hall"]
+        assert not errors
+    finally:
+        browser.close()
+
+
 def test_replace_stops_when_the_pending_save_fails(server: tuple[str, Flask], pw: Any) -> None:
     """A failed autosave must not be papered over by Replace, a reload or "Saved"."""
     base, app = server

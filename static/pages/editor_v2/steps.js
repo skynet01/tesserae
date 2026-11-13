@@ -28,14 +28,10 @@
     }
   }
   const restored = EV2.restored || {};
-  let open =
-    restored.open !== undefined
-      ? restored.open
-      : location.hash === "#schedules" && KEYS.includes("schedules")
-        ? "schedules"
-        : EV2.isNew
-          ? KEYS[Math.min(progress, KEYS.length) - 1]
-          : "widgets";
+  const hashStep = KEYS.includes(location.hash.slice(1)) ? location.hash.slice(1) : null;
+  const initialStep = hashStep || (EV2.isNew ? KEYS[Math.min(progress, KEYS.length) - 1] : "widgets");
+  let open = restored.open !== undefined ? restored.open : initialStep;
+  if (EV2.isNew && hashStep) setProgress(KEYS.indexOf(hashStep) + 1);
 
   function stateOf(key) {
     const idx = KEYS.indexOf(key) + 1;

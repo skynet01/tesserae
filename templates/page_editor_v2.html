@@ -634,7 +634,7 @@
             {% elif _lineups %}<p class="ev2-help muted">It's already in every lineup.</p>
             {% else %}<p class="ev2-help muted">No lineups yet.</p>{% endif %}
             {{ lineup_confirm() }}
-            <div class="ev2-st-next"><a class="ev2-link ev2-link--quiet" href="{{ url_for('decks.editor') }}">Make a new lineup</a></div>
+            <div class="ev2-st-next"><a class="ev2-link ev2-link--quiet" href="{{ new_lineup_url }}">Make a new lineup</a></div>
           </div>
         </div>
       </section>
@@ -668,7 +668,7 @@
               <div class="ev2-lpick" data-ev2-lpick hidden>
                 {{ lineup_rows(_avail) }}
                 {% if not _avail %}<p class="ev2-none">{{ "It's already in every lineup." if _lineups else 'No lineups yet.' }}</p>{% endif %}
-                <div class="ev2-row-btns"><button type="button" class="ev2-link ev2-link--quiet" data-ev2-lclose>Cancel</button><a class="ev2-link ev2-link--quiet" href="{{ url_for('decks.editor') }}">New lineup</a></div>
+                <div class="ev2-row-btns"><button type="button" class="ev2-link ev2-link--quiet" data-ev2-lclose>Cancel</button><a class="ev2-link ev2-link--quiet" href="{{ new_lineup_url }}">New lineup</a></div>
               </div>
               {{ lineup_confirm() }}
               <div class="ev2-st-next" data-ev2-ladd-row><button type="button" class="ev2-btn ev2-btn--sm" data-ev2-lopen>{{ ico('plus') }}<span>Add to a lineup</span></button></div>
