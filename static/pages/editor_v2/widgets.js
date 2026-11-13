@@ -110,7 +110,8 @@
     const form = el.closest && el.closest("[data-ev2-cell-form]");
     if (!form || el.name === "plugin") return;
     // Controls with no name only drive a named one (padding pair, filters).
-    if (!el.name && !el.dataset.ev2PadChoice) return;
+    // (the padding choice saves itself below, once the hidden controls follow it)
+    if (!el.name) return;
     const delay = EV2.debounceDelay(el);
     if (ev.type === "input" && delay < 0) return; // text: save on change
     if (ev.type === "change" && delay > 0 && el.type === "range") return; // input already queued it
@@ -149,6 +150,9 @@
         box.querySelectorAll("[data-ev2-pair]").forEach((i) => (i.value = v));
       }
       if (v === "custom") custom.querySelector("input[type=range]")?.focus();
+      // The preset value is "" for "use the dashboard padding": the choice
+      // itself is the edit, so save after the hidden controls have followed it.
+      EV2.saveForm(t.form || t.closest("form"), 0).catch(() => {});
     }
     if (t.matches("[data-ev2-ov]")) refreshLookSummary(t.form);
   });

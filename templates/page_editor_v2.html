@@ -697,7 +697,7 @@
   <a class="ev2-btn ev2-btn--primary" href="{{ _edit_url }}" data-ev2-finish>Done</a>
   {% else %}
   <span class="ev2-bar-st"><span class="ev2-long">Changes save as you go.{% if _using_test %} <b>On a test display, so Push is off.</b>{% endif %}</span><span class="ev2-short">{% if _using_test %}Test display · Push off{% else %}Saves as you go{% endif %}</span></span>
-  <form method="post" action="{{ url_for('pages.duplicate', page_id=page.id) }}" class="ev2-inline">
+  <form method="post" action="{{ url_for('pages.duplicate', page_id=page.id) }}" class="ev2-inline" data-ev2-after-save>
     <button type="submit" class="ev2-iconbtn" title="Duplicate dashboard" aria-label="Duplicate dashboard">{{ ico('copy') }}</button>
   </form>
   <form method="post" action="{{ url_for('pages.delete', page_id=page.id) }}" class="ev2-inline"
@@ -706,7 +706,7 @@
     {% if _lineup_names %}<input type="hidden" name="remove_from_lineups" value="1">{% endif %}
     <button type="submit" class="ev2-iconbtn" title="Delete dashboard" aria-label="Delete dashboard">{{ ico('trash') }}</button>
   </form>
-  <form method="post" action="{{ url_for('send.send_page') }}" class="ev2-inline">
+  <form method="post" action="{{ url_for('send.send_page') }}" class="ev2-inline" data-ev2-after-save>
     <input type="hidden" name="page_id" value="{{ page.id }}">
     <input type="hidden" name="return_to" value="editor">
     <button type="submit" class="ev2-btn ev2-btn--primary" {% if _using_test %}disabled title="Pick a real display in step 1 to push"{% else %}title="Push this dashboard to {{ 'its display' if _bound | length == 1 else 'every ticked display' }}"{% endif %}>{{ ico('paper-plane-tilt') }}<span class="ev2-long">{{ _push_label }}</span><span class="ev2-short">Push</span></button>

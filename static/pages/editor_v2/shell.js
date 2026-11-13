@@ -134,15 +134,25 @@
     (form.__ev2after = form.__ev2after || []).push(fn);
   }
 
-  // Send anything still waiting on a debounce, then wait for the chain.
+  // Send anything still waiting on a debounce, then wait for the chain, and
+  // keep going until nothing new was queued while we waited (an edit made
+  // during a slow save must not be left behind by the caller's reload or
+  // submit). Rejects when one of those saves failed.
   async function flush() {
-    const waiting = [...timers.keys()];
-    waiting.forEach((form) => {
-      clearTimeout(timers.get(form));
-      timers.delete(form);
-      post(form.action, new FormData(form)).catch(() => {});
-    });
-    await chain;
+    let failed = null;
+    for (let round = 0; round < 50; round++) {
+      [...timers.keys()].forEach((form) => {
+        clearTimeout(timers.get(form));
+        timers.delete(form);
+        post(form.action, new FormData(form)).catch((err) => {
+          failed = failed || err;
+        });
+      });
+      const seen = chain;
+      await seen;
+      if (!timers.size && chain === seen) break;
+    }
+    if (failed) throw failed;
   }
   function pending() {
     return timers.size > 0 || inFlight > 0;
@@ -192,12 +202,17 @@
   }
   // Persist what's open, then reload the page from the server (structural
   // changes re-render the steps and the preview).
+  let reloading = false;
   async function reload(extra) {
+    if (reloading) return;
     try {
       await flush();
     } catch (e) {
       /* the indicator already says so */
     }
+    // Past this point nothing may queue a save the reload would drop.
+    reloading = true;
+    root.inert = true;
     stash(extra);
     location.reload();
   }
@@ -336,6 +351,26 @@
   }
 
   // ----------------------------------------------------------- bottom bar
+  // Duplicate and Push read the saved page on the server: wait for pending
+  // autosaves first, and don't go ahead if one of them failed.
+  document.querySelectorAll("form[data-ev2-after-save]").forEach((form) => {
+    form.addEventListener("submit", async (ev) => {
+      if (form.__ev2go) return;
+      ev.preventDefault();
+      const btn = ev.submitter;
+      if (btn) btn.disabled = true;
+      let ok = true;
+      try {
+        await flush();
+      } catch (e) {
+        ok = false;
+      }
+      if (btn) btn.disabled = false;
+      if (!ok || lastError) return;
+      form.__ev2go = true;
+      form.submit();
+    });
+  });
   document.querySelectorAll("form[data-ev2-confirm-submit]").forEach((form) => {
     form.addEventListener("submit", (ev) => {
       if (!window.confirm(form.dataset.confirm)) ev.preventDefault();

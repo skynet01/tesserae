@@ -1,0 +1,215 @@
+"""Dashboard editor v2, the whole page in a live Chromium.
+
+These drive the real ``/pages/<id>`` editor (steps, preview and bottom bar
+together), not the preview partial on its own, and check what ended up in the
+page store: pending autosaves must survive a layout change, a widget swap and
+a duplicate, and the padding preset must save.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+import time
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from flask import Flask
+
+from app.main import REPO_ROOT, create_app
+from app.state.page_store import Cell, Page, Panel
+
+_EXE = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE") or None
+
+
+def _chromium_available() -> bool:
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            return Path(_EXE or p.chromium.executable_path).exists()
+    except Exception:
+        return False
+
+
+_HAS_CHROMIUM = _chromium_available()
+if not _HAS_CHROMIUM and os.environ.get("TESSERAE_REQUIRE_BROWSER_TESTS") == "1":
+    raise RuntimeError(
+        "Playwright Chromium is required; run playwright install --with-deps chromium"
+    )
+pytestmark = pytest.mark.skipif(not _HAS_CHROMIUM, reason="Playwright Chromium not installed")
+
+PAGE_ID = "full"
+
+
+@pytest.fixture(scope="module")
+def pw() -> Iterator[Any]:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        yield p
+
+
+@pytest.fixture
+def server(tmp_path: Path) -> Iterator[tuple[str, Flask]]:
+    from werkzeug.serving import make_server
+
+    app: Flask = create_app(
+        testing=False,
+        data_root=tmp_path / "data",
+        plugins_dir=REPO_ROOT / "plugins",
+        renderers_dir=REPO_ROOT / "renderers",
+        devices_dir=REPO_ROOT / "devices",
+    )
+    app.config["TESTING"] = True
+    settings = app.config["SETTINGS_STORE"]
+    settings.patch_section("app", {"onboarded": True})
+    settings.patch_section("auth", {"disabled": True})
+    app.config["PAGE_STORE"].save(
+        Page(
+            id=PAGE_ID,
+            name="Full editor",
+            panel=Panel(w=800, h=480),
+            cells=[
+                Cell(id="c1", plugin="weather_now", x=0, y=0, w=400, h=480),
+                Cell(id="c2", plugin="clock_word", x=400, y=0, w=400, h=480),
+            ],
+        )
+    )
+    srv = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_port}", app
+    finally:
+        srv.shutdown()
+        thread.join(timeout=10)
+
+
+def _open(pw: Any, base: str) -> tuple[Any, Any, list[str]]:
+    browser = pw.chromium.launch(executable_path=_EXE) if _EXE else pw.chromium.launch()
+    page = browser.new_page(viewport={"width": 1440, "height": 1000})
+    errors: list[str] = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(f"{base}/pages/{PAGE_ID}", wait_until="domcontentloaded")
+    page.wait_for_function(
+        "() => window.EV2 && window.EV2Preview && document.querySelector('.ev2pv-edge')"
+    )
+    return browser, page, errors
+
+
+def _cell(app: Flask, page_id: str, cell_id: str) -> Cell:
+    page = app.config["PAGE_STORE"].get(page_id)
+    return next(c for c in page.cells if c.id == cell_id)
+
+
+def _wait_for(check: Callable[[], bool], what: str, timeout: float = 15.0) -> None:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if check():
+            return
+        time.sleep(0.1)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def _type_zoom(page: Any, cell_id: str, value: str) -> None:
+    """A range edit: it autosaves after a short debounce, so it stays pending."""
+    page.locator(f'.ev2-cl[data-cell-id="{cell_id}"] [data-ev2-row]').click()
+    page.evaluate(
+        """([id, v]) => {
+          const el = document.getElementById('ev2-' + id + '-zoom');
+          el.value = v;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }""",
+        [cell_id, value],
+    )
+
+
+def test_pending_autosave_and_resize_both_survive(server: tuple[str, Flask], pw: Any) -> None:
+    base, app = server
+    browser, page, errors = _open(pw, base)
+    _type_zoom(page, "c1", "1.5")
+    line = page.locator(".ev2pv-edge--v")
+    lb = line.bounding_box()
+    ob = page.locator(".ev2pv-overlay").bounding_box()
+    assert lb and ob
+    x0 = lb["x"] + lb["width"] / 2
+    y = lb["y"] + lb["height"] / 2
+    target = ob["x"] + ob["width"] * 0.25
+    page.mouse.move(x0, y)
+    page.mouse.down()
+    for k in range(1, 11):
+        page.mouse.move(x0 + (target - x0) * k / 10, y)
+    page.mouse.up()
+    _wait_for(
+        lambda: _cell(app, PAGE_ID, "c1").w != 400 and _cell(app, PAGE_ID, "c1").zoom == 1.5,
+        "the resize and the zoom edit to both be saved",
+    )
+    c1, c2 = _cell(app, PAGE_ID, "c1"), _cell(app, PAGE_ID, "c2")
+    assert c1.w + c2.w == 800
+    assert c1.zoom == 1.5
+    assert not errors
+    browser.close()
+
+
+def test_replace_with_a_pending_edit_keeps_the_new_widgets_defaults(
+    server: tuple[str, Flask], pw: Any
+) -> None:
+    base, app = server
+    browser, page, errors = _open(pw, base)
+    _type_zoom(page, "c1", "1.5")
+    page.locator('.ev2-cl[data-cell-id="c1"] [data-ev2-replace]').click()
+    page.locator("[data-ev2-pk-q]").fill("clock_word")  # the list starts on Weather's category
+    page.locator('[data-ev2-pk] [data-widget="clock_word"]').click()
+    _wait_for(lambda: _cell(app, PAGE_ID, "c1").plugin == "clock_word", "the swap to be saved")
+    page.wait_for_load_state("load")
+    cell = _cell(app, PAGE_ID, "c1")
+    assert cell.zoom == 1.5  # the pending edit was sent first
+    # The new widget's default-on switches were not cleared by a second post.
+    assert cell.options.get("show_seconds_dot") is True
+    assert cell.options.get("show_tone") is True
+    assert cell.options.get("show_phase_badge") is True
+    assert not errors
+    browser.close()
+
+
+def test_duplicate_copies_a_pending_edit(server: tuple[str, Flask], pw: Any) -> None:
+    base, app = server
+    browser, page, errors = _open(pw, base)
+    _type_zoom(page, "c1", "1.5")
+    page.locator(
+        '.ev2-bar form[data-ev2-after-save] button[aria-label="Duplicate dashboard"]'
+    ).click()
+    store = app.config["PAGE_STORE"]
+
+    def copied() -> bool:
+        return any(p.id != PAGE_ID for p in store.list())
+
+    _wait_for(copied, "the duplicate to exist")
+    copy = next(p for p in store.list() if p.id != PAGE_ID)
+    left = next(c for c in copy.cells if c.x == 0)  # the copy's cells get new ids
+    assert left.plugin == "weather_now"
+    assert left.zoom == 1.5
+    assert _cell(app, PAGE_ID, "c1").zoom == 1.5
+    assert not errors
+    browser.close()
+
+
+def test_padding_preset_saves(server: tuple[str, Flask], pw: Any) -> None:
+    base, app = server
+    browser, page, errors = _open(pw, base)
+    page.locator('.ev2-cl[data-cell-id="c1"] [data-ev2-row]').click()
+    page.locator(
+        '.ev2-cl[data-cell-id="c1"] details.ev2-adv:has-text("Refresh, taps") summary'
+    ).click()
+    select = page.locator("#ev2-c1-pad")
+    select.select_option("8")
+    _wait_for(lambda: _cell(app, PAGE_ID, "c1").padding_override == 8, "the 8 px preset to save")
+    select.select_option("")  # back to the dashboard padding
+    _wait_for(
+        lambda: _cell(app, PAGE_ID, "c1").padding_override is None, "the padding reset to save"
+    )
+    assert not errors
+    browser.close()

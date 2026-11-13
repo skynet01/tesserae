@@ -153,10 +153,16 @@
       return;
     }
     const form = li.querySelector("[data-ev2-cell-form]");
-    form.querySelector("[data-ev2-plugin]").value = key;
     listEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    // Send the pending edit while the form still says the old widget, then
+    // swap once: the server resets the options to the new widget's defaults.
+    // (Changing the field first would post the old form's values twice and
+    // wipe the new widget's default-on options.)
     EV2.flush()
-      .then(() => EV2.saveForm(form))
+      .then(() => {
+        form.querySelector("[data-ev2-plugin]").value = key;
+        return EV2.saveForm(form);
+      })
       .then(() => EV2.reload({ open: "widgets", cell: cellId }))
       .catch(() => {
         listEl.querySelectorAll("button").forEach((b) => (b.disabled = false));

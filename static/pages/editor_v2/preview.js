@@ -1006,15 +1006,25 @@
     root.classList.add("is-saving");
     setStatus("Saving the layout…");
     try {
-      const res = await fetch(data.urls.batch, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json", "X-Requested-With": "fetch" },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const body = await res.json();
-      if (body.ok === false) throw new Error(body.message || "save failed");
+      // In the full editor every write goes through the shell's one queue, so
+      // a layout change can't interleave with a pending autosave (both
+      // endpoints save the whole page) and flush() waits for it. The partial
+      // on its own falls back to a direct request.
+      const EV2 = window.EV2;
+      let body;
+      if (EV2 && typeof EV2.post === "function") {
+        body = await EV2.post(data.urls.batch, payload, { json: true });
+      } else {
+        const res = await fetch(data.urls.batch, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", "X-Requested-With": "fetch" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        body = await res.json();
+        if (body.ok === false) throw new Error(body.message || "save failed");
+      }
       if (Array.isArray(body.cells)) {
         data.cells = body.cells.map((c) => ({
           id: c.id,
