@@ -57,16 +57,16 @@
     {
       "name": "kiosk",
       "type": "boolean",
-      "label": "Kiosk query",
+      "label": "Add ?kiosk to the URL",
       "default": true,
       "advanced": true,
-      "help": "Adds ?kiosk for the HA kiosk-mode integration, if installed. Hide HA header works independently of this option."
+      "help": "Only does something if you installed the kiosk-mode add-on from HACS; it then hides what that add-on is set to hide. Without it, this has no effect. To hide the header, use Hide HA header instead."
     },
     {
       "name": "settle_seconds",
       "type": "number",
-      "label": "Settle delay",
-      "help": "Seconds to wait after the dashboard reports loaded, so cards that fetch their own data (history graphs, cameras, maps) have painted before capture.",
+      "label": "Settle delay (seconds)",
+      "help": "Seconds to wait after the dashboard loads, so cards that fetch their own data (history graphs, cameras, maps) finish drawing. 2 suits most dashboards; try 5 for cameras or maps. 0 to 12.",
       "default": 2,
       "advanced": true,
       "min": 0,
@@ -75,8 +75,8 @@
     {
       "name": "refresh_seconds",
       "type": "number",
-      "label": "Capture interval",
-      "help": "Reuse the last capture for this many seconds. A later preview or display update requests a new one. Refresh preview captures immediately without sending it to the display.",
+      "label": "Capture interval (seconds)",
+      "help": "How long a capture is reused, in seconds. 300 is 5 minutes, 900 is 15 minutes, 3600 is 1 hour. 30 to 86400 (1 day). The next preview or display update after that takes a new one; Refresh preview captures right away.",
       "default": 300,
       "advanced": true,
       "min": 30,
@@ -88,7 +88,7 @@
       "label": "Hide HA header",
       "default": true,
       "advanced": true,
-      "help": "Hides Home Assistant navigation and its empty space before capture. Turn off to include the header. Dashboards that already hide it keep their full content."
+      "help": "Tesserae hides Home Assistant's top bar and sidebar before capture. Works without any add-on. Turn off to include the header."
     },
     {
       "name": "offset_x",
