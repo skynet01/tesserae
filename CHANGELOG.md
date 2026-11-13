@@ -6,6 +6,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Show example values in empty widget inputs and explain Home Assistant theme names and language codes.
 - Fix HA dashboard clipping and add capture controls, fresh preview, and display-aware dithering.
 - Close Fraimic HTTP-error responses after reading them.
 - Keep selection marks and reorder handles visible when selecting items in a list.

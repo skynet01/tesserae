@@ -81,6 +81,7 @@
           "name": { "type": "string" },
           "type": { "enum": ["string", "textarea", "variables_textarea", "entity_overrides", "location_search", "number", "slider", "select", "multiselect", "boolean", "color"] },
           "label": { "type": "string" },
+          "placeholder": { "type": "string", "description": "An example value shown while the field is empty; never saved as its value." },
           "default": {},
           "secret": {
             "type": "boolean",
@@ -175,6 +176,7 @@
           "name": { "type": "string" },
           "type": { "type": "string" },
           "label": { "type": "string" },
+          "placeholder": { "type": "string", "description": "As on cell_options: an example value shown while the field is empty." },
           "secret": {
             "type": "boolean",
             "description": "When true, this field is saved to settings.json as '<name>_secret' so disk-grepping reveals which values are sensitive."

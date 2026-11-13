@@ -11,6 +11,7 @@
   "cell_options": [
     {
       "name": "url",
+      "placeholder": "https://example.com",
       "type": "string",
       "label": "URL",
       "help": "https://…, page to render inside the cell. Pages must support iframe embedding; a direct image URL is drawn as an image instead.",
@@ -96,6 +97,7 @@
     },
     {
       "name": "headers",
+      "placeholder": "{\"Accept-Language\": \"en\"}",
       "type": "textarea",
       "label": "Request headers",
       "help": "Normally blank. A JSON object, for a page behind a bearer token or API key, e.g. {\"Authorization\": \"Bearer …\"}. Applied by the server when the panel renders, and sent only to this URL's own origin, never to a redirect elsewhere or to third-party resources the page loads. User-Agent is honoured here for services that reject unknown clients. Headers can't reach the live preview in your browser, so a cell may show a 401 in the editor and still render correctly on the panel.",

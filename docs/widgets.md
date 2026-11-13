@@ -620,6 +620,15 @@ Dates and numbers aren't part of this contract: use
 month/weekday table, so day names, ordering, and separators come from
 the browser's own locale data instead of one you'd have to maintain.
 
+Editor fields accept a `placeholder` containing a plain example value, such
+as `Google Dark Theme`, `pt-BR`, or `0.00`. It appears only while the field
+is empty and is never saved. Translate option metadata in the same strings
+files with keys such as `cell_options.ha_theme.placeholder`,
+`cell_options.ha_theme.help`, or `settings.base_url.label`. Editors use the
+app locale (or its base language), then English for any missing metadata
+key, then the manifest text. These editor keys are optional in other locales; panel text keys
+remain required in every locale.
+
 Translating a widget is a normal contribution to that widget: a PR
 adding `strings/<locale>.json` (bundled widgets) or a new catalog
 release (marketplace widgets, installed the normal way from Browse).

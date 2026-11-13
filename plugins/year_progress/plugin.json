@@ -27,6 +27,8 @@
     },
     {
       "name": "birth_year",
+      "help": "Your four-digit birth year, used in Life in weeks mode.",
+      "placeholder": "1985",
       "type": "number",
       "label": "Birth year",
       "default": "",

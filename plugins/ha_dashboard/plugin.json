@@ -11,6 +11,7 @@
   "cell_options": [
     {
       "name": "path",
+      "placeholder": "dashboard-kitchen/overview",
       "type": "string",
       "label": "Dashboard path",
       "help": "The part of the Home Assistant URL after the host, e.g. lovelace/0 or dashboard-kitchen/overview. Leave blank for the default dashboard.",
@@ -110,19 +111,21 @@
     },
     {
       "name": "ha_theme",
+      "placeholder": "Google Dark Theme",
       "type": "string",
       "label": "Home Assistant theme",
       "default": "",
       "advanced": true,
-      "help": "Exact name of an installed HA theme, such as Graphite. Leave blank to use the HA account's theme. Applies only to this capture session; a dashboard theme can override it."
+      "help": "Type the theme name exactly as Home Assistant shows it in your profile's theme list, including spaces and capitals. No YAML is needed. Leave blank to use the HA account's theme. Applies only to this capture session; a dashboard theme can override it."
     },
     {
       "name": "language",
+      "placeholder": "pt-BR",
       "type": "string",
       "label": "Home Assistant language",
       "default": "",
       "advanced": true,
-      "help": "Language code for the capture, such as en, es, or de. Leave blank to use the HA account preference."
+      "help": "A language code such as en, de or pt-BR. Leave blank to use the HA account preference."
     }
   ],
   "render": { "dither": "ordered", "needs_network": true }
