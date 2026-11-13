@@ -282,16 +282,20 @@ def test_wizard_asks_before_creating_and_cancel_creates_nothing(real: tuple[str,
         browser.close()
 
 
-def test_schedule_form_asks_before_saving(real: tuple[str, Flask]) -> None:
+@pytest.mark.parametrize("editor", ["classic", "new"])
+def test_schedule_form_asks_before_saving(real: tuple[str, Flask], editor: str) -> None:
     from playwright.sync_api import sync_playwright
 
     base, app = real
+    app.config["SETTINGS_STORE"].patch_section("ui", {"dashboard_editor": editor})
     with sync_playwright() as p:
         browser = _launch(p)
         page = browser.new_page(viewport={"width": 1440, "height": 900})
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(base + "/pages/photos", wait_until="load")
+        if editor == "new":
+            page.locator("#ev2-h-schedules").click()  # the step is collapsed to a summary
         page.locator('[data-open-schedule-dialog="schedule-dialog-new"]').click()
         dlg = page.locator("#schedule-dialog-new")
         dlg.locator('input[name="name"]').fill("Photos hourly")

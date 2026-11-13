@@ -20,6 +20,10 @@ def test_refresh_preserves_draft_and_native_preview_uses_selected_dither(
 ):
     from app.device_service import create_instance
 
+    # Unsaved drafts, "Refresh preview" and the preview palette/dither pickers are
+    # classic-editor features: the new editor autosaves every change and dropped
+    # the pickers, so this runs against the classic one.
+    app.config["SETTINGS_STORE"].patch_section("ui", {"dashboard_editor": "classic"})
     client = app.test_client()
     client.post("/setup", data={"password": "abcdefgh", "password_confirm": "abcdefgh"})
     buf = io.BytesIO()
