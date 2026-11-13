@@ -306,8 +306,8 @@ def resolve_panel_for_page(
       layout. It also gives the editor the most pixels to work with.
       Ties (two panels with identical area) break by panel id /
       ``(w, h)`` tuple for stability.
-    * Otherwise fall back to ``page.panel``, else the global settings
-      panel.
+    * Otherwise use the page's test display, then ``page.panel``, then
+      the global settings panel.
 
     Previously this returned ``panels[0]`` (first targeted device),
     which meant a layout designed against device A would get
@@ -321,7 +321,15 @@ def resolve_panel_for_page(
     panels = _selected_device_panels(page, devices)
     if panels:
         return max(panels, key=lambda dp: (dp[1].w * dp[1].h, dp[1].w, dp[1].h, dp[0].id))[1]
+    if page.test_display_w is not None or page.test_display_h is not None:
+        return resolve_test_display(page, settings)
     return resolve_page_panel(page.panel, settings)
+
+
+def resolve_test_display(page: Page, settings: SettingsStore) -> Panel:
+    """The test display's saved size, with unset axes inherited from settings."""
+    panel = resolve_settings_panel(settings)
+    return Panel(w=page.test_display_w or panel.w, h=page.test_display_h or panel.h)
 
 
 def panel_groups_for_push(
@@ -336,7 +344,7 @@ def panel_groups_for_push(
     , render at the virtual panel and fan out to every renderer."""
     panels = _selected_device_panels(page, devices)
     if not panels:
-        return [(resolve_page_panel(page.panel, settings), [])]
+        return [(resolve_panel_for_page(page, devices, settings), [])]
     # Key includes gamut + underscan: same-size panels that pack to a
     # different palette (E6 vs 7-colour Inky) or inset by a different mat
     # margin must render as separate groups, so each group's Panel carries
@@ -361,7 +369,7 @@ def preview_groups_for_page(
     No targeted device → a single virtual-panel card."""
     panels = _selected_device_panels(page, devices)
     if not panels:
-        p = resolve_page_panel(page.panel, settings)
+        p = resolve_panel_for_page(page, devices, settings)
         return [
             {"w": p.w, "h": p.h, "label": "Virtual panel", "devices": [], "gamut": "waveshare_e6"}
         ]

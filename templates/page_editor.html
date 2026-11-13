@@ -243,6 +243,11 @@
 {% endmacro %}
 
 {% block main %}
+<form method="post" action="{{ url_for('pages.editor_version') }}" class="inline">
+  <input type="hidden" name="version" value="new">
+  <input type="hidden" name="next" value="{{ request.full_path.rstrip('?') }}">
+  <button type="submit" class="ghost">Try the new editor</button>
+</form>
 <header class="editor-header">
   <a class="header-back" href="{{ url_for('pages.index') }}" aria-label="Back to dashboards">
     <i class="ph ph-arrow-left" aria-hidden="true"></i>

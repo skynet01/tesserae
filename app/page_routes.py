@@ -32,6 +32,7 @@ import re
 import time
 import uuid
 from typing import Any, Final
+from urllib.parse import unquote, urlsplit
 
 from flask import (
     Blueprint,
@@ -50,7 +51,12 @@ from werkzeug.wrappers import Response
 
 from app.composer import _hydrate_page
 from app.layouts import LAYOUTS, LAYOUTS_BY_SLUG, detect_layout, to_panel_pixels
-from app.lineup_cascade import CascadeResult, emptied_by, remove_page_from_lineups
+from app.lineup_cascade import (
+    CascadeResult,
+    deck_without_page,
+    emptied_by,
+    remove_page_from_lineups,
+)
 from app.location_time import is_iana_zone
 from app.option_conditions import canonical_value
 from app.panel import (
@@ -61,8 +67,10 @@ from app.panel import (
     preview_groups_for_page,
     resolve_panel_for_page,
     resolve_settings_panel,
+    resolve_test_display,
 )
 from app.plugin_loader import Plugin, PluginRegistry
+from app.state.deck_model import Deck, DeckPage
 from app.state.page_store import Cell, Page, PageStore, Panel, clean_custom_css
 from app.state.settings_store import SettingsStore
 from app.widget_picker import CATEGORIES as WIDGET_CATEGORIES
@@ -618,6 +626,8 @@ def _editor_context(page: Page) -> dict[str, Any]:
     panel_cells = [(c.x, c.y, c.w, c.h) for c in page.cells]
     active_layout = detect_layout(panel_cells, panel.w, panel.h)
     widgets = sorted(_plugins().widgets(), key=lambda p: p.name.lower())
+    picker_widgets = widget_picker_entries(widgets)
+    test_display = resolve_test_display(page, _settings_store())
     plugins = _plugins()
 
     # Cells in a JSON-safe shape for the interactive layout editor JS.
@@ -729,6 +739,11 @@ def _editor_context(page: Page) -> dict[str, Any]:
 
     return {
         "page": page,
+        "editor_version": _editor_version(),
+        "is_new": request.args.get("new") == "1",
+        "test_display": {"w": test_display.w, "h": test_display.h},
+        "test_display_presets": [[800, 480], [480, 800], [1200, 825], [1920, 1080]],
+        "lineups": _editor_lineups(page),
         # The delete button names the lineups it would leave, in one confirm.
         "page_lineups": lineups_using(page.id),
         "page_emptied_lineups": would_delete_lineups([page.id]),
@@ -736,7 +751,28 @@ def _editor_context(page: Page) -> dict[str, Any]:
         "plugins": widgets,
         "widget_picker": {
             "categories": [{"id": c, "label": label} for c, label in WIDGET_CATEGORIES],
-            "widgets": widget_picker_entries(widgets),
+            "widgets": picker_widgets,
+        },
+        "widget_catalog": {
+            "categories": [
+                {
+                    "key": c,
+                    "label": label,
+                    "count": sum(w["category"] == c for w in picker_widgets),
+                }
+                for c, label in WIDGET_CATEGORIES
+            ],
+            "widgets": [
+                {
+                    "key": w["id"],
+                    "name": w["item"],
+                    "family": w["family"],
+                    "icon": w["icon"],
+                    "description": w["desc"],
+                    "category": w["category"],
+                }
+                for w in picker_widgets
+            ],
         },
         "widget_names": {w.id: widget_display_name(w.name, w.id) for w in widgets},
         "plugin_cell_options": _materialize_cell_options(widgets),
@@ -761,6 +797,35 @@ def _preview_scale(panel_w: int, panel_h: int = 0) -> float:
     sw = target / panel_w if panel_w > target else 1.0
     sh = target / panel_h if panel_h and panel_h > target else 1.0
     return min(sw, sh)
+
+
+def _lineup_displays(deck: Deck) -> list[str]:
+    from app.deck_routes import _deck_displays
+
+    return _deck_displays(deck, {p.id: list(p.device_ids) for p in _store().list()})
+
+
+def _editor_lineups(page: Page) -> list[dict[str, Any]]:
+    """Lineups the dashboard can join, with their effective display bindings."""
+    from app.lineup_binding import display_label
+
+    store = current_app.config.get("DECK_STORE")
+    if store is None:
+        return []
+    rows = []
+    for deck in store.all():
+        device_ids = _lineup_displays(deck)
+        rows.append(
+            {
+                "id": deck.id,
+                "name": deck.name,
+                "device_ids": device_ids,
+                "device_names": [display_label(did) for did in device_ids],
+                "same_display": set(device_ids) <= set(page.device_ids),
+                "joined": page.id in deck.page_ids,
+            }
+        )
+    return rows
 
 
 # -- page-level routes --------------------------------------------
@@ -1185,6 +1250,8 @@ def create() -> Response:
             # time so changing the panel in settings updates every page;
             # set only when a size was chosen for this dashboard.
             panel=own_panel,
+            test_display_w=design[0] if design else None,
+            test_display_h=design[1] if design else None,
             cells=initial_cells,
             font=(form.get("font") or None),
             theme=(form.get("theme") or "light"),
@@ -1199,7 +1266,50 @@ def create() -> Response:
         return redirect(url_for("pages.index"))
 
     _store().save(page)
-    return redirect(url_for("pages.edit", page_id=page.id))
+    return redirect(url_for("pages.edit", page_id=page.id, new=1))
+
+
+def _editor_version() -> str:
+    return (
+        "classic"
+        if _settings_store().get_section("ui").get("dashboard_editor") == "classic"
+        else "new"
+    )
+
+
+def _editor_return_path(raw: str | None) -> str | None:
+    """Accept a local absolute path, including its query string."""
+    if not raw:
+        return None
+    decoded = unquote(raw)
+    if (
+        not decoded.startswith("/")
+        or decoded.startswith("//")
+        or "\\" in decoded
+        or any(ord(c) < 32 or ord(c) == 127 for c in decoded)
+    ):
+        return None
+    return raw
+
+
+@bp.post("/editor-version")
+def editor_version() -> Response:
+    version = request.form.get("version")
+    if version not in {"new", "classic"}:
+        abort(400)
+    _settings_store().update_section("ui", {"dashboard_editor": version})
+    target = _editor_return_path(request.form.get("next"))
+    if target is None and request.referrer:
+        try:
+            referrer = urlsplit(request.referrer)
+            origin = urlsplit(request.host_url)
+            if (referrer.scheme, referrer.netloc) == (origin.scheme, origin.netloc):
+                target = _editor_return_path(
+                    referrer.path + (f"?{referrer.query}" if referrer.query else "")
+                )
+        except ValueError:
+            pass
+    return redirect(target or url_for("pages.index"))
 
 
 @bp.get("/<page_id>")
@@ -1211,13 +1321,65 @@ def edit(page_id: str) -> Response | str:
     # /pages/<id> link (list card, deep link) reaches the right editor.
     if page.layout_kind == "canvas":
         return redirect(url_for("panels.editor", canvas_id=page.id))
-    return render_template("page_editor.html", **_editor_context(page))
+    template = "page_editor.html" if _editor_version() == "classic" else "page_editor_v2.html"
+    return render_template(template, **_editor_context(page))
+
+
+@bp.post("/<page_id>/lineups/<deck_id>/join")
+def join_lineup(page_id: str, deck_id: str) -> Response:
+    """Append a dashboard once, adding the lineup's displays when approved."""
+    from app.deck_routes import _invalidate, _merged_deck
+
+    page = _store().get(page_id)
+    deck_store = current_app.config["DECK_STORE"]
+    deck = deck_store.get(deck_id)
+    if page is None or deck is None:
+        abort(404)
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not isinstance(body.get("add_device", False), bool):
+        abort(400)
+    device_ids = _lineup_displays(deck)
+    missing = [did for did in device_ids if did not in page.device_ids]
+    if missing and not body.get("add_device", False):
+        response = jsonify({"ok": False, "message": "Add the lineup's displays before joining."})
+        response.status_code = 409
+        return response
+    if missing:
+        page = page.model_copy(update={"device_ids": [*page.device_ids, *missing]})
+        _store().save(page)
+        current_app.config.get("PREVIEW_CACHE", {}).pop(page_id, None)
+    if page_id not in deck.page_ids:
+        deck = _merged_deck(deck, pages=[*deck.pages, DeckPage(page_id=page_id)])
+        deck_store.upsert(deck)
+        _invalidate(deck)
+    elif missing:
+        _invalidate(deck)
+    return jsonify({"ok": True, "lineups": _editor_lineups(page), "device_ids": page.device_ids})
+
+
+@bp.post("/<page_id>/lineups/<deck_id>/leave")
+def leave_lineup(page_id: str, deck_id: str) -> Response:
+    """Remove only this membership; an empty lineup is deleted as in the cascade."""
+    from app.deck_routes import _invalidate
+
+    page = _store().get(page_id)
+    deck_store = current_app.config["DECK_STORE"]
+    deck = deck_store.get(deck_id)
+    if page is None or deck is None:
+        abort(404)
+    if page_id in deck.page_ids:
+        updated = deck_without_page(deck, page_id)
+        if updated is None:
+            deck_store.delete(deck_id)
+        else:
+            deck_store.upsert(updated)
+        _invalidate(deck)
+    return jsonify({"ok": True, "lineups": _editor_lineups(page), "device_ids": page.device_ids})
 
 
 @bp.post("/<page_id>")
 def update(page_id: str) -> Response:
-    """Update page metadata. Panel dims come from settings, not from
-    the form, the editor no longer exposes them.
+    """Update page metadata, including its optional test-display size.
 
     Merge, don't replace: only fields actually present in the POST are
     updated; absent fields keep their stored value. The editor posts two
@@ -1231,6 +1393,20 @@ def update(page_id: str) -> Response:
         abort(404)
     form = request.form
     updates: dict[str, Any] = {}
+    for field in ("test_display_w", "test_display_h"):
+        if field not in form:
+            continue
+        try:
+            size = int(form[field])
+        except (ValueError, TypeError):
+            return _flash_save(
+                False, "Test display dimensions must be whole pixels from 100 to 4000."
+            )
+        if not 100 <= size <= 4000:
+            return _flash_save(
+                False, "Test display dimensions must be whole pixels from 100 to 4000."
+            )
+        updates[field] = size
     if "name" in form:
         updates["name"] = (form.get("name") or page.name).strip() or page.name
     if "theme" in form:
