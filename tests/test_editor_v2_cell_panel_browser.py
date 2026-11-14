@@ -232,16 +232,47 @@ LAYOUT_JS = """
             bad(`label "${l.textContent.trim().split(/\\s+/).slice(0, 4).join(' ')}" is clipped`);
         });
         if (it.classList.contains('ev2-oi--short')) {
+          // A widget's half-width select shows every choice whole. The
+          // cell's Look selects may hold a longer override: it ends in an
+          // ellipsis and the title has the whole name. Their default
+          // ("Use dashboard") fits.
+          const room = (el) => {
+            const cs = getComputedStyle(el);
+            canvas.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+            return el.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+          };
           it.querySelectorAll('select').forEach((sel) => {
             if (!visible(sel)) return;
-            const cs = getComputedStyle(sel);
-            canvas.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
-            const room = sel.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+            const r = room(sel);
+            const own = sel.name.startsWith('opt_');
             for (const o of sel.options) {
-              if (canvas.measureText(o.text).width > room + 1) bad(`"${o.text}" is cut off in half-width "${name(it)}"`);
+              if (canvas.measureText(o.text).width <= r + 1) continue;
+              if (own || !o.value) bad(`"${o.text}" is cut off in half-width "${name(it)}"`);
+              else if (getComputedStyle(sel).textOverflow !== 'ellipsis') bad(`"${o.text}" is clipped without an ellipsis`);
             }
+            const cur = sel.selectedOptions[0];
+            if (cur && sel.title !== cur.text) bad(`half-width "${name(it)}" has title "${sel.title}"`);
+          });
+          // A half-width text box shows its example whole.
+          it.querySelectorAll('input[type=text][placeholder]').forEach((inp) => {
+            if (!visible(inp)) return;
+            const r = room(inp);
+            if (canvas.measureText(inp.placeholder).width > r + 1)
+              bad(`placeholder "${inp.placeholder}" is cut off in "${name(it)}"`);
           });
         }
+        // Two switches to a row only when each label stays on one line,
+        // clear of its switch.
+        it.querySelectorAll('.ev2-swr--pair > *').forEach((cell) => {
+          if (!visible(cell)) return;
+          const lab = cell.querySelector('.switch-label, .ev2-swi > label');
+          const sw = cell.querySelector('.switch-track, .ev2-switch');
+          const text = document.createRange();
+          text.selectNodeContents(lab);
+          const lines = new Set([...text.getClientRects()].filter((r) => r.width).map((r) => Math.round(r.top)));
+          if (lines.size > 1) bad(`paired switch "${lab.textContent.trim()}" wraps`);
+          if (text.getBoundingClientRect().right > sw.getBoundingClientRect().left) bad(`paired switch "${lab.textContent.trim()}" runs into its switch`);
+        });
         // 5. Phone: 44px targets.
         if (phone) {
           it.querySelectorAll('input:not([type=hidden]), select, textarea, .info-pop, .field--switch, .ev2-swi').forEach((c) => {
@@ -335,6 +366,36 @@ def test_every_widget_panel_is_compact(pw: Any, server: Any, width: int) -> None
         result = page.evaluate(LAYOUT_JS, width < 640)
         assert result["checked"] == len(widget_ids)
         assert result["problems"] == []
+        assert errors == []
+    finally:
+        browser.close()
+
+
+def test_a_long_look_override_ends_in_an_ellipsis_with_its_name_in_the_title(
+    pw: Any, server: Any
+) -> None:
+    base, _app, _ids = server
+    browser, page, errors = _open(pw, base, 390)
+    try:
+        result = page.evaluate(
+            """() => {
+              EV2.widgets.openRow('w00');
+              const form = document.querySelector('[data-ev2-cell-form][data-cell-id="w00"]');
+              form.querySelector('details[data-ev2-adv="look"]').open = true;
+              const sel = form.querySelector('select[name="theme"]');
+              const blank = sel.options[0].text;
+              const long = [...sel.options].sort((a, b) => b.text.length - a.text.length)[0];
+              sel.value = long.value;
+              EV2.widgets.refreshSums(form);
+              return {blank, text: long.text, title: sel.title,
+                      overflow: getComputedStyle(sel).textOverflow,
+                      half: sel.getBoundingClientRect().width < form.getBoundingClientRect().width / 2};
+            }"""
+        )
+        assert result["blank"] == "Use dashboard"
+        assert result["half"]
+        assert result["overflow"] == "ellipsis"
+        assert result["title"] == result["text"]
         assert errors == []
     finally:
         browser.close()

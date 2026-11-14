@@ -149,13 +149,16 @@
 {%- endmacro %}
 
 {#- One section's options on the two-column grid (app/option_conditions.py
-    option_layout): every switch in one group where the first one was,
-    short fields (numbers, short selects) side by side, the rest across the
-    row. The grid answers the row's own width (editor_v2.css). -#}
+    option_layout): every switch in one list where the first one was (two
+    short-labelled ones to a row), short fields (numbers, short selects,
+    short text) side by side, the rest across the row. The grid answers
+    the row's own width (editor_v2.css). -#}
 {% macro ev2_opt_blocks(cell, section, cell_opts) -%}
 {% for b in option_layout(section, cell.options, cell_opts) %}
   {%- if b.kind == 'switches' %}
-  <div class="ev2-oi ev2-swg" data-ev2-swg>{% for opt in b.opts %}{{ ev2_opt_field(cell, opt, cell_opts) }}{% endfor %}</div>
+  <div class="ev2-oi ev2-swg" data-ev2-swg>
+    {%- for row in b.rows %}<div class="ev2-swr{{ ' ev2-swr--pair' if row | length > 1 }}">{% for opt in row %}{{ ev2_opt_field(cell, opt, cell_opts) }}{% endfor %}</div>{% endfor -%}
+  </div>
   {%- else %}
   <div class="ev2-oi ev2-oi--{{ b.size }}">{{ ev2_opt_field(cell, b.opt, cell_opts) }}</div>
   {%- endif %}
@@ -222,9 +225,9 @@
   <details class="ev2-adv" data-ev2-look data-ev2-adv="look">
     <summary>{{ ico('caret-right', 'ev2-caret') }}<b>Look of this cell</b><span class="{{ 'ovw' if own }}" data-ev2-look-sum data-ev2-adv-sum>{{ (n_look ~ ' changed') if n_look else 'defaults' }}</span></summary>
     <div class="ev2-adv-in"><div class="ev2-opts">
-      <div class="ev2-of"><label for="ev2-{{ cell.id }}-theme">Theme</label>{{ ev2_select('ev2-' ~ cell.id ~ '-theme', 'theme', theme_options, cell.theme, 'Same as dashboard', 'data-ev2-ov="theme"') }}</div>
-      <div class="ev2-of"><label for="ev2-{{ cell.id }}-style">Style</label>{{ ev2_select('ev2-' ~ cell.id ~ '-style', 'style', _cell_styles, cell.style, 'Same as dashboard', 'data-ev2-ov="style"') }}</div>
-      <div class="ev2-of"><label for="ev2-{{ cell.id }}-font">Font</label>{{ ev2_select('ev2-' ~ cell.id ~ '-font', 'font', _font_options, cell.font, 'Same as dashboard', 'data-ev2-ov="font"') }}</div>
+      <div class="ev2-of ev2-oi--short"><label for="ev2-{{ cell.id }}-theme">Theme</label>{{ ev2_select('ev2-' ~ cell.id ~ '-theme', 'theme', theme_options, cell.theme, 'Use dashboard', 'data-ev2-ov="theme"') }}</div>
+      <div class="ev2-of ev2-oi--short"><label for="ev2-{{ cell.id }}-style">Style</label>{{ ev2_select('ev2-' ~ cell.id ~ '-style', 'style', _cell_styles, cell.style, 'Use dashboard', 'data-ev2-ov="style"') }}</div>
+      <div class="ev2-of ev2-oi--short"><label for="ev2-{{ cell.id }}-font">Font</label>{{ ev2_select('ev2-' ~ cell.id ~ '-font', 'font', _font_options, cell.font, 'Use dashboard', 'data-ev2-ov="font"') }}</div>
       {% if cell.plugin == 'ha_dashboard' %}
       <input type="hidden" name="zoom" value="{{ cell.zoom }}">
       <p class="ev2-help">Use Dashboard zoom above to resize Home Assistant cards.</p>
@@ -260,16 +263,16 @@
       {% if plugin.on_change_updates or plugin.on_schedule_updates %}
       <div class="ev2-oi ev2-swg" data-ev2-swg>
         {% if plugin.on_change_updates %}
-        <div class="ev2-swi">
+        <div class="ev2-swr"><div class="ev2-swi">
           <label for="ev2-{{ cell.id }}-uoc">Refresh when its data changes</label>{{ info_pop('Only on displays already showing this dashboard.') }}
           <span class="ev2-switch"><input type="checkbox" role="switch" id="ev2-{{ cell.id }}-uoc" name="update_on_change" value="1" {% if cell.update_on_change %}checked{% endif %}><span aria-hidden="true"></span></span>
-        </div>
+        </div></div>
         {% endif %}
         {% if plugin.on_schedule_updates %}
-        <div class="ev2-swi">
+        <div class="ev2-swr"><div class="ev2-swi">
           <label for="ev2-{{ cell.id }}-daily">Refresh once a day</label>{{ info_pop('After the day changes, or at a time you pick.') }}
           <span class="ev2-switch"><input type="checkbox" role="switch" id="ev2-{{ cell.id }}-daily" name="update_schedule_enabled" value="1" {% if cell.update_schedule %}checked{% endif %} data-ev2-reveal="ev2-{{ cell.id }}-daily-at"><span aria-hidden="true"></span></span>
-        </div>
+        </div></div>
         {% endif %}
       </div>
       {% endif %}
@@ -293,10 +296,10 @@
              data-pages-url="{{ url_for('pages.dashboards_json') }}"
              data-ha-url="{{ url_for('pages.ha_actions_json') }}"></div>
       </div>
-      <div class="ev2-of" data-ev2-pad>
+      <div class="ev2-of ev2-oi--short" data-ev2-pad>
         <label for="ev2-{{ cell.id }}-pad">Padding</label>
         <select class="ev2-select" id="ev2-{{ cell.id }}-pad" data-ev2-pad-choice>
-          <option value="" {% if pad_choice == '' %}selected{% endif %}>Use the dashboard padding</option>
+          <option value="" {% if pad_choice == '' %}selected{% endif %}>Use dashboard</option>
           <option value="0" {% if pad_choice == '0' %}selected{% endif %}>0 px</option>
           <option value="8" {% if pad_choice == '8' %}selected{% endif %}>8 px</option>
           <option value="16" {% if pad_choice == '16' %}selected{% endif %}>16 px</option>
@@ -313,7 +316,7 @@
         <input type="checkbox" name="dither_override_enabled" value="1" hidden {% if cell.dither is not none %}checked{% endif %} data-ev2-dither-on>
         <input type="hidden" name="dither_mode" value="{{ cell.dither or 'none' }}" data-ev2-dither-mode>
         <div class="ev2-seg ev2-seg--sm" role="group" aria-labelledby="ev2-{{ cell.id }}-dith-l">
-          <button type="button" data-ev2-dither-set="" aria-pressed="{{ 'true' if cell.dither is none else 'false' }}">Dashboard default</button>
+          <button type="button" data-ev2-dither-set="" aria-pressed="{{ 'true' if cell.dither is none else 'false' }}">Use dashboard</button>
           <button type="button" data-ev2-dither-set="auto" aria-pressed="{{ 'true' if cell.dither == 'auto' else 'false' }}">Smooth</button>
           <button type="button" data-ev2-dither-set="none" aria-pressed="{{ 'true' if cell.dither == 'none' else 'false' }}">Flat</button>
         </div>

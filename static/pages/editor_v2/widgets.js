@@ -223,6 +223,12 @@
   }
   function refreshSums(form) {
     if (!form) return;
+    // A half-width select may hold a longer choice than it can show (a
+    // theme or font override): it ends in an ellipsis, and its title
+    // carries the whole name.
+    form.querySelectorAll(".ev2-oi--short select").forEach((s) => {
+      s.title = s.selectedOptions[0] ? s.selectedOptions[0].text : "";
+    });
     form.querySelectorAll("details[data-ev2-adv]").forEach((d) => {
       const out = d.querySelector("[data-ev2-adv-sum]");
       if (!out) return;

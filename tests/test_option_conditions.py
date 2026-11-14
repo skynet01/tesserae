@@ -427,3 +427,50 @@ def test_layout_ignores_hidden_fields_when_pairing() -> None:
     ]
     # "born" is hidden, so "mode" is alone and "n" joins it.
     assert [n for _, n in _layout(specs)] == ["mode", "born", "n", "url"]
+
+
+def test_switches_with_short_labels_share_a_row() -> None:
+    from app.option_conditions import option_layout
+
+    def sw(name: str, help: bool = True, **kw: object) -> dict:
+        return {"name": name, "label": name, "type": "boolean", "help": "x" if help else None, **kw}
+
+    specs = [
+        sw("Leading icon"),
+        sw("Time", help=False),
+        sw("Temperature"),
+        sw("Humidity"),
+        sw("Battery"),
+        sw("Wi-Fi"),
+        sw("Broker"),
+        sw("Firmware update"),
+    ]
+    (block,) = option_layout(specs, {}, specs)
+    assert [[s["name"] for s in row] for row in block["rows"]] == [
+        ["Leading icon"],
+        ["Time", "Humidity"],
+        ["Temperature"],
+        ["Battery", "Wi-Fi"],
+        ["Broker"],
+        ["Firmware update"],
+    ]
+
+
+def test_a_hidden_switch_keeps_its_own_row() -> None:
+    from app.option_conditions import option_layout
+
+    specs = [
+        {"name": "a", "label": "Wi-Fi", "type": "boolean"},
+        {"name": "b", "label": "Broker", "type": "boolean", "show_if": {"a": False}},
+        {"name": "c", "label": "Battery", "type": "boolean"},
+    ]
+    (block,) = option_layout(specs, {"a": True}, specs)
+    assert [[s["name"] for s in row] for row in block["rows"]] == [["a", "c"], ["b"]]
+
+
+def test_short_text_examples() -> None:
+    from app.option_conditions import option_size
+
+    assert option_size({"type": "string", "label": "Title", "placeholder": "Evening routines"}) == "short"
+    assert option_size({"type": "string", "label": "Theme", "placeholder": "Google Dark Theme"}) == "long"
+    assert option_size({"type": "string", "label": "Language", "placeholder": "pt-BR"}) == "short"

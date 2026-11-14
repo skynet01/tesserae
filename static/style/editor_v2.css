@@ -1623,6 +1623,18 @@
 #ev2 .ev2-oi--short .field > input[type="number"] {
   width: 100%;
 }
+/* A choice longer than a half-width select ends in an ellipsis; widgets.js
+   puts the whole name in its title. */
+#ev2 .ev2-oi--short select {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Padding with its own value needs the row for the slider. */
+@container ev2-cell (min-width: 296px) {
+  .ev2-opts > .ev2-oi--short:has([data-ev2-pad-custom]:not([hidden])) {
+    grid-column: 1 / -1;
+  }
+}
 #ev2 .ev2-oi--short input[type="color"] {
   width: 100%;
   height: var(--ev2-control);
@@ -1648,18 +1660,48 @@
 }
 
 /* A section's switches: one list, one control-height row each (label and
-   its "i" left, the switch right), hairlines between them. */
+   its "i" left, the switch right), hairlines between rows. Two switches
+   with short labels share a row (.ev2-swr--pair, option_layout); if one
+   of them is hidden the other takes the row. */
 .ev2-swg {
   display: grid;
   padding: 0 var(--t-space-3);
   border: 1px solid var(--ev2-divider);
   border-radius: var(--ev2-r);
 }
-.ev2-swg:not(:has(> .field--switch, > .ev2-swi, > .opt-cond:not([hidden]))) {
+.ev2-swg:not(:has(> .ev2-swr > :is(.field--switch, .ev2-swi, .opt-cond:not([hidden])))) {
   display: none;
 }
-.ev2-swg > :not(.opt-cond[hidden]) ~ * {
+.ev2-swr {
+  display: flex;
+  gap: var(--t-space-3);
+}
+.ev2-swr:not(:has(> :is(.field--switch, .ev2-swi, .opt-cond:not([hidden])))) {
+  display: none;
+}
+.ev2-swr:has(> :is(.field--switch, .ev2-swi, .opt-cond:not([hidden]))) ~ .ev2-swr {
   border-top: 1px solid var(--ev2-divider);
+}
+.ev2-swr > * {
+  flex: 1 1 0;
+  min-width: 0;
+}
+/* A hairline between the pair, so each switch reads with its own label. */
+.ev2-swr--pair > :not(.opt-cond[hidden]) ~ :not(.opt-cond[hidden]) {
+  padding-left: var(--t-space-3);
+  border-left: 1px solid var(--ev2-divider);
+}
+/* One column (a very narrow row): the pair stacks, with its own hairline. */
+@container ev2-cell (max-width: 295.98px) {
+  .ev2-swr--pair {
+    flex-direction: column;
+    gap: 0;
+  }
+  .ev2-swr--pair > :not(.opt-cond[hidden]) ~ :not(.opt-cond[hidden]) {
+    padding-left: 0;
+    border-left: 0;
+    border-top: 1px solid var(--ev2-divider);
+  }
 }
 .ev2 .ev2-swg .field.field--switch,
 .ev2-swi {
@@ -1837,8 +1879,11 @@ details.ev2-adv[open] > summary .ev2-caret {
   color: var(--t-danger, var(--t-accent));
 }
 
-/* The touch editor (touch_interaction.js) in the same controls as the
-   rest of the row. */
+/* The touch editor (touch_interaction.js, shared with the classic editor)
+   in the same controls as the rest of the row. "When tapped" is its label,
+   so the tap row's own "On tap" goes while it is the only action; the tap
+   select and "+ Add swipe action" read as one stacked pair; "Make this a
+   slider" is a quiet link-style action. */
 .ev2 .ti-root {
   gap: var(--ev2-gap-tight);
 }
@@ -1846,12 +1891,45 @@ details.ev2-adv[open] > summary .ev2-caret {
   padding-top: calc((var(--ev2-control) - 1.5em) / 2);
   font-size: var(--ev2-fs-label);
 }
+.ev2 .ti-root:not(:has(> .prow:not(:first-child) > .plab)) > .prow:first-child > .plab {
+  display: none;
+}
+#ev2 .ti-root:not(:has(> .prow:not(:first-child) > .plab)) > .prow:first-child:has(.psel + span:empty) .psel {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+#ev2 .ti-root:not(:has(> .prow:not(:first-child) > .plab)) > .prow:first-child:has(.psel + span:empty) + .prow > .psel:only-child {
+  margin-top: calc(-1 * var(--ev2-gap-tight) - 1px);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  color: var(--t-fg-soft);
+}
 .ev2 .ti-root .minibtn {
   min-height: var(--ev2-control);
   border-color: var(--t-border-strong);
   border-radius: var(--ev2-r);
   background: var(--t-surface);
   font-size: var(--ev2-fs-label);
+}
+.ev2 .ti-root .prow > .minibtn:only-child {
+  width: auto !important;
+  min-height: var(--ev2-control-sm);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--t-fg-soft);
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.ev2 .ti-root .prow > .minibtn:only-child:hover {
+  background: none;
+  color: var(--t-fg);
+}
+@media (max-width: 640px), (pointer: coarse) {
+  .ev2 .ti-root .prow > .minibtn:only-child {
+    min-height: 44px;
+  }
 }
 
 /* Move up / down: touch has no drag to swap, so it gets two buttons. */
