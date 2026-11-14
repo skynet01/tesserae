@@ -13,8 +13,9 @@
   const WAIT = {
     layout: "Pick a display first.",
     widgets: "Choose a layout first.",
-    look: "Optional. Defaults look fine.",
-    lineup: "Optional. Add it to a lineup that rotates it with others.",
+    // "optional" is in these steps' titles; the wait line doesn't repeat it.
+    look: "Defaults look fine.",
+    lineup: "Add it to a lineup that rotates it with others.",
   };
   const STEP_KEY = "ev2-step:" + EV2.pageId;
 
@@ -40,11 +41,29 @@
     return idx <= progress ? "done" : "wait";
   }
 
+  // A collapsed step shows its check only when there is nothing left to do
+  // in it: every cell has a widget, the dashboard is in a lineup. Empty
+  // cells are worth a look (amber number); no lineup is just optional.
+  function completion(key) {
+    if (key === "layout") return root.querySelector(".ev2-cl[data-n]") ? "yes" : "no";
+    if (key === "widgets") {
+      const rows = [...root.querySelectorAll(".ev2-cl[data-n]")];
+      if (!rows.length) return "no";
+      return rows.every((r) => r.dataset.widget) ? "yes" : "attn";
+    }
+    if (key === "lineup" || key === "schedules")
+      return root.querySelector("[data-ev2-lrow]") ? "yes" : "no";
+    return "yes";
+  }
+
   function render() {
     sections.forEach((sec) => {
       const key = sec.dataset.step;
       const st = stateOf(key);
       sec.dataset.state = st;
+      const done = completion(key);
+      sec.dataset.complete = done === "yes" ? "yes" : "no";
+      sec.toggleAttribute("data-attn", st === "done" && done === "attn");
       const head = sec.querySelector(".ev2-st-h");
       const body = sec.querySelector(".ev2-st-body");
       head.setAttribute("aria-expanded", st === "open" ? "true" : "false");
@@ -75,7 +94,7 @@
     const st = document.querySelector("[data-ev2-bar-st]");
     if (!st) return;
     const step = progress;
-    const lead = step > 5 ? "All steps done" : step === 5 ? "Last step, optional" : `Step ${step} of 5`;
+    const lead = step > 5 ? "All steps done" : step === 5 ? "Last step" : `Step ${step} of 5`;
     const rows = [...root.querySelectorAll(".ev2-cl[data-n]")];
     const filled = rows.filter((r) => r.dataset.widget).length;
     // The long line is for wide screens; the short one keeps a status in the
@@ -92,6 +111,14 @@
     short.className = "ev2-short";
     short.textContent = lead;
     st.replaceChildren(long, short);
+    // Done waits for a display, as in the mockup: picked in step 1 (a real
+    // one) or confirmed with Next.
+    const fin = document.querySelector("[data-ev2-finish]");
+    if (fin) {
+      const off = progress < 2 && cfg.usingTest === "1";
+      fin.setAttribute("aria-disabled", off ? "true" : "false");
+      fin.title = off ? "Pick a display first" : "Show the finished editor";
+    }
   }
 
   function setProgress(n) {
@@ -113,7 +140,9 @@
     if (was === "widgets" && key !== "widgets" && EV2.widgets) EV2.widgets.closeAll();
     render();
     if (o.scroll && key) {
-      document.getElementById("ev2-step-" + key)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      // "start" with the step's scroll-margin: its title lands below the
+      // sticky app header instead of under it.
+      document.getElementById("ev2-step-" + key)?.scrollIntoView({ block: o.block || "nearest", behavior: "smooth" });
     }
     if (o.focus && key) focusStep(key);
   }
@@ -146,7 +175,7 @@
       const idx = KEYS.indexOf(nx.dataset.ev2Next);
       const next = KEYS[idx + 1] || null;
       setProgress(idx + 2);
-      openStep(next, { scroll: true });
+      openStep(next, { scroll: true, block: "start" });
       if (next === "widgets" && EV2.widgets) EV2.widgets.openFirstEmpty();
       else if (next) focusStep(next);
     }
@@ -255,11 +284,17 @@
     if (on) EV2.emit("ev2:snap", snapState());
     // Stacked layout: the preview sits above the steps, out of sight from
     // this switch. Take the user to it.
-    if (on && !restoring && window.matchMedia("(max-width: 1180px)").matches) {
+    if (on && !restoring && stacked()) {
       document.getElementById("ev2-preview")?.scrollIntoView({ block: "start", behavior: "smooth" });
     }
   }
   let restoring = false;
+  // The preview is above the steps when the editor grid has one column
+  // (a container query in editor_v2.css decides).
+  function stacked() {
+    const ed = root.querySelector(".ev2-ed");
+    return Boolean(ed) && getComputedStyle(ed).gridTemplateColumns.trim().split(/\s+/).length < 2;
+  }
   EV2.on("ev2:edit-done", () => {
     setDraw(false);
     drawBtn?.focus({ preventScroll: true });

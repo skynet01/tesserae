@@ -624,6 +624,17 @@ _SMALL_TARGETS = """() => {
 }"""
 
 
+_INPUT_FONTS = """(scope) => {
+  const els = [...document.querySelectorAll(scope + ' :is(input, select, textarea)')].filter((e) =>
+    !['hidden', 'checkbox', 'radio', 'range', 'color'].includes(e.type) && e.getClientRects().length);
+  return {
+    n: els.length,
+    small: els.filter((e) => parseFloat(getComputedStyle(e).fontSize) < 16)
+      .map((e) => (e.id || e.name || e.className) + ' ' + getComputedStyle(e).fontSize),
+  };
+}"""
+
+
 @pytest.mark.parametrize("scheme", ["light", "dark"])
 @pytest.mark.parametrize(("name", "width", "height"), PHONES)
 def test_phone_layout_has_no_sideways_scroll_and_44px_targets(
@@ -639,6 +650,21 @@ def test_phone_layout_has_no_sideways_scroll_and_44px_targets(
             page.locator("[data-ev2-size]").first.scroll_into_view_if_needed()
         small = page.evaluate(_SMALL_TARGETS)
         assert not small, f"{url}: {small}"
+    # An open row (its fields come from the shared form macros, which Paper
+    # styles at 14px) and the catalog search: 16px type, so iOS doesn't zoom.
+    page.goto(base + "/pages/medit", wait_until="domcontentloaded")
+    page.wait_for_function("() => window.EV2 && window.EV2Preview")
+    page.locator('.ev2-cl[data-cell-id="c1"] [data-ev2-row]').tap()
+    page.evaluate(
+        "() => document.querySelectorAll('.ev2-cl.open details:not([hidden])')"
+        ".forEach((d) => (d.open = true))"
+    )
+    fonts = page.evaluate(_INPUT_FONTS, ".ev2-cl.open")
+    assert fonts["n"] > 3 and not fonts["small"], fonts
+    assert page.evaluate(_SMALL_TARGETS) == [], "open row"
+    page.locator('.ev2-cl[data-cell-id="c1"] [data-ev2-replace]').tap()
+    fonts = page.evaluate(_INPUT_FONTS, "[data-ev2-pk]")
+    assert fonts["n"] == 1 and not fonts["small"], fonts
     assert not errors
     browser.close()
 

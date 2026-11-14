@@ -183,10 +183,16 @@
   </div>
   {% endif %}
   {% if secs.advanced %}
-  {% set n_vis = namespace(n=0) %}
-  {% for opt in secs.advanced if option_visible(opt, cell.options, cell_opts) %}{% set n_vis.n = n_vis.n + 1 %}{% endfor %}
-  <details class="ev2-adv" data-opt-more {% if not secs.more_visible %}hidden{% endif %}>
-    <summary>{{ ico('caret-right', 'ev2-caret') }}<b>More {{ entry.item or plugin.name }} settings</b><span data-opt-more-count>{{ n_vis.n }}</span></summary>
+  {#- The summary counts the settings changed from their defaults
+      (widgets.js keeps it current from data-ev2-defaults). -#}
+  {% set _defs = {} %}{% set n_chg = namespace(n=0) %}
+  {% for opt in secs.advanced %}
+    {% set _ = _defs.update({'opt_' ~ opt.name: opt.get('default')}) %}
+    {% set v = cell.options.get(opt.name) %}{% set d = opt.get('default') %}
+    {% if opt.name in cell.options and (v if v is not none else '') | string != (d if d is not none else '') | string %}{% set n_chg.n = n_chg.n + 1 %}{% endif %}
+  {% endfor %}
+  <details class="ev2-adv" data-opt-more data-ev2-adv="more" data-ev2-defaults="{{ _defs | tojson | forceescape }}" {% if not secs.more_visible %}hidden{% endif %}>
+    <summary>{{ ico('caret-right', 'ev2-caret') }}<b>More {{ entry.item or plugin.name }} settings</b><span data-ev2-adv-sum>{{ (n_chg.n ~ ' changed') if n_chg.n else 'defaults' }}</span></summary>
     <div class="ev2-adv-in"><div class="ev2-opts" data-opt-more-list>
     {% for opt in secs.advanced %}{{ ev2_opt_field(cell, opt, cell_opts) }}{% endfor %}
     </div></div>
@@ -198,8 +204,9 @@
   {% if cell.theme %}{% set _ = own.append('theme') %}{% endif %}
   {% if cell.style %}{% set _ = own.append('style') %}{% endif %}
   {% if cell.font %}{% set _ = own.append('font') %}{% endif %}
-  <details class="ev2-adv" data-ev2-look>
-    <summary>{{ ico('caret-right', 'ev2-caret') }}<b>Look of this cell</b><span class="{{ 'ovw' if own }}" data-ev2-look-sum>{{ ('own ' ~ own | join(' and ')) if own else 'same as dashboard' }}</span></summary>
+  {% set n_look = own | length + (0 if (cell.zoom or 1) == 1 or cell.plugin == 'ha_dashboard' else 1) %}
+  <details class="ev2-adv" data-ev2-look data-ev2-adv="look">
+    <summary>{{ ico('caret-right', 'ev2-caret') }}<b>Look of this cell</b><span class="{{ 'ovw' if own }}" data-ev2-look-sum data-ev2-adv-sum>{{ (n_look ~ ' changed') if n_look else 'defaults' }}</span></summary>
     <div class="ev2-adv-in"><div class="ev2-opts">
       <div class="ev2-of"><label for="ev2-{{ cell.id }}-theme">Theme</label>{{ ev2_select('ev2-' ~ cell.id ~ '-theme', 'theme', theme_options, cell.theme, 'Same as dashboard', 'data-ev2-ov="theme"') }}</div>
       <div class="ev2-of"><label for="ev2-{{ cell.id }}-style">Style</label>{{ ev2_select('ev2-' ~ cell.id ~ '-style', 'style', _cell_styles, cell.style, 'Same as dashboard', 'data-ev2-ov="style"') }}</div>
@@ -231,8 +238,8 @@
   {% if cell.dither is not none %}{% set _ = extras.append('flat' if cell.dither == 'none' else 'smooth') %}{% endif %}
   {% set pad = cell.padding_override %}
   {% set pad_choice = '' if pad is none else (pad|string if pad in (0, 8, 16) else 'custom') %}
-  <details class="ev2-adv">
-    <summary>{{ ico('caret-right', 'ev2-caret') }}<b>Refresh, taps and dithering</b><span>{{ extras | join(' · ') if extras else 'off' }}</span></summary>
+  <details class="ev2-adv" data-ev2-adv="extras">
+    <summary>{{ ico('caret-right', 'ev2-caret') }}<b>Refresh, taps and dithering</b><span class="{{ 'ovw' if cell.padding_override is not none }}" data-ev2-adv-sum>{{ (extras | length ~ ' changed') if extras else 'defaults' }}</span></summary>
     <div class="ev2-adv-in"><div class="ev2-opts">
       {% if plugin.on_change_updates %}
       <input type="hidden" name="update_on_change_present" value="1">
@@ -475,7 +482,7 @@
                 <span class="c"><button type="button" class="ev2-btn ev2-btn--sm" aria-pressed="false" data-ev2-draw {% if not _cells %}disabled{% endif %}>{{ ico('pencil-simple') }}<span>Edit on preview</span></button></span>
               </div>
               <div class="ev2-drawbar" data-ev2-drawbar hidden>
-                <p class="ev2-drawhint">{{ ico('cursor-click') }} <span>Click a cell on the preview to split or remove it. Esc stops.</span></p>
+                <p class="ev2-drawhint">{{ ico('cursor-click') }} <span><span class="ev2-click">Click</span><span class="ev2-tap">Tap</span> a cell on the preview to split or remove it.<span class="ev2-click"> Esc stops.</span></span></p>
                 <div class="ev2-drawrow">
                   <label class="ev2-switch-l">Snap to grid <span class="ev2-switch"><input type="checkbox" role="switch" data-ev2-snap><span aria-hidden="true"></span></span></label>
                   <span class="ev2-snapdims" data-ev2-snapdims hidden>
@@ -504,7 +511,7 @@
         {{ step_head('widgets', 3, 'Widgets', _wsum, _wvis, warn=not _all_filled) }}
         <p class="ev2-st-wait" data-ev2-wait></p>
         <div class="ev2-st-body" id="ev2-b-widgets" role="region" aria-labelledby="ev2-h-widgets" hidden>
-          <p class="ev2-lead">What goes in each cell? Click a row, or <b>click a cell on the preview</b>. <span class="ev2-nt">Drag rows to swap two widgets.</span><span class="ev2-t">Open a row to move its widget up or down.</span></p>
+          <p class="ev2-lead">What goes in each cell? <span class="ev2-click">Click</span><span class="ev2-tap">Tap</span> a row, or <b><span class="ev2-click">click</span><span class="ev2-tap">tap</span> a cell on the preview</b>. <span class="ev2-nt">Drag rows to swap two widgets.</span><span class="ev2-t">Open a row to move its widget up or down.</span></p>
           <div class="ev2-st-b">
             <ul class="ev2-cells" data-ev2-cells>
               {% if _sb_cell %}
@@ -565,7 +572,7 @@
       {% set _overrides = look_overrides | default([]) %}
       {% set _look_summary %}{% if _overrides %}{{ ico('warning') }} {{ _overrides | length }} widget{{ 's' if _overrides | length != 1 }} override{{ 's' if _overrides | length == 1 }} it · {% endif %}{{ _theme_label }} · {{ _style_label }} · padding {{ page.gap }}{% endset %}
       <section class="ev2-step" id="ev2-step-look" data-step="look" data-index="4">
-        {{ step_head('look', 4, 'Look', _look_summary, warn=_overrides | length > 0) }}
+        {{ step_head('look', 4, 'Look', _look_summary, warn=_overrides | length > 0, opt=_is_new) }}
         <p class="ev2-st-wait" data-ev2-wait></p>
         <div class="ev2-st-body" id="ev2-b-look" role="region" aria-labelledby="ev2-h-look" hidden>
           <p class="ev2-lead">Set the dashboard defaults here. Cells and widget options can use their own appearance.</p>
@@ -670,7 +677,7 @@
       {% if _schedule_count %}{% set _lineup_summary = _lineup_summary ~ ' · ' ~ _schedule_count ~ ' schedule' ~ ('' if _schedule_count == 1 else 's') %}{% endif %}
       <section class="ev2-step ev2-lineups" id="ev2-step-{{ _lineup_step }}" data-step="{{ _lineup_step }}" data-index="5">
         <span id="{{ _lineup_step }}" class="ev2-anchor"></span>
-        {{ step_head(_lineup_step, 5, 'Lineups', _lineup_summary, opt=_is_new, icon='clock') }}
+        {{ step_head(_lineup_step, 5, 'Lineups', _lineup_summary, opt=_is_new) }}
         {% if _is_new %}<p class="ev2-st-wait" data-ev2-wait></p>{% endif %}
         <div class="ev2-st-body" id="ev2-b-{{ _lineup_step }}" role="region" aria-labelledby="ev2-h-{{ _lineup_step }}" hidden>
           <p class="ev2-lead">Lineups decide when this dashboard shows: on its own schedule, or rotating with others.</p>
@@ -684,8 +691,8 @@
             {{ lineup_confirm() }}
             <div class="ev2-lineups-actions">
               <a class="ev2-link ev2-link--quiet" href="{{ url_for('decks.index') }}">All lineups</a>
-              <button type="button" class="ev2-btn ev2-btn--sm" data-ev2-lopen data-ev2-ladd-row>{{ ico('plus') }}<span>Add to a lineup</span></button>
-              <button type="button" class="ev2-btn ev2-btn--primary ev2-btn--sm" data-open-schedule-dialog="schedule-dialog-new">{{ ico('plus') }}<span>New scheduled lineup</span></button>
+              <button type="button" class="ev2-btn ev2-btn--sm" data-ev2-lopen data-ev2-ladd-row>Add to a lineup</button>
+              <button type="button" class="ev2-btn ev2-btn--primary ev2-btn--sm" data-open-schedule-dialog="schedule-dialog-new">New scheduled lineup</button>
             </div>
           </div>
         </div>
@@ -702,7 +709,7 @@
 {% set _push_label = 'Push to display' if _using_test else ('Push to ' ~ _bound[0].label if _bound | length == 1 else 'Push to ' ~ (_bound | length) ~ ' displays') %}
 {% set _lineup_names = page_lineups | default([]) %}
 {% set _emptied = page_emptied_lineups | default([]) %}
-<div class="ev2-bar" data-ev2-bar>
+<div class="ev2-bar" id="ev2-bar" data-ev2-bar>
   {% if _is_new %}
   <span class="ev2-bar-st" data-ev2-bar-st><span class="ev2-long">Step 1 of 5 · changes save as you go{% if _cells %} · <b>{{ _filled | length }} of {{ _cells | length }} cell{{ '' if _cells | length == 1 else 's' }} filled</b>{% endif %}</span><span class="ev2-short">Step 1 of 5</span></span>
   <form method="post" action="{{ url_for('pages.delete', page_id=page.id) }}" class="ev2-inline" data-ev2-discard>
@@ -711,7 +718,7 @@
   </form>
   <a class="ev2-btn ev2-btn--primary" href="{{ _edit_url }}" data-ev2-finish>Done</a>
   {% else %}
-  <span class="ev2-bar-st"><span class="ev2-long">Changes save as you go.{% if _using_test %} <b>On a test display, so Push is off.</b>{% endif %}</span><span class="ev2-short">{% if _using_test %}Test display · Push off{% else %}Saves as you go{% endif %}</span></span>
+  <span class="ev2-bar-st"><span class="ev2-long">Changes save as you go.{% if _using_test %} <b>On a test display, so Push is off.</b>{% endif %}</span><span class="ev2-short">{% if _using_test %}Test display · Push off{% endif %}</span></span>
   <form method="post" action="{{ url_for('pages.duplicate', page_id=page.id) }}" class="ev2-inline" data-ev2-after-save>
     <button type="submit" class="ev2-iconbtn" title="Duplicate dashboard" aria-label="Duplicate dashboard">{{ ico('copy') }}</button>
   </form>
@@ -731,14 +738,14 @@
 
 {#- ---------------------------------------------------------- widget catalog -#}
 <div class="ev2-pk-scrim" data-ev2-pk-scrim hidden></div>
-<div class="ev2-pk-pop" role="dialog" aria-modal="true" aria-labelledby="ev2-pk-title" data-ev2-pk hidden>
+<div class="ev2-pk-pop" id="ev2-pk" role="dialog" aria-modal="true" aria-labelledby="ev2-pk-title" data-ev2-pk hidden>
   <div class="ev2-pk-head">
     <h3 id="ev2-pk-title" data-ev2-pk-title>Choose a widget</h3>
     <span class="sp"></span>
     <button type="button" class="ev2-link ev2-link--quiet" data-ev2-pk-keep hidden>Keep current</button>
     <button type="button" class="ev2-iconbtn" aria-label="Close" title="Close (Esc)" data-ev2-pk-close>{{ ico('x') }}</button>
   </div>
-  <p class="ev2-pk-sub">Click one to use it.</p>
+  <p class="ev2-pk-sub"><span class="ev2-click">Click</span><span class="ev2-tap">Tap</span> one to use it.</p>
   <div class="ev2-wp-search">{{ ico('magnifying-glass') }}<input type="search" class="ev2-input" placeholder="Search all widgets" aria-label="Search all widgets" autocomplete="off" spellcheck="false" data-ev2-pk-q></div>
   <div class="ev2-pk">
     <nav class="ev2-pk-cats" aria-label="Widget categories" data-ev2-pk-cats></nav>

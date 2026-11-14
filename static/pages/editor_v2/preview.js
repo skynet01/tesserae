@@ -812,16 +812,18 @@
 
   function hint() {
     const f = frame();
+    // "Tap" on a touch screen, "Click" with a mouse.
+    const click = window.matchMedia && window.matchMedia("(hover: none)").matches ? "Tap" : "Click";
     let text;
     if (state.placeholder || !data.cells.length) text = "Pick a layout to split the screen.";
     else if (f && f.map && f.map.rotated) {
       const flat = data.groups.find((g) => !G.axisMap(data.cells, g.w, g.h, sbId()).rotated);
       text = flat
         ? `This display is turned the other way. Resize, split and remove on the ${flat.w}×${flat.h} tab.`
-        : "Click a cell to edit its widget.";
+        : `${click} a cell to edit its widget.`;
     } else if (state.edit)
-      text = "Click a cell to split or remove it. Drag the line between two cells to resize.";
-    else text = "Click a cell to edit its widget. Drag the line between two cells to resize.";
+      text = `${click} a cell to split or remove it. Drag the line between two cells to resize.`;
+    else text = `${click} a cell to edit its widget. Drag the line between two cells to resize.`;
     hintEl.textContent = text;
   }
 

@@ -423,6 +423,7 @@
   }
   document.querySelector("[data-ev2-finish]")?.addEventListener("click", async (ev) => {
     ev.preventDefault();
+    if (ev.currentTarget.getAttribute("aria-disabled") === "true") return; // no display yet
     const href = ev.currentTarget.href;
     try {
       await flush();

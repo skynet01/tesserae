@@ -182,11 +182,7 @@
           li.querySelector("[data-ev2-pad-custom]").hidden = true;
         }
         const f = li.querySelector("[data-ev2-cell-form]");
-        const s = f.querySelector("[data-ev2-look-sum]");
-        if (s) {
-          s.textContent = "same as dashboard";
-          s.classList.remove("ovw");
-        }
+        EV2.widgets.refreshSums && EV2.widgets.refreshSums(f);
         return EV2.saveForm(f, 0);
       });
       refreshOverrides();

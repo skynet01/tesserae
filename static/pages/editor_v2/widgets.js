@@ -37,7 +37,8 @@
     openId = id;
     EV2.ui.cell = id;
     wireTouch(li);
-    EV2.emit("ev2:cell-focus", { cellId: id });
+    hoverId = null;
+    syncFocus();
     if (o.scroll) li.scrollIntoView({ block: o.block || "nearest", behavior: "smooth" });
   }
 
@@ -46,8 +47,42 @@
     rows().forEach((r) => paintRow(r, false));
     openId = null;
     EV2.ui.cell = null;
-    if (was && !(opts && opts.silent)) EV2.emit("ev2:cell-focus", { cellId: null });
+    if (was && !(opts && opts.silent)) syncFocus();
   }
+
+  // The preview outlines the cell of the row under the pointer or the
+  // keyboard, else the open row's (preview.js, ev2:cell-focus).
+  let hoverId = null;
+  let keyId = null;
+  let shownId;
+  function syncFocus() {
+    const id = hoverId || keyId || openId || null;
+    if (id === shownId) return;
+    shownId = id;
+    EV2.emit("ev2:cell-focus", { cellId: id });
+  }
+  function hover(id) {
+    hoverId = id || null;
+    syncFocus();
+  }
+  // The catalog outlines its cell too; keep track of what is showing.
+  EV2.on("ev2:cell-focus", (d) => {
+    shownId = (d && d.cellId) || null;
+  });
+  list.addEventListener("pointerover", (ev) => {
+    if (ev.pointerType === "touch") return;
+    hover(ev.target.closest(".ev2-cl[data-cell-id]")?.dataset.cellId);
+  });
+  list.addEventListener("pointerleave", () => hover(null));
+  list.addEventListener("focusin", (ev) => {
+    keyId = ev.target.closest(".ev2-cl[data-cell-id]")?.dataset.cellId || null;
+    syncFocus();
+  });
+  list.addEventListener("focusout", (ev) => {
+    if (ev.relatedTarget && list.contains(ev.relatedTarget)) return;
+    keyId = null;
+    syncFocus();
+  });
 
   function ensureStep() {
     if (!EV2.steps) return;
@@ -154,18 +189,91 @@
       // itself is the edit, so save after the hidden controls have followed it.
       EV2.saveForm(t.form || t.closest("form"), 0).catch(() => {});
     }
-    if (t.matches("[data-ev2-ov]")) refreshLookSummary(t.form);
+    if (t.matches("[data-ev2-ov]")) EV2.look && EV2.look.refreshOverrides();
   });
 
-  function refreshLookSummary(form) {
-    const own = [...form.querySelectorAll("[data-ev2-ov]")].filter((s) => s.value).map((s) => s.dataset.ev2Ov);
-    const sum = form.querySelector("[data-ev2-look-sum]");
-    if (sum) {
-      sum.textContent = own.length ? "own " + own.join(" and ") : "same as dashboard";
-      sum.classList.toggle("ovw", own.length > 0);
-    }
-    EV2.look && EV2.look.refreshOverrides();
+  // ------------------------------------------- "More" group summaries
+  // Each group says how many of its settings differ from the default, or
+  // "defaults". Amber (.ovw) only where that overrides the dashboard look.
+  function readValue(fields) {
+    const own = fields.filter((f) => f.type !== "hidden");
+    const f = own[0] || fields[0];
+    if (f.type === "checkbox" && own.length === 1) return f.checked;
+    if (f.type === "checkbox") return own.filter((x) => x.checked).map((x) => x.value).sort();
+    if (f.type === "radio") return (own.find((x) => x.checked) || {}).value || "";
+    if (f.tagName === "SELECT" && f.multiple) return [...f.selectedOptions].map((o) => o.value).sort();
+    return f.value;
   }
+  function differs(fields, def) {
+    const v = readValue(fields);
+    if (typeof v === "boolean") return v !== (def === true || def === "true" || def === 1);
+    if (Array.isArray(v)) {
+      const d = Array.isArray(def) ? def : def === null || def === undefined || def === "" ? [] : [def];
+      return JSON.stringify(v) !== JSON.stringify(d.map(String).sort());
+    }
+    if (typeof def === "number") {
+      if (v === "") return false;
+      // A range snaps its value to its step grid (1 can read 1.01): within
+      // half a step of the default is the default.
+      const f = fields.find((x) => x.type === "range");
+      const slack = f ? (Number(f.step) || 1) / 2 + 1e-9 : 1e-9;
+      return Math.abs(Number(v) - def) > slack;
+    }
+    return String(v) !== String(def === null || def === undefined ? "" : def);
+  }
+  function refreshSums(form) {
+    if (!form) return;
+    form.querySelectorAll("details[data-ev2-adv]").forEach((d) => {
+      const out = d.querySelector("[data-ev2-adv-sum]");
+      if (!out) return;
+      let n = 0;
+      let ovw = false;
+      const kind = d.dataset.ev2Adv;
+      if (kind === "more") {
+        let defs = {};
+        try {
+          defs = JSON.parse(d.dataset.ev2Defaults || "{}") || {};
+        } catch (e) {
+          defs = {};
+        }
+        Object.keys(defs).forEach((name) => {
+          const fields = [...d.querySelectorAll(`[name="${CSS.escape(name)}"]`)];
+          if (!fields.length || fields[0].closest("[data-show-if][hidden]")) return;
+          if (differs(fields, defs[name])) n += 1;
+        });
+      } else if (kind === "look") {
+        const own = [...d.querySelectorAll("[data-ev2-ov]")].filter((s) => s.value).length;
+        const zoom = d.querySelector("[data-ev2-zoom]");
+        n = own + (zoom && Math.abs(Number(zoom.value) - 1) > 1e-6 ? 1 : 0);
+        ovw = own > 0;
+      } else if (kind === "extras") {
+        const on = (sel) => Boolean(d.querySelector(sel)?.checked);
+        let touch = {};
+        try {
+          touch = JSON.parse(d.querySelector("[data-touch-input]")?.value || "{}") || {};
+        } catch (e) {
+          touch = {};
+        }
+        const pad = on("[data-ev2-pad-on]");
+        n = [
+          on('[name="update_on_change"]'),
+          on('[name="update_schedule_enabled"]'),
+          Object.values(touch).some(Boolean),
+          pad,
+          on("[data-ev2-dither-on]"),
+        ].filter(Boolean).length;
+        ovw = pad;
+      }
+      out.textContent = n ? `${n} changed` : "defaults";
+      out.classList.toggle("ovw", ovw);
+    });
+  }
+  ["input", "change", "click"].forEach((name) =>
+    list.addEventListener(name, (ev) => {
+      const form = ev.target.closest && ev.target.closest("[data-ev2-cell-form]");
+      if (form) queueMicrotask(() => refreshSums(form));
+    })
+  );
 
   // ------------------------------------------------------- touch actions
   function wireTouch(li) {
@@ -193,6 +301,7 @@
             if (v.on_swipe) out.on_swipe = v.on_swipe;
             if (v.on_slide) out.on_slide = v.on_slide;
             input.value = JSON.stringify(out);
+            refreshSums(input.form);
             EV2.saveForm(input.form, 300).catch(() => {});
           },
         })
@@ -309,10 +418,12 @@
     openId: () => openId,
     rowFor,
     rows,
+    refreshSums,
   };
 
   // Back from a reload: reopen the row that was open.
   EV2.ready(() => {
+    list.querySelectorAll("[data-ev2-cell-form]").forEach(refreshSums);
     // After a keyboard swap: the moved widget keeps focus, and the result is said.
     const moved = EV2.restored.focusCell;
     if (moved && rowFor(moved)) {

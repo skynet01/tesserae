@@ -128,13 +128,16 @@ CHECK_JS = """
       }
     }
 
-    // 4. "More settings" counts what it shows.
+    // 4. "More settings" is never an empty disclosure, and every group's
+    //    summary has one form: how many settings are changed, or "defaults".
     form.querySelectorAll('details[data-opt-more]').forEach((more) => {
       const list = more.querySelector('[data-opt-more-list]');
       const shown = [...list.children].filter((el) => !el.hidden && el.type !== 'hidden').length;
-      const count = Number(more.querySelector('[data-opt-more-count]').textContent);
-      if (count !== shown) bad(`More settings says ${count}, shows ${shown}`);
       if (!more.hidden && shown === 0) bad('More settings shown with nothing in it');
+    });
+    form.querySelectorAll('details[data-ev2-adv]').forEach((group) => {
+      const sum = (group.querySelector('[data-ev2-adv-sum]') || {}).textContent || '';
+      if (!/^([0-9]+ changed|defaults)$/.test(sum.trim())) bad(`group summary reads "${sum}"`);
     });
   }
   return {checked: forms.length, problems: out};
