@@ -2298,6 +2298,11 @@ body:has(#ev2-bar) :is(#job-tray, #agent-follow) {
     align-items: center;
     min-height: 44px;
   }
+  /* Replace sits in the open row's header: give the 44px button room so
+     it doesn't touch the row's top edge. */
+  .ev2 .ev2-cl.open .ev2-cl-head {
+    padding-block: var(--t-space-2);
+  }
   .ev2-lineups-row-actions .ev2-link {
     min-width: 44px;
     justify-content: center;
