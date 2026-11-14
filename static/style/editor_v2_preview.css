@@ -282,12 +282,20 @@
   inset: 0;
   z-index: 2;
 }
+.ev2pv-cell,
+.ev2pv-cell:hover,
+.ev2pv-cell:active,
+.ev2pv-cell:focus-visible {
+  /* The shell paints every button's :hover/:active; here that would cover
+     the dashboard. Only the outline below changes. */
+  background: transparent;
+  box-shadow: none;
+}
 .ev2pv-cell {
   position: absolute;
   margin: 0;
   padding: 0;
   border: 0;
-  background: transparent;
   cursor: pointer;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
