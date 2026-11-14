@@ -10,7 +10,11 @@ and phone width and checked:
 - status text lives in the footer's status slot, nowhere else;
 - the footer reads: status line, then "Empty this cell" (link, left), then the
   buttons, Done (primary) last, in DOM order and on screen;
-- "More <widget> settings" counts the fields it shows.
+- "More <widget> settings" counts the fields it shows;
+- the options are compact: each section's switches are one group, short
+  fields (numbers, short selects) pair up on the two-column grid wherever
+  they can, nothing overflows the row or clips a label or a short select's
+  text, and on a phone every option control is a 44px target.
 """
 
 from __future__ import annotations
@@ -132,7 +136,7 @@ CHECK_JS = """
     //    summary has one form: how many settings are changed, or "defaults".
     form.querySelectorAll('details[data-opt-more]').forEach((more) => {
       const list = more.querySelector('[data-opt-more-list]');
-      const shown = [...list.children].filter((el) => !el.hidden && el.type !== 'hidden').length;
+      const shown = [...list.children].filter((el) => el.getClientRects().length).length;
       if (!more.hidden && shown === 0) bad('More settings shown with nothing in it');
     });
     form.querySelectorAll('details[data-ev2-adv]').forEach((group) => {
@@ -140,6 +144,117 @@ CHECK_JS = """
       if (!/^([0-9]+ changed|defaults)$/.test(sum.trim())) bad(`group summary reads "${sum}"`);
     });
   }
+  return {checked: forms.length, problems: out};
+}
+"""
+
+
+# The compact layout, measured with every group open. A "section" is one
+# .ev2-opts grid (the main options, "More", "Look", "Refresh, taps and
+# dithering").
+LAYOUT_JS = """
+(phone) => {
+  const out = [];
+  const visible = (el) => el.getClientRects().length > 0;
+  const canvas = document.createElement('canvas').getContext('2d');
+  const forms = [...document.querySelectorAll('.ev2-cl[data-widget] [data-ev2-cell-form]')];
+  for (const form of forms) {
+    EV2.widgets.openRow(form.dataset.cellId);
+    form.querySelectorAll('details.ev2-adv').forEach((d) => { if (!d.hidden) d.open = true; });
+    const plugin = form.querySelector('[data-ev2-plugin]').value;
+    const bad = (msg) => out.push(`${plugin}: ${msg}`);
+    const fr = form.getBoundingClientRect();
+
+    for (const opts of form.querySelectorAll('.ev2-opts')) {
+      if (!visible(opts)) continue;
+      const items = [...opts.children].filter(visible);
+      const name = (el) => (el.querySelector('[name]') || {}).name || el.textContent.trim().slice(0, 20);
+
+      // 1. Every switch of the section in one group.
+      const switches = [...opts.querySelectorAll('.field--switch, .ev2-swi')].filter(visible);
+      const groups = new Set(switches.map((s) => s.closest('[data-ev2-swg]')));
+      if (groups.has(null)) bad(`a switch outside a group: ${name(switches.find((s) => !s.closest('[data-ev2-swg]')))}`);
+      if (groups.size > 1) bad(`switches split over ${groups.size} groups`);
+
+      // 2. Number boxes and short fields are half-width, and a short field
+      //    alone in its row is not followed by one that could have joined it.
+      const twoCols = getComputedStyle(opts).gridTemplateColumns.split(' ').length === 2;
+      items.forEach((it) => {
+        const num = it.querySelector('.field > input[type=number], .field-unit-wrap input[type=number]');
+        const lab = (it.querySelector('label') || {}).textContent || '';
+        if (num && !it.closest('.field--slider') && !it.classList.contains('ev2-oi--short') && lab.trim().length <= 22)
+          bad(`number field "${lab.trim()}" spans the row`);
+      });
+      if (twoCols) {
+        items.forEach((it, i) => {
+          if (!it.classList.contains('ev2-oi--short')) return;
+          const r = it.getBoundingClientRect();
+          const mate = items.some((o) => o !== it && Math.abs(o.getBoundingClientRect().top - r.top) < 2 && o.classList.contains('ev2-oi--short'));
+          if (mate) return;
+          const skipped = [];
+          for (const next of items.slice(i + 1)) {
+            if (!next.classList.contains('ev2-oi--short')) {
+              skipped.push(next);
+              continue;
+            }
+            const cond = next.querySelector('[data-show-if]');
+            const needs = cond ? Object.keys(JSON.parse(cond.dataset.showIf)) : [];
+            const names = skipped.flatMap((el) => [...el.querySelectorAll('[name]')].map((n) => n.name.replace(/^opt_/, '')));
+            if (skipped.length <= 2 && !needs.some((n) => names.includes(n)))
+              bad(`"${name(it)}" sits alone though "${name(next)}" could pair with it`);
+            break;
+          }
+        });
+      }
+
+      for (const it of items) {
+        // 3. Nothing wider than the row.
+        // (The "i" button's 44px touch target may reach past its glyph; the
+        // glyph is what has to fit. The overrides' storage is offscreen.)
+        for (const el of [it, ...it.querySelectorAll('*')]) {
+          if (!visible(el) || el.matches('.info-pop, .entity-overrides-storage')) continue;
+          if (el.closest('.info-pop-content, .pic-pop, [role=listbox], .location-search-results')) continue;
+          const r = el.getBoundingClientRect();
+          if (r.width && (r.right > fr.right + 1 || r.left < fr.left - 1)) {
+            bad(`<${el.tagName.toLowerCase()} class="${el.className}"> overflows the row (${Math.round(r.left)}-${Math.round(r.right)} vs ${Math.round(fr.left)}-${Math.round(fr.right)})`);
+            break;
+          }
+        }
+        // 4. Labels inside their field; a half-width select shows its
+        //    longest choice whole.
+        const ir = it.getBoundingClientRect();
+        it.querySelectorAll('label, .ev2-lbl').forEach((l) => {
+          if (!visible(l) || l.closest('.ti-root, .multiselect, .server-colour, .days-picker')) return;
+          const text = document.createRange();
+          text.selectNodeContents(l);
+          const parts = [...text.getClientRects()].filter((r) => r.width);
+          if (parts.some((r) => r.right > ir.right + 1 || r.left < ir.left - 1))
+            bad(`label "${l.textContent.trim().split(/\\s+/).slice(0, 4).join(' ')}" is clipped`);
+        });
+        if (it.classList.contains('ev2-oi--short')) {
+          it.querySelectorAll('select').forEach((sel) => {
+            if (!visible(sel)) return;
+            const cs = getComputedStyle(sel);
+            canvas.font = `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+            const room = sel.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+            for (const o of sel.options) {
+              if (canvas.measureText(o.text).width > room + 1) bad(`"${o.text}" is cut off in half-width "${name(it)}"`);
+            }
+          });
+        }
+        // 5. Phone: 44px targets.
+        if (phone) {
+          it.querySelectorAll('input:not([type=hidden]), select, textarea, .info-pop, .field--switch, .ev2-swi').forEach((c) => {
+            if (!visible(c) || c.closest('.ev2-switch, .server-colour, .days-picker, .multiselect, .pic-pop, .info-pop-content, .ti-root, .switch')) return;
+            if (c.matches('.entity-overrides-storage, [hidden]')) return;
+            const h = c.getBoundingClientRect().height;
+            if (h < 43.5) bad(`${c.tagName.toLowerCase()}.${c.className} "${name(c.closest('.ev2-oi, .ev2-of') || c)}" is ${Math.round(h)}px tall on a phone`);
+          });
+        }
+      }
+    }
+  }
+  if (document.documentElement.scrollWidth > window.innerWidth + 1) out.push('the page scrolls sideways');
   return {checked: forms.length, problems: out};
 }
 """
@@ -205,6 +320,19 @@ def test_every_widget_panel_has_one_shape(pw: Any, server: Any, width: int) -> N
     browser, page, errors = _open(pw, base, width)
     try:
         result = page.evaluate(CHECK_JS, ALLOWED_BLOCKS)
+        assert result["checked"] == len(widget_ids)
+        assert result["problems"] == []
+        assert errors == []
+    finally:
+        browser.close()
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_every_widget_panel_is_compact(pw: Any, server: Any, width: int) -> None:
+    base, _app, widget_ids = server
+    browser, page, errors = _open(pw, base, width)
+    try:
+        result = page.evaluate(LAYOUT_JS, width < 640)
         assert result["checked"] == len(widget_ids)
         assert result["problems"] == []
         assert errors == []

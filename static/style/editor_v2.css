@@ -1575,11 +1575,57 @@
   font-size: var(--ev2-fs-help);
 }
 
-/* stacked options: label above the control, help under it */
+/* Options: label above the control, help in its "i". A widget row's
+   options sit on a two-column grid sized by the row itself (the steps
+   column is ~310px wide at 1440 and on a phone), not the viewport: short
+   fields (numbers, short selects, colours; .ev2-oi--short, picked by
+   app/option_conditions.py option_layout) take half a row, everything else
+   the whole row. Below ~300px it is one column. */
+.ev2-cell-form {
+  container: ev2-cell / inline-size;
+}
 .ev2-opts {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--ev2-gap);
   margin-top: var(--ev2-gap);
+}
+@container ev2-cell (min-width: 296px) {
+  .ev2-opts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ev2-opts > :not(.ev2-oi--short) {
+    grid-column: 1 / -1;
+  }
+  /* Side by side, the controls line up even when one label wraps. */
+  .ev2-opts > .ev2-oi--short {
+    align-self: end;
+  }
+}
+/* A field show_if hides takes no grid cell. */
+.ev2-opts > .ev2-oi:has(> .opt-cond[hidden]) {
+  display: none;
+}
+/* Half-width controls fill their column (and no wider: a number box's
+   own default width must not push the column out). */
+.ev2-oi--short :is(.field, .ev2-of) {
+  grid-template-columns: minmax(0, 1fr);
+}
+.ev2-oi--short .field-unit-wrap {
+  display: flex;
+  width: 100%;
+}
+#ev2 .ev2-oi--short .field-unit-wrap input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+#ev2 .ev2-oi--short .field > input[type="number"] {
+  width: 100%;
+}
+#ev2 .ev2-oi--short input[type="color"] {
+  width: 100%;
+  height: var(--ev2-control);
 }
 .ev2 :is(.ev2-of, .field) {
   display: grid;
@@ -1600,17 +1646,82 @@
 .ev2 .opt-cond[hidden] {
   display: none;
 }
-.ev2-sw-row {
-  grid-template-columns: minmax(0, 1fr) auto;
+
+/* A section's switches: one list, one control-height row each (label and
+   its "i" left, the switch right), hairlines between them. */
+.ev2-swg {
+  display: grid;
+  padding: 0 var(--t-space-3);
+  border: 1px solid var(--ev2-divider);
+  border-radius: var(--ev2-r);
+}
+.ev2-swg:not(:has(> .field--switch, > .ev2-swi, > .opt-cond:not([hidden]))) {
+  display: none;
+}
+.ev2-swg > :not(.opt-cond[hidden]) ~ * {
+  border-top: 1px solid var(--ev2-divider);
+}
+.ev2 .ev2-swg .field.field--switch,
+.ev2-swi {
+  min-height: var(--ev2-control);
+}
+.ev2-swi {
+  display: flex;
   align-items: center;
-  column-gap: var(--ev2-gap);
+  gap: var(--t-space-1);
+  min-width: 0;
 }
-.ev2-sw-row > p {
-  grid-column: 1;
+.ev2-swi > label {
+  min-width: 0;
+  font-size: var(--ev2-fs-label);
+  font-weight: 600;
+  cursor: pointer;
 }
-.ev2-sw-row > .ev2-switch {
-  grid-row: 1 / span 2;
-  grid-column: 2;
+.ev2-swi > .info-pop-wrap {
+  line-height: 1;
+}
+.ev2-swi > .ev2-switch {
+  margin-left: auto;
+}
+
+/* Sliders on one line: label, track, value box. The label column is the
+   same for every slider (and Zoom), so the tracks start on one edge. */
+@container ev2-cell (min-width: 296px) {
+  .ev2-cell-form .field--slider,
+  .ev2-cell-form .ev2-of--rng {
+    grid-template-columns: 38% minmax(0, 1fr) auto;
+    column-gap: var(--t-space-3);
+    align-items: center;
+  }
+  .ev2-cell-form .field--slider .slider-header > label,
+  .ev2-cell-form .ev2-of--rng > label {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .ev2-cell-form .field--slider input[type="range"] {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .ev2-cell-form .field--slider .slider-value-wrap {
+    grid-column: 3;
+    grid-row: 1;
+    width: 76px;
+  }
+  #ev2 .ev2-cell-form .field--slider .slider-value-wrap input {
+    flex: 1;
+    width: auto;
+    min-width: 0;
+  }
+  .ev2-cell-form .ev2-of--rng > .ev2-rng {
+    grid-column: 2 / -1;
+  }
+}
+/* The "i" button's 44px touch target reaches past its glyph: keep it off
+   the track. */
+@media (max-width: 640px), (pointer: coarse) {
+  .ev2-cell-form :is(.field--slider, .ev2-of--rng) {
+    column-gap: var(--ev2-gap);
+  }
 }
 .ev2-of--act {
   justify-items: start;

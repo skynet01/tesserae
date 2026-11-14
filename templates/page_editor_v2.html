@@ -1,5 +1,5 @@
 {% extends "_base.html" %}
-{% from "_components.html" import auto_field %}
+{% from "_components.html" import auto_field, info_pop %}
 {% from "_schedule_form.html" import schedule_form, schedule_form_scripts %}
 {% from "_query_preview.html" import query_preview_button %}
 {#- Dashboard editor v2 (2026-11-12 redesign). Steps on the left, the live
@@ -148,6 +148,20 @@
               visible=option_visible(opt, cell.options, cell_opts)) }}
 {%- endmacro %}
 
+{#- One section's options on the two-column grid (app/option_conditions.py
+    option_layout): every switch in one group where the first one was,
+    short fields (numbers, short selects) side by side, the rest across the
+    row. The grid answers the row's own width (editor_v2.css). -#}
+{% macro ev2_opt_blocks(cell, section, cell_opts) -%}
+{% for b in option_layout(section, cell.options, cell_opts) %}
+  {%- if b.kind == 'switches' %}
+  <div class="ev2-oi ev2-swg" data-ev2-swg>{% for opt in b.opts %}{{ ev2_opt_field(cell, opt, cell_opts) }}{% endfor %}</div>
+  {%- else %}
+  <div class="ev2-oi ev2-oi--{{ b.size }}">{{ ev2_opt_field(cell, b.opt, cell_opts) }}</div>
+  {%- endif %}
+{% endfor %}
+{%- endmacro %}
+
 {#- The widget settings that open in place under a filled row. -#}
 {% macro cell_body(cell, idx, is_bar=False) %}
 {% set plugin = (plugins | selectattr('id', 'equalto', cell.plugin) | list | first) if cell.plugin else None %}
@@ -178,7 +192,7 @@
   {% set qp = query_preview_button(plugin, cell.w, cell.h) | trim %}
   {% if secs.basic or qp %}
   <div class="ev2-opts">
-    {% for opt in secs.basic %}{{ ev2_opt_field(cell, opt, cell_opts) }}{% endfor %}
+    {{ ev2_opt_blocks(cell, secs.basic, cell_opts) }}
     {% if qp %}<div class="ev2-of ev2-of--act">{{ qp | safe }}</div>{% endif %}
   </div>
   {% endif %}
@@ -194,7 +208,7 @@
   <details class="ev2-adv" data-opt-more data-ev2-adv="more" data-ev2-defaults="{{ _defs | tojson | forceescape }}" {% if not secs.more_visible %}hidden{% endif %}>
     <summary>{{ ico('caret-right', 'ev2-caret') }}<b>More {{ entry.item or plugin.name }} settings</b><span data-ev2-adv-sum>{{ (n_chg.n ~ ' changed') if n_chg.n else 'defaults' }}</span></summary>
     <div class="ev2-adv-in"><div class="ev2-opts" data-opt-more-list>
-    {% for opt in secs.advanced %}{{ ev2_opt_field(cell, opt, cell_opts) }}{% endfor %}
+    {{ ev2_opt_blocks(cell, secs.advanced, cell_opts) }}
     </div></div>
   </details>
   {% endif %}
@@ -215,13 +229,12 @@
       <input type="hidden" name="zoom" value="{{ cell.zoom }}">
       <p class="ev2-help">Use Dashboard zoom above to resize Home Assistant cards.</p>
       {% else %}
-      <div class="ev2-of">
-        <label for="ev2-{{ cell.id }}-zoom">Zoom</label>
+      <div class="ev2-of ev2-of--rng">
+        <label for="ev2-{{ cell.id }}-zoom">Zoom{{ info_pop('Makes text and icons bigger or smaller without changing the cell.') }}</label>
         <div class="ev2-rng">
           <input type="range" id="ev2-{{ cell.id }}-zoom" name="zoom" min="0.25" max="2" step="0.05" value="{{ cell.zoom }}" data-ev2-zoom>
           <span class="ev2-rng-out" data-ev2-zoom-out>{{ '%.2f' | format(cell.zoom) }}×</span>
         </div>
-        <p>Makes text and icons bigger or smaller without changing the cell.</p>
       </div>
       {% endif %}
     </div></div>
@@ -241,23 +254,28 @@
   <details class="ev2-adv" data-ev2-adv="extras">
     <summary>{{ ico('caret-right', 'ev2-caret') }}<b>Refresh, taps and dithering</b><span class="{{ 'ovw' if cell.padding_override is not none }}" data-ev2-adv-sum>{{ (extras | length ~ ' changed') if extras else 'defaults' }}</span></summary>
     <div class="ev2-adv-in"><div class="ev2-opts">
-      {% if plugin.on_change_updates %}
-      <input type="hidden" name="update_on_change_present" value="1">
-      <div class="ev2-of ev2-sw-row">
-        <label for="ev2-{{ cell.id }}-uoc">Refresh when its data changes</label>
-        <p>Only on displays already showing this dashboard.</p>
-        <span class="ev2-switch"><input type="checkbox" role="switch" id="ev2-{{ cell.id }}-uoc" name="update_on_change" value="1" {% if cell.update_on_change %}checked{% endif %}><span aria-hidden="true"></span></span>
+      {#- The refresh switches are one group, like a widget's own. -#}
+      {% if plugin.on_change_updates %}<input type="hidden" name="update_on_change_present" value="1">{% endif %}
+      {% if plugin.on_schedule_updates %}<input type="hidden" name="update_schedule_present" value="1">{% endif %}
+      {% if plugin.on_change_updates or plugin.on_schedule_updates %}
+      <div class="ev2-oi ev2-swg" data-ev2-swg>
+        {% if plugin.on_change_updates %}
+        <div class="ev2-swi">
+          <label for="ev2-{{ cell.id }}-uoc">Refresh when its data changes</label>{{ info_pop('Only on displays already showing this dashboard.') }}
+          <span class="ev2-switch"><input type="checkbox" role="switch" id="ev2-{{ cell.id }}-uoc" name="update_on_change" value="1" {% if cell.update_on_change %}checked{% endif %}><span aria-hidden="true"></span></span>
+        </div>
+        {% endif %}
+        {% if plugin.on_schedule_updates %}
+        <div class="ev2-swi">
+          <label for="ev2-{{ cell.id }}-daily">Refresh once a day</label>{{ info_pop('After the day changes, or at a time you pick.') }}
+          <span class="ev2-switch"><input type="checkbox" role="switch" id="ev2-{{ cell.id }}-daily" name="update_schedule_enabled" value="1" {% if cell.update_schedule %}checked{% endif %} data-ev2-reveal="ev2-{{ cell.id }}-daily-at"><span aria-hidden="true"></span></span>
+        </div>
+        {% endif %}
       </div>
       {% endif %}
       {% if plugin.on_schedule_updates %}
       {% set schedule_spec = plugin.on_schedule_updates[0] %}
       {% set schedule_at = cell.update_schedule.at if cell.update_schedule else none %}
-      <input type="hidden" name="update_schedule_present" value="1">
-      <div class="ev2-of ev2-sw-row">
-        <label for="ev2-{{ cell.id }}-daily">Refresh once a day</label>
-        <p>After the day changes, or at a time you pick.</p>
-        <span class="ev2-switch"><input type="checkbox" role="switch" id="ev2-{{ cell.id }}-daily" name="update_schedule_enabled" value="1" {% if cell.update_schedule %}checked{% endif %} data-ev2-reveal="ev2-{{ cell.id }}-daily-at"><span aria-hidden="true"></span></span>
-      </div>
       <div class="ev2-of ev2-daily" id="ev2-{{ cell.id }}-daily-at" {% if not cell.update_schedule %}hidden{% endif %}>
         <span class="ev2-lbl">When</span>
         <label class="ev2-radio"><input type="radio" name="update_schedule_timing" value="boundary" {% if not schedule_at %}checked{% endif %}> When the day changes</label>
@@ -266,7 +284,7 @@
       </div>
       {% endif %}
       <div class="ev2-of">
-        <span class="ev2-lbl" id="ev2-{{ cell.id }}-tap-l">When tapped</span>
+        <span class="ev2-lbl"><span id="ev2-{{ cell.id }}-tap-l">When tapped</span>{{ info_pop('For touch panels.') }}</span>
         <input type="hidden" name="touch_json" data-touch-input
                value='{{ {"on_tap": cell.on_tap, "on_swipe": cell.on_swipe, "on_slide": cell.on_slide}|tojson }}'>
         <div data-touch-mount aria-labelledby="ev2-{{ cell.id }}-tap-l"
@@ -274,7 +292,6 @@
              data-default-axis="{% if cell.w >= cell.h %}x{% else %}y{% endif %}"
              data-pages-url="{{ url_for('pages.dashboards_json') }}"
              data-ha-url="{{ url_for('pages.ha_actions_json') }}"></div>
-        <p>For touch panels.</p>
       </div>
       <div class="ev2-of" data-ev2-pad>
         <label for="ev2-{{ cell.id }}-pad">Padding</label>
@@ -292,7 +309,7 @@
         </div>
       </div>
       <div class="ev2-of" data-ev2-dither>
-        <span class="ev2-lbl" id="ev2-{{ cell.id }}-dith-l">Dithering</span>
+        <span class="ev2-lbl"><span id="ev2-{{ cell.id }}-dith-l">Dithering</span>{{ info_pop('Flat is cleaner for solid blocks and line art. Only on e-ink panels the server converts.') }}</span>
         <input type="checkbox" name="dither_override_enabled" value="1" hidden {% if cell.dither is not none %}checked{% endif %} data-ev2-dither-on>
         <input type="hidden" name="dither_mode" value="{{ cell.dither or 'none' }}" data-ev2-dither-mode>
         <div class="ev2-seg ev2-seg--sm" role="group" aria-labelledby="ev2-{{ cell.id }}-dith-l">
@@ -300,7 +317,6 @@
           <button type="button" data-ev2-dither-set="auto" aria-pressed="{{ 'true' if cell.dither == 'auto' else 'false' }}">Smooth</button>
           <button type="button" data-ev2-dither-set="none" aria-pressed="{{ 'true' if cell.dither == 'none' else 'false' }}">Flat</button>
         </div>
-        <p>Flat is cleaner for solid blocks and line art. Only on e-ink panels the server converts.</p>
       </div>
     </div></div>
   </details>

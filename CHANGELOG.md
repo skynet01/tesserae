@@ -6,6 +6,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Dashboard editor: widget settings are compact, with switches in one list and short fields side by side.
 - Dashboard editor: widget status (like HA capture) shows at the bottom of the open row, and number fields show their units.
 - Show example values in empty widget inputs and explain Home Assistant theme names and language codes.
 - Fix HA dashboard clipping and add capture controls, fresh preview, and display-aware dithering.

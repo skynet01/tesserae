@@ -161,3 +161,137 @@ def option_sections(
     advanced = [s for s in all_specs if is_advanced(s)]
     more_visible = any(option_visible(s, values, all_specs) for s in advanced)
     return {"basic": basic, "advanced": advanced, "more_visible": more_visible}
+
+
+# ----- compact layout (dashboard editor v2) --------------------------------
+# A short control is one that reads fine at half the settings column
+# (about 145px on a 1440 screen, 160px on a phone): a number, a colour, a
+# time, a select whose longest choice is a short word or two, a text field
+# whose example is one. Everything else spans the row.
+_SHORT_TYPES = frozenset({"number", "color", "time"})
+_SWITCH_TYPES = frozenset({"boolean", "switch"})
+SHORT_CHOICE_CHARS = 14
+SHORT_LABEL_CHARS = 22
+# How many full-width fields a short one may be lifted over to pair with the
+# short one before it. More than this and the field is too far from where
+# the manifest put it.
+_MAX_LIFT = 2
+
+
+def _choice_label(choice: Any) -> str:
+    if isinstance(choice, Mapping):
+        return str(choice.get("label", choice.get("value", "")))
+    if isinstance(choice, list | tuple) and len(choice) > 1:
+        return str(choice[1])
+    return str(choice)
+
+
+def option_size(spec: Mapping[str, Any]) -> str:
+    """``switch``, ``short`` (half a row) or ``long`` (the whole row)."""
+    kind = spec.get("type", "string")
+    if kind in _SWITCH_TYPES:
+        return "switch"
+    if len(str(spec.get("label") or spec.get("name") or "")) > SHORT_LABEL_CHARS:
+        return "long"
+    if kind in _SHORT_TYPES:
+        presets = spec.get("presets") if kind == "number" else None
+        if presets and any(len(_choice_label(p)) > SHORT_CHOICE_CHARS for p in presets):
+            return "long"
+        return "short"
+    if kind == "string" and not spec.get("mask", spec.get("secret")):
+        # A short free-text answer: its example is a word or a code
+        # ("Home", "pt-BR", "0.00"), not a URL or a list of ids.
+        example = str(spec.get("placeholder") or spec.get("default") or "")
+        if example and len(example) <= SHORT_CHOICE_CHARS and "://" not in example:
+            return "short"
+        return "long"
+    if kind == "select" and "choices_note" not in spec:
+        choices = spec.get("choices") or []
+        if not choices or any(isinstance(c, Mapping) and c.get("image") for c in choices):
+            return "long"
+        if max(len(_choice_label(c)) for c in choices) <= SHORT_CHOICE_CHARS:
+            return "short"
+    return "long"
+
+
+def option_layout(
+    section: Iterable[Mapping[str, Any]],
+    values: Mapping[str, Any] | None,
+    specs: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """One section's options as the editor lays them out.
+
+    Every switch in the section goes into one group, where the first switch
+    was. The other fields keep manifest order on a two-column grid, short
+    ones side by side; a short field left alone before a full-width one is
+    joined by the next short field (lifted over at most two full-width ones,
+    never over a field it depends on). Returns blocks: ``{"kind":
+    "switches", "opts": [...]}`` and ``{"kind": "field", "size": "short" |
+    "long", "opt": spec}``. Visibility is the first render's; hidden fields
+    keep their place and the grid closes up around them."""
+    all_specs = [s for s in specs if isinstance(s, Mapping)]
+    opts = [s for s in section if isinstance(s, Mapping)]
+    switches = [s for s in opts if option_size(s) == "switch"]
+    items: list[dict[str, Any]] = []
+    for spec in opts:
+        size = option_size(spec)
+        if size == "switch":
+            if spec is switches[0]:
+                items.append({"kind": "switches", "opts": switches, "size": "long"})
+            continue
+        items.append({"kind": "field", "size": size, "opt": spec})
+
+    def shown(item: dict[str, Any]) -> bool:
+        if item["kind"] == "switches":
+            return any(option_visible(s, values, all_specs) for s in item["opts"])
+        return option_visible(item["opt"], values, all_specs)
+
+    out: list[dict[str, Any]] = []
+    half = False  # a short field sits alone in the current row
+    pending = list(items)
+    while pending:
+        item = pending.pop(0)
+        if not shown(item):
+            out.append(item)
+            continue
+        if item["size"] == "short":
+            out.append(item)
+            half = not half
+            continue
+        if half:
+            lifted = _lift_short(item, pending, shown)
+            if lifted is not None:
+                out.append(lifted)
+                half = False
+                pending.insert(0, item)
+                continue
+        out.append(item)
+        half = False
+    return out
+
+
+def _lift_short(
+    first: dict[str, Any], pending: list[dict[str, Any]], shown: Any
+) -> dict[str, Any] | None:
+    """Take the next shown short field out of ``pending`` if it may move up
+    over ``first`` and the full-width fields after it."""
+    skipped = [first]
+    for i, item in enumerate(pending):
+        if not shown(item):
+            skipped.append(item)
+            continue
+        if item["size"] != "short":
+            if sum(1 for s in skipped if shown(s)) >= _MAX_LIFT:
+                return None
+            skipped.append(item)
+            continue
+        cond = item["opt"].get("show_if")
+        needs = set(cond) if isinstance(cond, Mapping) else set()
+        names: set[str] = set()
+        for s in skipped:
+            for spec in s["opts"] if s["kind"] == "switches" else [s["opt"]]:
+                names.add(str(spec.get("name")))
+        if needs & names:
+            return None
+        return pending.pop(i)
+    return None
