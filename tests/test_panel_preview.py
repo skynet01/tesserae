@@ -42,3 +42,23 @@ def test_preview_roundtrips_panel_pixel_values(app, renderer_id, gamut, size):
     original = renderer.transform(out.getvalue(), panel=panel, settings=settings)
     repacked = renderer.transform(preview, panel=panel, settings={**settings, "dither": "none"})
     assert repacked == original
+
+
+def test_preview_paints_a_calibrated_device_in_its_measured_inks(app):
+    """A device with a palette profile is previewed in the profile's colours, as the glass shows
+    them; the pixel decisions (which ink goes where) stay the packer's."""
+    from app.palette_profiles.bundled import bundled_profile
+
+    profile = bundled_profile("paperlesspaper-spectra6")
+    assert profile is not None
+    renderer = app.config["RENDERER_REGISTRY"].get("esp32_bin")
+    image = Image.new("RGB", (16, 8), (255, 255, 255))
+    image.paste((0, 0, 0), (0, 0, 8, 8))
+    out = io.BytesIO()
+    image.save(out, "PNG")
+    panel = Panel(w=16, h=8, gamut="waveshare_e6")
+    settings = {"dither": "floyd-steinberg", "_palette_override": profile.palette.as_tuples()}
+    preview = render_panel_preview(out.getvalue(), renderer=renderer, panel=panel, settings=settings)
+    with Image.open(io.BytesIO(preview)) as decoded:
+        assert decoded.convert("RGB").getpixel((2, 2)) == (0x1F, 0x22, 0x26)
+        assert decoded.convert("RGB").getpixel((12, 2)) == (0xB9, 0xC7, 0xC9)
