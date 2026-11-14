@@ -1504,6 +1504,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A long name ends in an ellipsis; its family tag stays whole after it. */
+.ev2-cl-n b > .ev2-tag {
+  flex: none;
+  margin-left: 0;
+}
 .ev2-cl-n small {
   display: block;
   overflow: hidden;

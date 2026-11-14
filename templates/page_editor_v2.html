@@ -558,7 +558,7 @@
                     <span class="ev2-grip" draggable="true" title="Drag onto another row to swap the widgets, or press Alt+Up or Alt+Down on the row" aria-hidden="true">{{ ico('dots-six-vertical', 'ph-bold') }}</span>
                     <span class="ev2-cl-n">
                       {% if cell.plugin %}
-                      <b><i class="ph {{ e.icon or 'ph-squares-four' }}" aria-hidden="true"></i><span class="nm">{{ e.item or (plugin.name if plugin else cell.plugin) }}{% if e.family %} <span class="ev2-tag">{{ e.family }}</span>{% endif %}</span></b>
+                      <b><i class="ph {{ e.icon or 'ph-squares-four' }}" aria-hidden="true"></i><span class="nm">{{ e.item or (plugin.name if plugin else cell.plugin) }}</span>{% if e.family %}<span class="ev2-tag">{{ e.family }}</span>{% endif %}</b>
                       {% set _sum = cell_summary(cell, plugin) | trim if plugin else 'Widget not installed' %}
                       {% if _sum %}<small>{{ _sum }}</small>{% endif %}
                       {% else %}

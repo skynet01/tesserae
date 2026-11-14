@@ -58,7 +58,7 @@ from app.lineup_cascade import (
     remove_page_from_lineups,
 )
 from app.location_time import is_iana_zone
-from app.option_conditions import canonical_value
+from app.option_conditions import canonical_value, carried_value
 from app.panel import (
     DESIGN_SIZES,
     device_panel,
@@ -1938,9 +1938,18 @@ def _apply_cell_form(cell: Cell, form: Any, panel: Any) -> Cell:
             new_option_names = {
                 str(opt["name"]) for opt in plugin.manifest.get("cell_options", []) if "name" in opt
             }
-            preserved = {
-                name: value for name, value in cell.options.items() if name in new_option_names
+            # Same name is not same choices: a value the new widget's
+            # select doesn't list falls back to its default.
+            specs_by_name = {
+                str(opt["name"]): opt for opt in plugin.manifest.get("cell_options", []) if "name" in opt
             }
+            preserved = {}
+            for name, value in cell.options.items():
+                if name not in new_option_names:
+                    continue
+                keep, carried = carried_value(specs_by_name[name], value)
+                if keep:
+                    preserved[name] = carried
             options = {**plugin.cell_option_defaults(), **preserved}
     elif plugin is not None:
         options = _cell_options_from_form(plugin, form)

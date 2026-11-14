@@ -385,6 +385,33 @@ def test_layout_sizes() -> None:
     assert option_size({"type": "number", "label": "A label far too long for half a row"}) == "long"
 
 
+def test_short_fields_fit_by_width_not_just_by_count() -> None:
+    """m and w are three times as wide as i and l, so a count alone let
+    "Most comments" (13 characters) into a half-width select it overflows,
+    and an "i" button wrap under "Avoid repeats (days)"."""
+    from app.option_conditions import option_size
+
+    fits = {"type": "select", "label": "Time shown", "choices": ["Arrival time", "Departure time"]}
+    assert option_size(fits) == "short"
+    wide = {"type": "select", "label": "Prioritize", "choices": ["Newest", "Most comments"]}
+    assert option_size(wide) == "long"
+    assert option_size({"type": "number", "label": "Avoid repeats (days)"}) == "short"
+    assert option_size({"type": "number", "label": "Avoid repeats (days)", "help": "x"}) == "long"
+    assert option_size({"type": "string", "label": "Name", "placeholder": "Mmmmmmmmmmm"}) == "long"
+    assert option_size({"type": "string", "label": "Name", "placeholder": "illustration"}) == "short"
+
+
+def test_a_marked_blank_row_is_a_guidance_note() -> None:
+    from app.widget_choices import guidance_note
+
+    row = {"value": "", "label": "Add an Immich library under Settings → Widgets."}
+    assert guidance_note([row]) is None
+    assert guidance_note([dict(row, note=True)]) == row["label"]
+    assert guidance_note([dict(row, note=True), {"value": "a", "label": "A"}]) is None
+    assert guidance_note([{"value": "", "label": "", "note": True}]) is None
+    assert guidance_note([{"value": "", "label": "Set HA URL + token in Settings"}])
+
+
 def test_layout_lifts_the_next_short_field_into_a_hole() -> None:
     specs = [
         {"name": "count", "type": "number", "label": "How many"},

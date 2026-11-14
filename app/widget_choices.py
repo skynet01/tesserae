@@ -22,6 +22,7 @@ def choice_rows(plugin: Any, spec: dict[str, Any]) -> list[dict[str, Any]]:
 
 # Labels of the single blank row a provider returns when it can't list
 # anything at all (as opposed to a real empty value like "(no folders yet)").
+# Any widget can say the same with ``"note": true`` on that row.
 GUIDANCE_PREFIXES = ("Set HA URL + token", "Home Assistant unreachable", "Stored secret for")
 
 
@@ -32,7 +33,11 @@ def guidance_note(rows: Any) -> str | None:
         and len(rows) == 1
         and isinstance(rows[0], dict)
         and rows[0].get("value") == ""
-        and str(rows[0].get("label") or "").startswith(GUIDANCE_PREFIXES)
+        and (
+            rows[0].get("note") is True
+            or str(rows[0].get("label") or "").startswith(GUIDANCE_PREFIXES)
+        )
+        and str(rows[0].get("label") or "").strip()
     ):
         return str(rows[0]["label"])
     return None

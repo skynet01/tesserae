@@ -108,6 +108,45 @@ def canonical_value(spec: Mapping[str, Any], value: Any) -> Any:
     return found if matched else value
 
 
+def _static_choice_values(spec: Mapping[str, Any]) -> set[str] | None:
+    """The values a select / multiselect lists in its manifest, or None when
+    they come from elsewhere (``choices_from``) or aren't declared."""
+    choices = spec.get("choices")
+    if spec.get("type") not in ("select", "multiselect") or spec.get("choices_from"):
+        return None
+    if not isinstance(choices, list) or not choices:
+        return None
+    out: set[str] = set()
+    for c in choices:
+        if isinstance(c, Mapping):
+            out.add(_as_text(c.get("value", "")))
+        elif isinstance(c, list | tuple) and c:
+            out.add(_as_text(c[0]))
+        else:
+            out.add(_as_text(c))
+    return out
+
+
+def carried_value(spec: Mapping[str, Any], value: Any) -> tuple[bool, Any]:
+    """Whether ``value``, saved under another widget's option of the same
+    name, still means something to this ``spec``, and as what.
+
+    Replacing a widget keeps the options both widgets declare. Same name is
+    not same choices: the photo widgets all have ``orientation``, but only
+    Google's lists ``splitview``. A choice this widget doesn't list drops
+    (the cell gets the default); a multiselect keeps the picks it lists."""
+    allowed = _static_choice_values(spec)
+    if allowed is None:
+        return True, value
+    if spec.get("type") == "multiselect":
+        if not isinstance(value, list):
+            return False, None
+        kept = [v for v in value if _as_text(v) in allowed]
+        return (bool(kept) or not value), kept
+    value = canonical_value(spec, value)
+    return _as_text(value) in allowed, value
+
+
 def option_visible(
     spec: Mapping[str, Any],
     values: Mapping[str, Any] | None,
@@ -178,6 +217,39 @@ SHORT_LABEL_CHARS = 22
 # help): about 60px of label with an "i", 84px without.
 PAIR_SWITCH_CHARS = 8
 PAIR_SWITCH_CHARS_NO_HELP = 11
+# A character count can't tell "Departure time" (fits a half-width select)
+# from "Most comments" (doesn't): m and w are three times as wide as i and
+# l. So a short field's text must also fit by width, estimated with the
+# editor's own font (Archivo, 14px; labels are 13px semibold, 4% narrower).
+# The room is the 1440 layout's, the narrower of the two: 99px inside a
+# half-width select, 119px inside a text box, 145px of label, 24px of it
+# the "i" button when there is help.
+_CHAR_PX = {
+    ch: px
+    for px, chars in (
+        (3.0, " 'ijl`"), (3.5, "I|"), (4.0, "!,./:;[\\]ft"), (4.5, "-r"), (5.0, "\"(){}"),
+        (5.5, "*"), (7.0, "$_ksvxyz"), (7.5, "17Lace"), (8.0, "02345689#?Jbdghnopqu"),
+        (8.5, "FT"), (9.0, "+<=>VYZ^~"), (9.5, "&AEKPSX"), (10.0, "BCRUw"), (10.5, "DHN"),
+        (11.0, "GOQ"), (12.0, "Mm"), (13.0, "W"), (13.5, "%"), (14.0, "@"),
+    )
+    for ch in chars
+}
+SHORT_CHOICE_PX = 98
+SHORT_TEXT_PX = 118
+SHORT_LABEL_PX = 144
+_INFO_BUTTON_PX = 24
+_LABEL_SCALE = 0.96
+
+
+def text_px(text: str) -> float:
+    """``text``'s width in the editor's 14px field font, near enough."""
+    return sum(_CHAR_PX.get(ch, 8.0) for ch in text)
+
+
+def _label_fits(spec: Mapping[str, Any]) -> bool:
+    label = str(spec.get("label") or spec.get("name") or "")
+    room = SHORT_LABEL_PX - (_INFO_BUTTON_PX if spec.get("help") else 0)
+    return len(label) <= SHORT_LABEL_CHARS and text_px(label) * _LABEL_SCALE <= room
 # How many full-width items a short one may be lifted over to pair with the
 # short one before it. More than this and it is too far from where the
 # manifest put it.
@@ -197,27 +269,37 @@ def option_size(spec: Mapping[str, Any]) -> str:
     kind = spec.get("type", "string")
     if kind in _SWITCH_TYPES:
         return "switch"
-    if len(str(spec.get("label") or spec.get("name") or "")) > SHORT_LABEL_CHARS:
+    if not _label_fits(spec):
         return "long"
     if kind in _SHORT_TYPES:
         presets = spec.get("presets") if kind == "number" else None
-        if presets and any(len(_choice_label(p)) > SHORT_CHOICE_CHARS for p in presets):
+        if presets and not all(_choice_fits(p) for p in presets):
             return "long"
         return "short"
     if kind == "string" and not spec.get("mask", spec.get("secret")):
         # A short free-text answer: its example is a word or a phrase
         # ("Home", "pt-BR", "Google Dark Theme"), not a URL or a list of ids.
         example = str(spec.get("placeholder") or spec.get("default") or "")
-        if example and len(example) <= SHORT_TEXT_CHARS and "://" not in example:
+        if (
+            example
+            and len(example) <= SHORT_TEXT_CHARS
+            and text_px(example) <= SHORT_TEXT_PX
+            and "://" not in example
+        ):
             return "short"
         return "long"
     if kind == "select" and "choices_note" not in spec:
         choices = spec.get("choices") or []
         if not choices or any(isinstance(c, Mapping) and c.get("image") for c in choices):
             return "long"
-        if max(len(_choice_label(c)) for c in choices) <= SHORT_CHOICE_CHARS:
+        if all(_choice_fits(c) for c in choices):
             return "short"
     return "long"
+
+
+def _choice_fits(choice: Any) -> bool:
+    label = _choice_label(choice)
+    return len(label) <= SHORT_CHOICE_CHARS and text_px(label) <= SHORT_CHOICE_PX
 
 
 def switch_pairs(spec: Mapping[str, Any]) -> bool:

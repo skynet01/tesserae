@@ -270,6 +270,16 @@ The function returns a list of `{value, label}` dicts. Errors render
 as an empty dropdown (the host catches + logs), so prefer returning
 `[]` over raising.
 
+When there is nothing to list yet and the user has to do something
+first (connect an account, add a library), return one blank row that
+says so, marked `"note": true`. The dashboard editor shows that label
+once, above the widget's options, instead of squeezing it into the
+dropdown:
+
+```python
+return [{"value": "", "label": "Add an Immich library under Settings → Widgets.", "note": True}]
+```
+
 **Important:** the host calls `choices()` on the **same plugin** as
 the manifest, never on a sibling. If your widget reads data from a
 companion `_core` plugin, you still expose `choices()` on the widget
