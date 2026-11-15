@@ -397,6 +397,10 @@
           ? `<span class="lu-count is-draw" title="${drawN > 1 ? `Draws one of ${drawN} at random` : "A random one each time it is sent"}">${drawN > 1 ? `×${drawN}` : "random"}</span>`
           : "";
     const hook = (name) => (ui && ui[name] ? ui[name](s) || "" : "");
+    // The zoom icon shows when there is a picture to zoom. A surface whose tiles carry a
+    // full-cover button (the lineup editor) sets ``zoomBeside``: inside the thumbnail the
+    // icon shares its stacking layer and ends up under that button.
+    const zoomOk = !!s.thumb_url && !s.missing && !s.off_display;
     const cond = s.conditional
       ? ` <span title="Shows only while its conditions pass">${ico("funnel")}</span>`
       : "";
@@ -415,7 +419,7 @@
           : "";
     return (
       `<li class="lu-step${cls ? " " + cls : ""}${s.missing ? " is-missing" : ""}${s.off_display ? " is-offdisplay" : ""}${hook("stepClass") ? " " + hook("stepClass") : ""}" data-step="${esc(ui && ui.stepKey ? ui.stepKey(s) : s.index)}"${hook("stepAttrs")}${s.missing ? ' title="This dashboard was deleted; remove it from the lineup"' : s.off_display ? ` title="${esc(s.off_display_note)}"` : ""}><figure><span class="lu-slot">${pill}</span>` +
-      `<span class="lu-tile${stacked ? " stacked" : ""}${canPick ? " has-items" : ""}${choice && choice.state === "loading" ? " is-loading" : ""}${choice && (choice.state === "error" || choice.state === "busy") ? " is-itemfail" : ""}">${thumb(s.name, picked || s.thumb_url, s.aspect, d.orientation || s.orientation, s.missing ? "missing" : s.off_display ? "offdisplay" : "", null, false, d, s.thumb_url && !s.missing && !s.off_display ? zoomBtn(`step:${l.id}:${s.index}`, `Zoom ${s.name}`) : "")}<span class="lu-scrim" aria-hidden="true"></span>${push}${items}<span class="lu-pushed-msg" aria-hidden="true"></span>${count}${hook("tileExtra")}</span>` +
+      `<span class="lu-tile${stacked ? " stacked" : ""}${canPick ? " has-items" : ""}${choice && choice.state === "loading" ? " is-loading" : ""}${choice && (choice.state === "error" || choice.state === "busy") ? " is-itemfail" : ""}">${thumb(s.name, picked || s.thumb_url, s.aspect, d.orientation || s.orientation, s.missing ? "missing" : s.off_display ? "offdisplay" : "", null, false, d, zoomOk && !(ui && ui.zoomBeside) ? zoomBtn(`step:${l.id}:${s.index}`, `Zoom ${s.name}`) : "")}<span class="lu-scrim" aria-hidden="true"></span>${push}${items}<span class="lu-pushed-msg" aria-hidden="true"></span>${count}${zoomOk && ui && ui.zoomBeside ? zoomBtn(`step:${l.id}:${s.index}`, `Zoom ${s.name}`) : ""}${hook("tileExtra")}</span>` +
       `<figcaption><span class="lu-step-name">${esc(s.name)}</span><span class="lu-step-meta">${esc(s.position)}${cond}</span>${off}${hook("captionExtra")}</figcaption></figure>${sep}</li>`
     );
   }
