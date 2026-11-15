@@ -1556,6 +1556,17 @@ def test_push_sends_the_page_again_after_a_refresh_hint(
         assert manager.pending_followup("home") is None, "no hint, no follow-up"
 
 
+def test_a_warm_never_schedules_a_follow_up_push(tmp_path: Path, composition_png: bytes) -> None:
+    """A deck warm of a page still painting must not queue a follow-up: the
+    follow-up is a real push, so a print page warmed for a lineup that is off
+    would land on the display after the print ended."""
+    manager, _client, _ = _wired_bound(tmp_path, composition_png)
+    hint = {"regions": [], "slots": [], "refresh_s": 3}
+    with patch("app.push.capture_composed", return_value=(_distinct_png((0, 0, 255)), hint)):
+        assert manager.warm_deck_page("home", "kitchen") is True
+    assert manager.pending_followup("home") is None
+
+
 def test_a_send_waits_for_the_page_to_finish_painting(
     tmp_path: Path, composition_png: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:

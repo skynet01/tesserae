@@ -2908,7 +2908,10 @@ class PushManager:
         # ``failed`` when any group failed.
         good = [r for r in group_results if r.status in ("sent", "no_change")]
         failed = [r for r in group_results if r not in good]
-        if refresh_wanted and good:
+        # A warm only fills the side cache: its follow-up would be a real push,
+        # painting a page whose lineup isn't on the display (a print page after
+        # the print ended). The next warm picks up whatever was still painting.
+        if refresh_wanted and good and source not in ("deck_warm", "album_warm"):
             self._schedule_followup(page_id, device_ids, refresh_wanted, followup)
         if not group_results:
             status: PushStatus = "failed"
