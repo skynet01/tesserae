@@ -58,7 +58,9 @@ def test_preview_paints_a_calibrated_device_in_its_measured_inks(app):
     image.save(out, "PNG")
     panel = Panel(w=16, h=8, gamut="waveshare_e6")
     settings = {"dither": "floyd-steinberg", "_palette_override": profile.palette.as_tuples()}
-    preview = render_panel_preview(out.getvalue(), renderer=renderer, panel=panel, settings=settings)
+    preview = render_panel_preview(
+        out.getvalue(), renderer=renderer, panel=panel, settings=settings
+    )
     with Image.open(io.BytesIO(preview)) as decoded:
         assert decoded.convert("RGB").getpixel((2, 2)) == (0x1F, 0x22, 0x26)
         assert decoded.convert("RGB").getpixel((12, 2)) == (0xB9, 0xC7, 0xC9)

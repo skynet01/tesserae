@@ -10,7 +10,12 @@ from app.state.conditions import Condition
 
 
 def _cond(**kw: Any) -> Condition:
-    base = {"source_kind": "ha_entity", "source_id": "sensor.p1s_print_status", "operator": "==", "value": "running"}
+    base = {
+        "source_kind": "ha_entity",
+        "source_id": "sensor.p1s_print_status",
+        "operator": "==",
+        "value": "running",
+    }
     return Condition(**{**base, **kw})
 
 

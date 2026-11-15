@@ -265,9 +265,7 @@ def test_new_lineup_round_trip_keeps_dashboard_and_returns_to_open_step(
         step = "lineup" if is_new else "schedules"
         page.evaluate("key => EV2.steps.open(key)", step)
         page.locator("[data-ev2-lopen]").click()
-        page.get_by_role(
-            "link", name="Make a new lineup", exact=True
-        ).click()
+        page.get_by_role("link", name="Make a new lineup", exact=True).click()
         query = parse_qs(urlsplit(page.url).query)
         assert query["page_id"] == [PAGE_ID]
         assert query.get("display") == (None if is_new else ["hall"])
@@ -278,9 +276,7 @@ def test_new_lineup_round_trip_keeps_dashboard_and_returns_to_open_step(
         page.locator('[data-fk="f-cancel"]').click()
         page.wait_for_function("key => EV2.steps.current() === key", arg=step)
         page.locator("[data-ev2-lopen]").click()
-        page.get_by_role(
-            "link", name="Make a new lineup", exact=True
-        ).click()
+        page.get_by_role("link", name="Make a new lineup", exact=True).click()
         page.locator("#dxe-title").fill("Dashboard round trip")
         if is_new:
             page.locator('[data-pick-display="hall"]').click()
@@ -346,7 +342,9 @@ def test_look_warning_updates_and_reset_keeps_widget_options(
         box.locator('[data-ev2-setting="opt_dark_mode"]').click()
         theme = page.locator('[name="opt_dark_mode"]')
         assert theme.evaluate("el => document.activeElement === el")
-        theme.evaluate("el => { el.checked = false; el.dispatchEvent(new Event('change', {bubbles: true})); }")
+        theme.evaluate(
+            "el => { el.checked = false; el.dispatchEvent(new Event('change', {bubbles: true})); }"
+        )
         _wait_for(
             lambda: _cell(app, PAGE_ID, "c1").options.get("dark_mode") is False,
             "widget dark mode cleared",
@@ -354,7 +352,9 @@ def test_look_warning_updates_and_reset_keeps_widget_options(
         )
         assert box.get_attribute("hidden") is not None
         assert "override" not in page.locator('[data-ev2-sum="look"]').inner_text()
-        theme.evaluate("el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles: true})); }")
+        theme.evaluate(
+            "el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles: true})); }"
+        )
         page.locator('[data-ev2-toggle="look"]').click()
         assert "uses its own dark mode" in box.inner_text()
         assert "1 widget overrides it" in page.locator('[data-ev2-sum="look"]').inner_text()
