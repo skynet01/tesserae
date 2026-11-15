@@ -1,9 +1,10 @@
 """ha_dashboard: an existing Home Assistant dashboard captured as a frame.
 
 The plugin module is loaded standalone (the test_ha_cache pattern) with a
-bare Flask app carrying a stub ha_core in the plugin registry. Pixel checks
-cover the capture size and offsets; Chromium exercises header visibility
-and capture-only preferences across Home Assistant's shadow roots.
+bare Flask app carrying a stub ha_core in the plugin registry. The browser
+is replaced by a fake ``_capture`` that returns a synthetic PNG whose top
+``header_px`` rows are red, so the crop is checked by pixel rather than by
+trusting the arithmetic.
 """
 
 from __future__ import annotations
@@ -12,10 +13,8 @@ import base64
 import importlib.util
 import io
 import json
-import os
 import threading
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -55,6 +54,9 @@ class _FakeBrowser:
     def __init__(self) -> None:
         self.requests: list[RenderRequest] = []
         self.href = BASE + "/lovelace/0"
+        # The zoom a fit left on the page; None when the page ran no fit.
+        self.zoom: float | None = None
+        self.header: int | None = None
         self.delay_s = 0.0
         self.fail: Exception | None = None
         self.lock = threading.Lock()
@@ -67,7 +69,10 @@ class _FakeBrowser:
         if self.fail is not None:
             raise self.fail
         header = request.viewport_h - 480 if request.viewport_h > 480 else 0
-        return _png(request.viewport_w, request.viewport_h, header), self.href
+        if self.header is not None:
+            header = self.header
+        png = _png(request.viewport_w, request.viewport_h, header)
+        return png, {"href": self.href, "zoom": self.zoom}
 
 
 @pytest.fixture
@@ -152,6 +157,69 @@ def test_init_script_seeds_the_frontend_session(widget: Any) -> None:
     assert "const zoom = 1.5;" in script
 
 
+def _selected_theme(script: str) -> dict[str, Any]:
+    """The ``selectedTheme`` record the init script writes to localStorage."""
+    literal = script.split("const entries = ", 1)[1].split(";\n", 1)[0]
+    return json.loads(json.loads(literal)["selectedTheme"])
+
+
+def test_init_script_names_no_theme_by_default(widget: Any) -> None:
+    p = widget.Params("/lovelace/0", 800, 480, 1.0, False, True, 2.0)
+    assert _selected_theme(widget.init_script(BASE, TOKEN, p)) == {"dark": False}
+
+
+def test_init_script_selects_the_named_theme(widget: Any) -> None:
+    p = widget.Params("/lovelace/0", 800, 480, 1.0, True, True, 2.0, 'E-ink "paper"')
+    assert _selected_theme(widget.init_script(BASE, TOKEN, p)) == {
+        "dark": True,
+        "theme": 'E-ink "paper"',
+    }
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, ""), ("", ""), ("  Graphite  ", "Graphite"), ("default", ""), ("Default", "")],
+)
+def test_theme_option_is_trimmed_and_default_means_none(
+    widget: Any, raw: Any, expected: str
+) -> None:
+    assert widget._params({"theme": raw}, _ctx()).theme == expected
+
+
+def test_init_script_keeps_the_token_owners_saved_theme_out_of_the_capture(widget: Any) -> None:
+    """Newer frontends sync the theme per user on the server, and that value
+    beats localStorage. The capture must not read (or write) it."""
+    p = widget.Params("/lovelace/0", 800, 480, 1.0, False, True, 2.0, "Graphite Light")
+    script = widget.init_script(BASE, TOKEN, p)
+    assert "WebSocket.prototype.send = function" in script
+    assert "/^frontend\\/(get|subscribe|set)_user_data$/" in script
+    assert 'msg.key === "theme"' in script
+    assert f'msg.key = "{widget.THEME_USER_DATA_KEY}"' in script
+    # Applies with no theme chosen too: light/dark alone must also hold.
+    plain = widget.Params("/lovelace/0", 800, 480, 1.0, False, True, 2.0)
+    assert widget.THEME_REDIRECT_JS in widget.init_script(BASE, TOKEN, plain)
+
+
+def test_theme_choices_come_from_ha_core(widget: Any, app: Flask) -> None:
+    rows = [{"value": "", "label": "Home Assistant default"}, {"value": "Ink", "label": "Ink"}]
+    app.config["PLUGIN_REGISTRY"]["ha_core"].server_module.theme_choices = lambda: rows
+    with app.app_context():
+        assert widget.choices("theme") == rows
+        assert widget.choices("something_else") == []
+        app.config["PLUGIN_REGISTRY"] = {}
+        assert widget.choices("theme") == []
+
+
+def test_theme_change_renders_a_new_frame(widget: Any, browser: _FakeBrowser, app: Flask) -> None:
+    with app.app_context():
+        widget.fetch({}, {}, ctx=_ctx())
+        widget.fetch({}, {}, ctx=_ctx())
+        assert len(browser.requests) == 1
+        widget.fetch({"theme": "Graphite"}, {}, ctx=_ctx())
+    assert len(browser.requests) == 2
+    assert _selected_theme(browser.requests[1].init_script)["theme"] == "Graphite"
+
+
 # -- the render -------------------------------------------------------------
 
 
@@ -171,10 +239,10 @@ def test_first_fetch_renders_and_crops_the_header(
     (request,) = browser.requests
     assert request.url == BASE + "/lovelace/0?kiosk"
     assert request.viewport_w == 800
-    assert request.viewport_h == 480
+    assert request.viewport_h == 480 + 56
     assert request.is_composer is False
     assert request.max_attempts == 1
-    assert request.ready_js == widget.ready_script(widget._params({}, _ctx()))
+    assert request.ready_js == widget.READY_JS
     assert request.settle_ms == 2000
     assert request.timezone_id == "Europe/London"
     assert request.ignore_https_errors is False
@@ -183,128 +251,85 @@ def test_first_fetch_renders_and_crops_the_header(
     assert TOKEN not in json.dumps(data)
 
 
-def test_zoom_preserves_the_requested_viewport(
-    widget: Any, browser: _FakeBrowser, app: Flask
-) -> None:
+def test_zoom_scales_the_header_crop(widget: Any, browser: _FakeBrowser, app: Flask) -> None:
     with app.app_context():
         data = widget.fetch({"zoom": "1.5"}, {}, ctx=_ctx())
     (request,) = browser.requests
-    assert request.viewport_h == 480
+    assert request.viewport_h == 480 + 84
     assert _decode(data).size == (800, 480)
 
 
-def test_headerless_dashboard_keeps_its_first_row(
-    widget: Any, monkeypatch: pytest.MonkeyPatch
+def test_a_dashboard_without_a_header_is_not_cropped(
+    widget: Any, browser: _FakeBrowser, app: Flask
 ) -> None:
-    def capture(request: RenderRequest, script: str) -> tuple[bytes, Any]:
-        im = Image.new("RGB", (request.viewport_w, request.viewport_h), "white")
-        im.paste("lime", (0, 0, 800, 8))
-        out = io.BytesIO()
-        im.save(out, "PNG")
-        return out.getvalue(), BASE + "/office-eink-status/0"
-
-    monkeypatch.setattr(widget, "_capture", capture)
-    png = widget.render_frame(widget._params({}, _ctx()), base_url=BASE, token=TOKEN)
-    with Image.open(io.BytesIO(png)) as image:
-        assert image.size == (800, 480)
-        assert image.getpixel((0, 0)) == (0, 255, 0)
+    """kiosk-mode (or a theme) already hid the header: cropping 56 px would cut the cards."""
+    with app.app_context():
+        data = widget.fetch({"zoom": "1.5", "header_hidden": True}, {}, ctx=_ctx())
+    (request,) = browser.requests
+    assert request.viewport_h == 480
+    assert _decode(data).size == (800, 480)
+    params = widget._params({"header_hidden": True, "fit": True}, _ctx())
+    assert params.header_px == 0 and params.header_at(0.5) == 0
+    assert '"header": 0' in widget.ready_script(params)
+    assert widget._params({}, _ctx()).header_hidden is False
 
 
-@pytest.mark.parametrize("x,y", [(12, 7), (-12, -7)])
-def test_canvas_offsets_move_pixels_without_resizing(
-    widget: Any, monkeypatch: pytest.MonkeyPatch, x: int, y: int
+def test_fit_is_off_by_default(widget: Any) -> None:
+    assert widget._params({}, _ctx()).fit is False
+    assert widget._params({"fit": True}, _ctx()).fit is True
+    plain = widget.Params("/lovelace/0", 800, 480, 1.0, False, True, 2.0)
+    assert widget.ready_script(plain) == widget.READY_JS
+
+
+def test_fit_ready_script_searches_below_the_chosen_zoom(widget: Any) -> None:
+    p = widget.Params("/lovelace/0", 800, 480, 1.5, False, True, 2.0, "", True)
+    script = widget.ready_script(p)
+    # Still the frontend's own loaded check first, then the search.
+    assert script.startswith(widget.READY_JS[:200])
+    assert 'if ("_loading" in panel && panel._loading) return false;' in script
+    config = json.loads(script.split("const fit = ", 1)[1].split(";\n", 1)[0])
+    assert config["max"] == 1.5
+    assert config["min"] == widget.FIT_MIN_ZOOM
+    assert config["height"] == 480
+    assert config["header"] == widget.HEADER_PX
+    assert "__FIT__" not in script
+    assert script.rstrip().endswith("}")
+
+
+def test_fit_crops_the_header_at_the_zoom_the_page_ended_on(
+    widget: Any, browser: _FakeBrowser, app: Flask
 ) -> None:
-    def capture(request: RenderRequest, script: str) -> tuple[bytes, Any]:
-        im = Image.new("RGB", (request.viewport_w, request.viewport_h), "white")
-        im.putpixel((40, 30), (255, 0, 0))
-        out = io.BytesIO()
-        im.save(out, "PNG")
-        return out.getvalue(), BASE + "/lovelace/0"
+    # The page shrank itself to 50%, so its header is 28 px, not 56.
+    browser.zoom = 0.5
+    browser.header = 28
+    with app.app_context():
+        data = widget.fetch({"fit": True}, {}, ctx=_ctx())
+    (request,) = browser.requests
+    assert request.viewport_h == 480 + 56
+    assert request.ready_js == widget.ready_script(widget._params({"fit": True}, _ctx()))
+    assert request.ready_timeout_ms == widget.FIT_READY_TIMEOUT_MS
+    im = _decode(data).convert("RGB")
+    assert im.size == (800, 480)
+    assert im.getpixel((0, 0)) == (0, 128, 255)  # header row gone
+    assert im.getpixel((799, 479)) == (0, 128, 255)
 
-    monkeypatch.setattr(widget, "_capture", capture)
-    params = widget._params({"offset_x": x, "offset_y": y}, _ctx())
-    png = widget.render_frame(params, base_url=BASE, token=TOKEN)
-    with Image.open(io.BytesIO(png)) as image:
-        assert image.size == (800, 480)
-        assert image.getpixel((40 + x, 30 + y)) == (255, 0, 0)
-        assert image.getpixel((40, 30)) == (255, 255, 255)
 
-
-def test_pending_capture_tells_the_editor_to_poll(
-    widget: Any, browser: _FakeBrowser, app: Flask, monkeypatch: pytest.MonkeyPatch
+def test_fit_that_changed_nothing_crops_the_full_header(
+    widget: Any, browser: _FakeBrowser, app: Flask
 ) -> None:
-    monkeypatch.setattr(widget, "FIRST_WAIT_S", 0.01)
-    browser.delay_s = 0.2
+    browser.zoom = 1.0
+    with app.app_context():
+        data = widget.fetch({"fit": True}, {}, ctx=_ctx())
+    assert _decode(data).convert("RGB").getpixel((0, 0)) == (0, 128, 255)
+
+
+def test_a_reported_zoom_is_ignored_when_fit_is_off(
+    widget: Any, browser: _FakeBrowser, app: Flask
+) -> None:
+    browser.zoom = 0.5
     with app.app_context():
         data = widget.fetch({}, {}, ctx=_ctx())
-    assert data["live_refresh_s"] == 2
-    for job in list(widget._jobs.values()):
-        job.done.wait(3)
-
-
-@pytest.mark.parametrize("header_visible,hide_header", [(True, True), (False, True), (True, False)])
-def test_capture_hides_only_header_and_seeds_theme_language(
-    widget: Any, header_visible: bool, hide_header: bool
-) -> None:
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as pw:
-        executable = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE", pw.chromium.executable_path)
-        if not Path(executable).exists():
-            pytest.skip("Playwright Chromium not installed")
-        browser = pw.chromium.launch(executable_path=executable)
-        page = browser.new_page(viewport={"width": 800, "height": 480})
-        page.route("http://ha.test/", lambda route: route.fulfill(body="<body></body>"))
-        page.goto("http://ha.test/")
-        params = widget._params(
-            {"ha_theme": "Graphite", "language": "es", "hide_header": hide_header}, _ctx()
-        )
-        page.evaluate(widget.init_script(BASE, TOKEN, params))
-        assert page.evaluate("JSON.parse(localStorage.selectedTheme).theme") == "Graphite"
-        assert page.evaluate("JSON.parse(localStorage.selectedLanguage)") == "es"
-        page.evaluate(
-            """visible => {
-          function child(parent, tag) {
-            const el = document.createElement(tag); parent.appendChild(el);
-            el.attachShadow({mode:'open'}); return el;
-          }
-          const ha = child(document.body, 'home-assistant');
-          ha.hass = {selectedTheme: {theme:'Account theme'}};
-          ha._updateHass = delta => Object.assign(ha.hass, delta);
-          ha._applyTheme = () => { ha.appliedTheme = ha.hass.selectedTheme.theme; };
-          ha._selectLanguage = (language, save) => { ha.appliedLanguage = language; ha.backendSaved = save; };
-          const main = child(ha.shadowRoot, 'home-assistant-main');
-          const resolver = document.createElement('partial-panel-resolver');
-          main.shadowRoot.appendChild(resolver);
-          const panel = child(resolver, 'ha-panel-lovelace');
-          const root = child(panel.shadowRoot, 'hui-root');
-          root.shadowRoot.innerHTML = `<style>:host {--header-height:56px}
-            .header{height:56px;background:red;display:${visible ? 'block' : 'none'}}
-            #view{padding-top:${visible ? '56px' : '0'};background:lime;height:480px}
-            </style><div class="header"></div><div id="view">First dashboard row</div>`;
-        }""",
-            header_visible,
-        )
-        page.wait_for_function(widget.ready_script(params))
-        metrics = page.evaluate("""() => {
-          const root=document.querySelector('home-assistant').shadowRoot.querySelector('home-assistant-main')
-            .shadowRoot.querySelector('partial-panel-resolver').firstElementChild.shadowRoot.querySelector('hui-root').shadowRoot;
-          return {header:getComputedStyle(root.querySelector('.header')).display,
-                  padding:getComputedStyle(root.querySelector('#view')).paddingTop};
-        }""")
-        assert metrics == (
-            {"header": "none", "padding": "0px"}
-            if hide_header
-            else {"header": "block", "padding": "56px"}
-        )
-        assert page.evaluate("""() => {
-          const ha = document.querySelector('home-assistant');
-          ha.hass.selectedTheme = {theme:'Account theme'};
-          ha._applyTheme(false);
-          ha._selectLanguage('fr', true);
-          return [ha.appliedTheme, ha.appliedLanguage, ha.backendSaved];
-        }""") == ["Graphite", "es", False]
-        browser.close()
+    assert _decode(data).convert("RGB").getpixel((0, 0)) == (0, 128, 255)
 
 
 def test_self_signed_tls_follows_ha_core(widget: Any, browser: _FakeBrowser) -> None:
@@ -391,7 +416,7 @@ def test_slow_first_render_returns_pending_then_the_frame(
     # re-renders the page once the frame lands rather than keeping the
     # placeholder until the next Send.
     retry_at = data.pop("next_change_at")
-    assert data == {"pending": True, "live_refresh_s": 2, "path": "/lovelace/0"}
+    assert data == {"pending": True, "path": "/lovelace/0"}
     assert before + widget.PENDING_RETRY_S <= retry_at <= time.time() + widget.PENDING_RETRY_S
     params = next(iter(widget._jobs))
     widget._jobs[params].done.wait(3.0)

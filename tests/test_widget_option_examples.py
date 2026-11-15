@@ -111,15 +111,7 @@ def test_dashboard_examples_in_both_editors(app, version):
     response = app.test_client().get("/pages/examples")
     assert response.status_code == 200
     fields = Inputs(response.text).fields
-    for name, example in {
-        "path": "dashboard-kitchen/overview",
-        "ha_theme": "Google Dark Theme",
-        "language": "pt-BR",
-    }.items():
-        assert fields[f"opt_{name}"]["placeholder"] == example
-    assert fields["opt_ha_theme"]["value"] == ""
-    assert fields["opt_language"]["value"] == ""
-    assert "No YAML" in response.text
+    assert fields["opt_path"]["placeholder"] == "dashboard-kitchen/overview"
 
 
 @pytest.mark.parametrize(
@@ -160,7 +152,6 @@ def test_placeholder_translations_and_english_fallback(app):
     plugin = app.config["PLUGIN_REGISTRY"].plugins["ha_dashboard"]
     manifest = deepcopy(plugin.manifest)
     plugin.strings["fr"]["cell_options.path.placeholder"] = "dashboard-cuisine/apercu"
-    plugin.strings["en"]["cell_options.ha_theme.placeholder"] = "English theme example"
     app.config["SETTINGS_STORE"].update_section("app", {"locale": "fr-CA"})
     app.config["PAGE_STORE"].save(
         Page(
@@ -171,7 +162,10 @@ def test_placeholder_translations_and_english_fallback(app):
     )
     fields = Inputs(app.test_client().get("/pages/examples").text).fields
     assert fields["opt_path"]["placeholder"] == "dashboard-cuisine/apercu"
-    assert fields["opt_ha_theme"]["placeholder"] == "English theme example"
+    del plugin.strings["fr"]["cell_options.path.placeholder"]
+    plugin.strings["en"]["cell_options.path.placeholder"] = "English path example"
+    fields = Inputs(app.test_client().get("/pages/examples").text).fields
+    assert fields["opt_path"]["placeholder"] == "English path example"
     assert plugin.manifest == manifest
 
 

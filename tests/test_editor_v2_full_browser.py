@@ -314,7 +314,7 @@ def test_look_warning_updates_and_reset_keeps_widget_options(
         c.model_copy(
             update={
                 "plugin": "ha_dashboard",
-                "options": {"ha_theme": "Graphite"},
+                "options": {"dark_mode": True},
                 "theme": "dark",
                 "padding_override": 8,
             }
@@ -329,7 +329,7 @@ def test_look_warning_updates_and_reset_keeps_widget_options(
         page.set_viewport_size({"width": width, "height": 1000})
         page.locator('[data-ev2-toggle="look"]').click()
         box = page.locator("[data-ev2-ovbox]")
-        assert "uses Home Assistant's theme" in box.inner_text()
+        assert "uses its own dark mode" in box.inner_text()
         assert "own padding" in box.inner_text()
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
         page.locator("[data-ev2-resetov]").click()
@@ -341,24 +341,22 @@ def test_look_warning_updates_and_reset_keeps_widget_options(
             "cell look reset",
             page=page,
         )
-        assert _cell(app, PAGE_ID, "c1").options["ha_theme"] == "Graphite"
-        assert "uses Home Assistant's theme" in box.inner_text()
-        box.locator('[data-ev2-setting="opt_ha_theme"]').click()
-        theme = page.locator('[name="opt_ha_theme"]')
+        assert _cell(app, PAGE_ID, "c1").options["dark_mode"] is True
+        assert "uses its own dark mode" in box.inner_text()
+        box.locator('[data-ev2-setting="opt_dark_mode"]').click()
+        theme = page.locator('[name="opt_dark_mode"]')
         assert theme.evaluate("el => document.activeElement === el")
-        theme.fill("")
-        theme.dispatch_event("change")
+        theme.evaluate("el => { el.checked = false; el.dispatchEvent(new Event('change', {bubbles: true})); }")
         _wait_for(
-            lambda: _cell(app, PAGE_ID, "c1").options.get("ha_theme") == "",
-            "widget theme cleared",
+            lambda: _cell(app, PAGE_ID, "c1").options.get("dark_mode") is False,
+            "widget dark mode cleared",
             page=page,
         )
         assert box.get_attribute("hidden") is not None
         assert "override" not in page.locator('[data-ev2-sum="look"]').inner_text()
-        theme.fill("Graphite")
-        theme.dispatch_event("change")
+        theme.evaluate("el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles: true})); }")
         page.locator('[data-ev2-toggle="look"]').click()
-        assert "uses Home Assistant's theme" in box.inner_text()
+        assert "uses its own dark mode" in box.inner_text()
         assert "1 widget overrides it" in page.locator('[data-ev2-sum="look"]').inner_text()
         assert not errors
     finally:

@@ -11,15 +11,15 @@ This widget goes around both. The server opens the dashboard as a
 top-level page in headless Chromium (no iframe, so the frame header never
 applies), and an init script seeds ``localStorage`` with a session built
 from the same long-lived token ``ha_core`` already holds, plus the
-frontend's own "sidebar always hidden" preference. The app header and its
-layout space are hidden inside the Lovelace shadow root before capture.
-Headerless dashboards keep their first row, and the viewport stays at the
-cell's exact size.
+frontend's own "sidebar always hidden" preference. The 56 px app header is
+rendered off the top of the viewport and cropped away, the same approach
+the Puppet add-on takes, which is the closest thing to a reference for how
+the frontend expects to be driven.
 
 Timing is the constraint that shapes the rest. A widget ``fetch()`` runs
 inside the composer's 6 s hydrate budget and a cold Chromium plus a
 dashboard load does not fit, so the render runs on its own thread and the
-result is cached per (path, size, zoom, theme). ``fetch()`` returns the
+result is cached per (path, size, zoom, fit, theme, light or dark). ``fetch()`` returns the
 cached frame when it is younger than ``refresh_seconds``, otherwise it
 starts a render and returns the previous frame while that runs. Only the
 very first render for a cell is waited for, and only up to ``FIRST_WAIT_S``,
@@ -44,7 +44,6 @@ import base64
 import io
 import json
 import logging
-import math
 import threading
 import time
 from typing import Any, NamedTuple
@@ -54,6 +53,9 @@ from flask import current_app
 
 logger = logging.getLogger(__name__)
 
+# Height of the Home Assistant app header at zoom 1. Puppet uses the same
+# constant; the frontend has kept it since the Material redesign.
+HEADER_PX = 56
 # How long a first-ever render for a cell may hold the fetch. Under the
 # composer's 6 s per-widget budget with room for the return trip.
 FIRST_WAIT_S = 5.0
@@ -75,6 +77,9 @@ DEFAULT_PATH = "lovelace/0"
 DEFAULT_REFRESH_S = 300
 DEFAULT_SETTLE_S = 2.0
 THREAD_NAME = "ha-dashboard-render"
+# Home Assistant puts no limit on a theme name; this only stops a pasted
+# essay from ending up in the cache key and the init script.
+THEME_MAX_LEN = 100
 
 # Polled after networkidle until the frontend reports its panel resolved
 # and loaded. Lifted from Puppet's wait, which tracks the frontend's own
@@ -94,6 +99,95 @@ READY_JS = """() => {
   return !("_loading" in panel) || !panel._loading;
 }"""
 
+# Fit to cell. Appended to the ready wait rather than run afterwards because
+# the renderer screenshots straight after it: the zoom has to be settled by
+# then. The renderer polls the function once a frame, so each call does one
+# step and keeps its place on ``window.__tesseraeFit``.
+#
+# Zooming is not a plain scale. A sections view lays its columns out from the
+# width it is given, and a smaller zoom gives it more, so the height does not
+# follow the zoom in proportion. The search therefore measures: the largest
+# zoom first (the common case, where everything already fits and nothing
+# changes), then the smallest, then a bisection between them. Each
+# measurement waits for the height to hold still, since cards arrive and
+# reflow on their own schedule.
+#
+# The height is the bottom of ``hui-view``, which is as tall as its cards.
+# The document is never shorter than the window, so it would call a short
+# dashboard too tall at every zoom below the largest; it only stands in when
+# a frontend has no such element.
+FIT_MIN_ZOOM = 0.25
+FIT_FIRST_STABLE_MS = 800
+FIT_STEP_STABLE_MS = 350
+FIT_MAX_STEPS = 8
+FIT_READY_TIMEOUT_MS = 16_000
+FIT_JS = """
+  const fit = __FIT__;
+  const st = (window.__tesseraeFit ||= {
+    z: fit.max, lo: null, hi: null, steps: 0, lastH: -1, since: 0, done: false,
+  });
+  if (st.done) return true;
+  const view = panel.shadowRoot?.querySelector("hui-root")?.shadowRoot?.querySelector("hui-view");
+  const height = Math.ceil(
+    view
+      ? view.getBoundingClientRect().bottom + window.scrollY
+      : document.documentElement.scrollHeight
+  );
+  const now = performance.now();
+  if (height !== st.lastH) { st.lastH = height; st.since = now; return false; }
+  if (now - st.since < (st.steps ? fit.stepMs : fit.firstMs)) return false;
+  const fits = height <= fit.height + fit.header * st.z + 1;
+  const apply = (z) => {
+    st.z = z; st.steps += 1; st.lastH = -1;
+    document.body.style.zoom = String(z);
+  };
+  if (st.lo === null && st.hi === null) {
+    if (fits) { st.done = true; return true; }
+    st.hi = st.z; apply(fit.min); return false;
+  }
+  if (st.lo === null) {
+    if (!fits) { st.done = true; return true; }
+    st.lo = st.z;
+  } else if (st.z !== st.lo) {
+    if (fits) st.lo = st.z; else st.hi = st.z;
+  } else { st.done = true; return true; }
+  if (st.steps >= fit.maxSteps || st.hi - st.lo < 0.02) { apply(st.lo); return false; }
+  apply(Math.round(((st.lo + st.hi) / 2) * 1000) / 1000);
+  return false;
+}"""
+# What the capture reads back: where the page ended up, and the zoom the fit
+# left on it (null when fit is off), which sets how tall the header is.
+RESULT_JS = "({href: location.href, zoom: window.__tesseraeFit ? window.__tesseraeFit.z : null})"
+
+
+# Runs inside the init script, before any page script. Rewrites the key on
+# the frontend's per-user theme messages (get, subscribe and, should one ever
+# be sent, set) so the capture neither follows nor touches the theme the
+# token's owner picked for themselves. Outgoing frames can be one message or
+# a coalesced array of them. See ``init_script``.
+THEME_USER_DATA_KEY = "tesserae_capture_theme"
+THEME_REDIRECT_JS = """  const nativeSend = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (data) {
+    if (typeof data === "string" && data.includes("_user_data")) {
+      try {
+        const parsed = JSON.parse(data);
+        let changed = false;
+        for (const msg of Array.isArray(parsed) ? parsed : [parsed]) {
+          if (
+            msg &&
+            /^frontend\\/(get|subscribe|set)_user_data$/.test(String(msg.type)) &&
+            msg.key === "theme"
+          ) {
+            msg.key = "__KEY__";
+            changed = true;
+          }
+        }
+        if (changed) data = JSON.stringify(parsed);
+      } catch (err) {}
+    }
+    return nativeSend.call(this, data);
+  };""".replace("__KEY__", THEME_USER_DATA_KEY)
+
 
 class Params(NamedTuple):
     """Everything that changes what gets captured; doubles as the cache key.
@@ -109,11 +203,18 @@ class Params(NamedTuple):
     dark: bool
     kiosk: bool
     settle_s: float
-    offset_x: int = 0
-    offset_y: int = 0
-    hide_header: bool = True
-    ha_theme: str = ""
-    language: str = ""
+    theme: str = ""
+    fit: bool = False
+    # The dashboard already hides Home Assistant's header (kiosk-mode, a theme):
+    # nothing to crop, or the crop would cut the top of the dashboard off.
+    header_hidden: bool = False
+
+    def header_at(self, zoom: float) -> int:
+        return 0 if self.header_hidden else round(HEADER_PX * zoom)
+
+    @property
+    def header_px(self) -> int:
+        return self.header_at(self.zoom)
 
 
 class Frame(NamedTuple):
@@ -157,6 +258,14 @@ def _core() -> Any:
 # -- option shaping ---------------------------------------------------------
 
 
+def choices(name: str) -> list[dict[str, str]]:
+    """Theme picker for the editor: the themes Home Assistant has installed."""
+    core = _core()
+    if name == "theme" and core is not None:
+        return list(core.theme_choices())
+    return []
+
+
 def normalise_path(raw: Any) -> str:
     """Turn what the operator typed into a site-relative path.
 
@@ -176,14 +285,20 @@ def normalise_path(raw: Any) -> str:
     return text
 
 
+def normalise_theme(raw: Any) -> str:
+    """The chosen theme name, trimmed. Blank, or Home Assistant's own name
+    for its built-in theme, means "whatever the frontend defaults to", so
+    those two spellings share one cache entry."""
+    text = str(raw or "").strip()[:THEME_MAX_LEN]
+    return "" if text.lower() == "default" else text
+
+
 def _float_option(
     options: dict[str, Any], name: str, default: float, lo: float, hi: float
 ) -> float:
     try:
         value = float(options.get(name, default))
     except (TypeError, ValueError):
-        value = default
-    if not math.isfinite(value):
         value = default
     return min(max(value, lo), hi)
 
@@ -199,11 +314,9 @@ def _params(options: dict[str, Any], ctx: dict[str, Any]) -> Params:
         dark=options.get("dark_mode") is True,
         kiosk=options.get("kiosk", True) is not False,
         settle_s=_float_option(options, "settle_seconds", DEFAULT_SETTLE_S, 0.0, 12.0),
-        offset_x=round(_float_option(options, "offset_x", 0, -4096, 4096)),
-        offset_y=round(_float_option(options, "offset_y", 0, -4096, 4096)),
-        hide_header=options.get("hide_header", True) is not False,
-        ha_theme=str(options.get("ha_theme") or "").strip()[:200],
-        language=str(options.get("language") or "").strip()[:35],
+        theme=normalise_theme(options.get("theme")),
+        fit=options.get("fit") is True,
+        header_hidden=options.get("header_hidden") is True,
     )
 
 
@@ -223,9 +336,23 @@ def init_script(base_url: str, token: str, params: Params) -> str:
     site root, which is what the frontend compares against ``hassUrl``.
     ``dockedSidebar: always_hidden`` is the user preference that keeps the
     sidebar closed; ``selectedTheme`` pins light or dark so the capture does
-    not depend on the browser's colour scheme.
+    not depend on the browser's colour scheme, and names the theme when the
+    cell asks for one. That is the same record the profile page's theme
+    picker writes, so it overrides the theme for this capture only and
+    leaves what people see in their own browsers alone. A name Home
+    Assistant does not have falls back to its default theme.
 
-    The zoom is applied on ``<body>`` once it exists, before capture."""
+    Newer frontends also keep the theme in the signed-in user's server-side
+    data (``frontend/subscribe_user_data``, key ``theme``), and a value there
+    replaces the ``localStorage`` one as soon as the socket connects. The
+    capture signs in as the token's owner, so that person's own theme would
+    win over the cell's every time. ``THEME_REDIRECT_JS`` points those
+    messages at a key nothing writes: the server answers "no value", the
+    frontend keeps the seeded record, and the owner's saved theme is never
+    read or changed. Frontends from before the sync never send the message.
+
+    The zoom is applied on ``<body>`` once it exists, matching Puppet, so
+    the header stays ``HEADER_PX * zoom`` tall and the crop below lines up."""
     root = base_url.rstrip("/") + "/"
     tokens = {
         "access_token": token,
@@ -236,22 +363,21 @@ def init_script(base_url: str, token: str, params: Params) -> str:
         "expires": 9999999999999,
         "refresh_token": "",
     }
-    theme: dict[str, Any] = {"dark": params.dark}
-    if params.ha_theme:
-        theme["theme"] = params.ha_theme
+    selected_theme: dict[str, Any] = {"dark": params.dark}
+    if params.theme:
+        selected_theme["theme"] = params.theme
     entries = {
         "hassTokens": json.dumps(tokens),
         "dockedSidebar": json.dumps("always_hidden"),
-        "selectedTheme": json.dumps(theme),
+        "selectedTheme": json.dumps(selected_theme),
     }
-    if params.language:
-        entries["selectedLanguage"] = json.dumps(params.language)
     return (
         "(() => {\n"
         f"  const entries = {json.dumps(entries)};\n"
         "  for (const [key, value] of Object.entries(entries)) {\n"
         "    try { localStorage.setItem(key, value); } catch (err) {}\n"
         "  }\n"
+        f"{THEME_REDIRECT_JS}\n"
         f"  const zoom = {json.dumps(params.zoom)};\n"
         "  const applyZoom = () => { if (document.body) document.body.style.zoom = String(zoom); };\n"
         "  if (document.readyState === 'loading') {\n"
@@ -269,63 +395,37 @@ def dashboard_url(base_url: str, params: Params) -> str:
 
 
 def ready_script(params: Params) -> str:
-    """Hide HA's own header without cropping dashboard content or resizing it."""
-    preferences: dict[str, Any] = {"dark": params.dark}
-    if params.ha_theme:
-        preferences["theme"] = params.ha_theme
-    header_style = (
-        """
-  const root = panel.shadowRoot?.querySelector("hui-root")?.shadowRoot;
-  if (!root) return false;
-  if (!root.querySelector("#tesserae-capture-style")) {
-    const style = document.createElement("style");
-    style.id = "tesserae-capture-style";
-    style.textContent = `:host { --header-height: 0px !important; }
-      .header { display: none !important; }
-      #view { padding-top: 0 !important; }`;
-    root.appendChild(style);
-  }
-"""
-        if params.hide_header
-        else ""
-    )
-    body = (
-        'if ("_loading" in panel && panel._loading) return false;\n'
-        f"  const preferences = {json.dumps(preferences)};\n"
-        f"  const language = {json.dumps(params.language)};\n"
-        + """
-  // HA can load account preferences after localStorage. Pin capture-only
-  // preferences on this browser instance without saving them to the account.
-  if (!haEl.__tesseraePreferences && haEl.hass && haEl._applyTheme) {
-    haEl.__tesseraePreferences = true;
-    const applyTheme = haEl._applyTheme.bind(haEl);
-    haEl._applyTheme = (dark) => {
-      haEl._updateHass({selectedTheme: {...haEl.hass.selectedTheme, ...preferences}});
-      return applyTheme(dark);
-    };
-    haEl._applyTheme(false);
-    if (language && haEl._selectLanguage) {
-      const selectLanguage = haEl._selectLanguage.bind(haEl);
-      haEl._selectLanguage = () => selectLanguage(language, false);
-      haEl._selectLanguage();
+    """The function the renderer polls before it screenshots: the frontend's
+    own "loaded" check, followed by the fit search when the cell asks for it."""
+    if not params.fit:
+        return READY_JS
+    config = {
+        "max": params.zoom,
+        "min": min(FIT_MIN_ZOOM, params.zoom),
+        "height": params.h,
+        "header": 0 if params.header_hidden else HEADER_PX,
+        "firstMs": FIT_FIRST_STABLE_MS,
+        "stepMs": FIT_STEP_STABLE_MS,
+        "maxSteps": FIT_MAX_STEPS,
     }
-  }
-"""
-        + header_style
-        + "  return true;"
+    head, tail = READY_JS.rsplit('  return !("_loading" in panel) || !panel._loading;\n}', 1)
+    assert not tail
+    return (
+        head
+        + '  if ("_loading" in panel && panel._loading) return false;'
+        + FIT_JS.replace("__FIT__", json.dumps(config))
     )
-    return READY_JS.replace('return !("_loading" in panel) || !panel._loading;', body)
 
 
-def offset_frame(png: bytes, params: Params) -> bytes:
-    """Translate the captured canvas in output pixels, clipping at the cell edges."""
+def crop_header(png: bytes, params: Params, zoom: float | None = None) -> bytes:
+    """Drop the app header from the top of the capture and return a PNG of
+    exactly ``params.w × params.h``. ``zoom`` is the zoom the page was left
+    at when a fit changed it; the header shrinks with it."""
     from PIL import Image
 
-    if not params.offset_x and not params.offset_y:
-        return png
     with Image.open(io.BytesIO(png)) as im:
-        frame = Image.new("RGB", (params.w, params.h), "black" if params.dark else "white")
-        frame.paste(im.convert("RGB"), (params.offset_x, params.offset_y))
+        top = params.header_px if zoom is None else params.header_at(zoom)
+        frame = im.convert("RGB").crop((0, top, params.w, top + params.h))
         out = io.BytesIO()
         frame.save(out, format="PNG", optimize=True)
         return out.getvalue()
@@ -355,7 +455,7 @@ def render_frame(
     verify_tls: bool = True,
     timezone_id: str | None = None,
 ) -> bytes:
-    """Open the dashboard and capture it at the cell's size. Raises on a login
+    """Open the dashboard, capture it, crop the header. Raises on a login
     redirect (bad token) or a renderer failure; callers decide what the
     cell shows."""
     from app.renderer import RenderRequest
@@ -363,25 +463,31 @@ def render_frame(
     request = RenderRequest(
         url=dashboard_url(base_url, params),
         viewport_w=params.w,
-        viewport_h=params.h,
+        viewport_h=params.h + params.header_px,
         timeout_ms=RENDER_TIMEOUT_MS,
         max_attempts=1,
         is_composer=False,
         timezone_id=timezone_id,
         init_script=init_script(base_url, token, params),
         ready_js=ready_script(params),
-        ready_timeout_ms=READY_TIMEOUT_MS,
+        ready_timeout_ms=FIT_READY_TIMEOUT_MS if params.fit else READY_TIMEOUT_MS,
         settle_ms=int(params.settle_s * 1000),
         ignore_https_errors=not verify_tls,
     )
-    png, href = _capture(request, "location.href")
+    png, result = _capture(request, RESULT_JS)
+    href, zoom = "", None
+    if isinstance(result, dict):
+        href = result.get("href") or ""
+        fitted = result.get("zoom")
+        if params.fit and isinstance(fitted, (int, float)) and 0 < fitted <= params.zoom:
+            zoom = float(fitted)
     landed = urlsplit(str(href or "")).path
     if landed.startswith("/auth/"):
         raise RuntimeError(
             "Home Assistant showed the login page instead of the dashboard; "
-            "check the access token in Settings → Widgets → Home Assistant Core"
+            "check the access token in Settings -> Plugins -> Home Assistant Core"
         )
-    return offset_frame(png, params)
+    return crop_header(png, params, zoom)
 
 
 def _run_job(params: Params, job: _Job, render_kwargs: dict[str, Any]) -> None:
@@ -422,23 +528,14 @@ def _start_render(params: Params, render_kwargs: dict[str, Any]) -> _Job:
 
 
 def _shape(frame: Frame, params: Params, *, stale: bool) -> dict[str, Any]:
-    with _state_lock:
-        capturing = params in _jobs
-        error = _errors.get(params)
-    data = {
+    return {
         "frame": "data:image/png;base64," + base64.b64encode(frame.png).decode("ascii"),
         "w": frame.w,
         "h": frame.h,
         "path": params.path,
         "rendered_at": frame.rendered_at,
         "stale": stale,
-        "capturing": capturing,
     }
-    if error is not None:
-        data["capture_error"] = error[1]
-    if capturing:
-        data["live_refresh_s"] = 2
-    return data
 
 
 def fetch(
@@ -450,7 +547,7 @@ def fetch(
         return {"error": "Install the Home Assistant Core plugin to use this widget."}
     if not core.is_configured():
         return {
-            "error": "Set the Home Assistant URL and token in Settings → Widgets → Home Assistant Core."
+            "error": "Set the Home Assistant URL and token in Settings -> Plugins -> Home Assistant Core."
         }
 
     params = _params(options, ctx)
@@ -464,11 +561,9 @@ def fetch(
     if fresh and frame is not None:
         return _shape(frame, params, stale=False)
 
-    if error is not None and not ctx.get("fresh"):
+    if error is not None and frame is None and not ctx.get("fresh"):
         age = time.monotonic() - error[0]
         if age < ERROR_RETRY_S:
-            if frame is not None:
-                return _shape(frame, params, stale=True)
             return {"error": error[1], "path": params.path}
 
     render_kwargs = {
@@ -478,7 +573,7 @@ def fetch(
         "timezone_id": _timezone_id(),
     }
     job = _start_render(params, render_kwargs)
-    if frame is not None and not ctx.get("fresh"):
+    if frame is not None:
         # Stale-while-revalidate: the previous frame goes out now, the one
         # rendering lands for the next refresh.
         return _shape(frame, params, stale=True)
@@ -488,12 +583,11 @@ def fetch(
         frame = _frames.get(params)
         error = _errors.get(params)
     if frame is not None:
-        return _shape(frame, params, stale=not job.done.is_set())
+        return _shape(frame, params, stale=False)
     if error is not None:
         return {"error": error[1], "path": params.path}
     return {
         "pending": True,
-        "live_refresh_s": 2,
         "path": params.path,
         "next_change_at": time.time() + PENDING_RETRY_S,
     }
