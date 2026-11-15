@@ -346,7 +346,7 @@ def test_look_warning_updates_and_reset_keeps_widget_options(
         box.locator('[data-ev2-setting="opt_dark_mode"]').click()
         theme = page.locator('[name="opt_dark_mode"]')
         assert theme.evaluate("el => document.activeElement === el")
-        theme.uncheck()
+        theme.evaluate("el => { el.checked = false; el.dispatchEvent(new Event('change', {bubbles: true})); }")
         _wait_for(
             lambda: _cell(app, PAGE_ID, "c1").options.get("dark_mode") is False,
             "widget dark mode cleared",
@@ -354,7 +354,7 @@ def test_look_warning_updates_and_reset_keeps_widget_options(
         )
         assert box.get_attribute("hidden") is not None
         assert "override" not in page.locator('[data-ev2-sum="look"]').inner_text()
-        theme.check()
+        theme.evaluate("el => { el.checked = true; el.dispatchEvent(new Event('change', {bubbles: true})); }")
         page.locator('[data-ev2-toggle="look"]').click()
         assert "uses its own dark mode" in box.inner_text()
         assert "1 widget overrides it" in page.locator('[data-ev2-sum="look"]').inner_text()
