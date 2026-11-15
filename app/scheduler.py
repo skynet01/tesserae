@@ -59,6 +59,9 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle: the projection reads us
 logger = logging.getLogger(__name__)
 
 UPDATE_REFRESH_FAILURE_BACKOFF_SECONDS = 5 * 60
+# How many ticks a bound lineup tries a window's send before letting the
+# window go (see ``Scheduler._fire_cycle``).
+_CYCLE_SEND_ATTEMPTS = 3
 
 
 class ScheduleSource(Protocol):
@@ -536,6 +539,9 @@ class Scheduler:
         self._last_reason: dict[str, str | None] = {}
         self._rotation_last_status: dict[str, str] = {}
         self._rotation_last_reason: dict[str, str | None] = {}
+        # Bound lineup -> (window start, failed attempts in that window), so a
+        # send that keeps failing is retried a few times and then let go.
+        self._cycle_retry: dict[str, tuple[float, int]] = {}
         # rotation_id we've warned about for a missing step page; same
         # one-shot semantics as ``_warned_missing_page``.
         self._warned_missing_rotation_page: set[str] = set()
@@ -1877,25 +1883,40 @@ class Scheduler:
             paused=on_pause,
             failed=failed,
         )
+        window_start = state.step_started_at.timestamp()
         if failed:
             # A panel's push failed. Leave the window unrecorded so the next
             # tick finds it due again, as the unbound path does; panels that
             # already took the frame are skipped by their own per-display
             # record, so a retry doesn't send twice. Held, paused, quiet and
             # min-hold skips are deliberate and stay recorded below.
+            #
+            # Only a few times per window, though: a display that is switched
+            # off or a dashboard that won't render fails the same way on every
+            # 30 s tick, and each try costs a render, a warning and a History
+            # row. After the last try the window is recorded as spent and the
+            # next window starts afresh.
             with self._lock:
+                seen_window, attempts = self._cycle_retry.get(rotation.id, (window_start, 0))
+                attempts = attempts + 1 if seen_window == window_start else 1
+                self._cycle_retry[rotation.id] = (window_start, attempts)
                 self._rotation_last_status[rotation.id] = "failed"
                 self._rotation_last_reason[rotation.id] = (
                     f"push failed for {', '.join(sorted(failed))}"
                 )
-            return
+            if attempts < _CYCLE_SEND_ATTEMPTS:
+                return
         with self._lock:
+            if not failed:
+                self._cycle_retry.pop(rotation.id, None)
             # Arm the same transition / min-hold gates rotations use so the
             # find pass stays one code path for every cycle record.
             self._rotation_last_step[rotation.id] = step_index
             self._rotation_last_pushed_at[rotation.id] = now.timestamp()
-            self._rotation_last_window_start[rotation.id] = state.step_started_at.timestamp()
-            if fired:
+            self._rotation_last_window_start[rotation.id] = window_start
+            if failed:
+                pass  # gave up on this window; the card keeps saying "failed"
+            elif fired:
                 self._rotation_last_status[rotation.id] = "sent"
                 self._rotation_last_reason[rotation.id] = None
             elif (held or on_pause) and all(
@@ -2049,7 +2070,9 @@ class Scheduler:
                 # dashboard" rather than "that dashboard won't render"
                 # (#167).
                 reason = result.error or f"push {result.status}"
-                if failed is not None and result.status in ("failed", "busy", "superseded"):
+                # ``superseded`` is left out: a newer send already replaced
+                # this one, so there is nothing to try again.
+                if failed is not None and result.status in ("failed", "busy"):
                     failed.add(device_id)
                 logger.warning(
                     "deck timer advance failed: device=%s deck=%s -> %s (%s)",

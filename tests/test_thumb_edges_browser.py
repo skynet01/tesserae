@@ -118,6 +118,16 @@ SURFACES: dict[str, dict[str, Any]] = {
         "path": "/decks/night/edit",
         "frame": ".lu.dxe .lu-thumb",
     },
+    "history": {
+        "path": "/history",
+        "frame": ".dx-hist-thumb",
+        "ar": (3840, 2160),
+    },
+    "events": {
+        "path": "/events",
+        "frame": ".dx-event-thumb-link",
+        "ar": (4, 3),
+    },
     "devices-list": {
         "path": "/settings/devices",
         "frame": ".dx-thumb",

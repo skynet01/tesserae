@@ -3,13 +3,16 @@
 
 # Screens & compatibility
 
-Tesserae renders a dashboard headlessly and delivers the frame to a small client that paints your panel. Delivery is either MQTT (retained frame topic, always-on clients wake and receive) or REST (battery-poll clients hit `/api/v1/device/<id>/frame`). What panel you can drive comes down to which **hardware SKU** you have, which **client / protocol** talks to it, and which **renderer** produces the exact byte format the panel needs.
+Tesserae draws dashboards in a hidden browser. It sends pictures to client software, which drives your screen. Your hardware model, client protocol and renderer must agree on the picture's byte format.
 
-The **Hardware SKUs** section below is the fastest way to find your device. Every SKU listed there ships as a data-only manifest under `hardware/<vendor>/<sku>.json` and shows up automatically in Tesserae's Settings → Devices → Add Device kind picker with the right dims, gamut, and renderer wired up.
+- MQTT: always-on clients wake and receive frames from a retained topic.
+- REST: battery-poll clients request `/api/v1/device/<id>/frame`.
+
+Find your device under Hardware SKUs below. Its data-only definition in `hardware/<vendor>/<sku>.json` adds it to Settings → Devices → Add Device with dimensions, colour range and renderer already set.
 
 ## Panel presets
 
-Built-in sizes (Settings → Panel). Pick `custom` for anything not listed, the dimensions are all that matter to the renderer.
+Choose a built-in size from Panel size in Settings → Devices → Add device. Use `custom` for unlisted screens; the renderer only needs the dimensions.
 
 | Preset | Native resolution | Panel |
 |---|---|---|
@@ -25,14 +28,14 @@ Built-in sizes (Settings → Panel). Pick `custom` for anything not listed, the 
 
 ## Renderers
 
-A renderer turns the composition PNG into the exact bytes a client wants. Each ships as a drop-a-folder plugin under `renderers/<id>/`.
+A renderer converts the dashboard PNG to the client's byte format. Each is a plugin folder under `renderers/<id>/`.
 
 | Renderer | Output | Target client(s) | What it's for |
 |---|---|---|---|
 | `circuitpython_bmp` | `.bmp` | - | Composition quantized to the panel's palette and emitted as an uncompressed indexed BMP for adafruit_imageload on memory-constrained CircuitPython microcontrollers. |
 | `circuitpython_png` | `.png` | - | Composition PNG quantized to the panel's palette and emitted as an indexed PNG sized for adafruit_imageload on CircuitPython microcontrollers. |
 | `esp32_bin` | `.bin` | [tesserae-device-esp32-bin (13.3" Waveshare)](https://github.com/dmellok/tesserae-device-esp32-bin)<br>[tesserae-device-photopainter-7.3-bin (7.3" PhotoPainter)](https://github.com/dmellok/tesserae-device-photopainter-7.3-bin) | Composition PNG packed into the Waveshare E6 4-bpp buffer the ESP32 firmware streams to SPI. |
-| `esp32_bw_bin` | `.bin` | - | Composition PNG dithered to mono B/W and packed into a 1-bpp raw buffer the ESP32 firmware (e.g. |
+| `esp32_bw_bin` | `.bin` | - | Composition PNG dithered to mono B/W and packed into a 1-bpp raw buffer the ESP32 firmware (e.g. Waveshare 4.2" e-paper, 400x300) streams straight to SPI. |
 | `esp32_gray2_bin` | `.bin` | - | Composition PNG dithered to 4-level grayscale and packed into a 2-bpp raw buffer for UC8179-class mono panels driven in their 4-gray waveform mode. |
 | `esp32_gray_bin` | `.bin` | - | Composition PNG dithered to 16-level grayscale and packed into a 4-bpp raw buffer the ESP32 firmware streams straight to the IT8951 controller's image buffer. |
 | `fraimic_bin` | `.bin` | - | Composition PNG dithered to the six Spectra 6 inks and packed into the raw .bin a Fraimic canvas accepts on POST /api/image: 4 bits per pixel, no header, in the panel controllers' own byte order. |
@@ -47,14 +50,14 @@ A renderer turns the composition PNG into the exact bytes a client wants. Each s
 
 ## Device kinds
 
-The bundled client kinds Tesserae knows how to talk to. A flashed client announces itself on `tesserae/<device-id>/status` and shows up under Settings → Devices → Discovered. See [Install a client](install/clients.md) and [Set up a device](install/devices.md).
+Supported clients appear under Settings → Devices → Discovered after flashing. They announce themselves over MQTT on `tesserae/<device-id>/status`, or over REST with `POST /api/v1/device/discover`. See [Install a client](install/clients.md) and [Set up a device](install/devices.md).
 
 | Device kind | Default panel | Renderers | What it is |
 |---|---|---|---|
 | `bloomin8_canvas` | 1200×1600 | `pi_png` | Bloomin8 Canvas colour e-paper frame using its Schedule Pull API. |
 | `circuitpython_generic` | 800×480 | `circuitpython_png`, `circuitpython_bmp` | Generic CircuitPython client kind for boards driving an e-paper panel from a Pico W / Pico 2 W / Feather / similar microcontroller. |
 | `crosspoint_gray` | 480×800 | `circuitpython_bmp` | CrossPoint e-readers painting a Tesserae dashboard as their sleep screen, over the LAN with no cloud component. |
-| `esp32_bw_client` | 400×300 | `esp32_bw_bin` | Battery-powered ESP32 firmware for mono B/W e-paper panels (e.g. |
+| `esp32_bw_client` | 400×300 | `esp32_bw_bin` | Battery-powered ESP32 firmware for mono B/W e-paper panels (e.g. Waveshare 4.2" 400x300). |
 | `esp32_client` | 800×480 | `esp32_bin` | Battery-powered ESP32 firmware that subscribes to tesserae/esp32/frame/bin (retained), paints the panel via SPI, and goes back to deep sleep. |
 | `fraimic` | 1440×2560 | `fraimic_bin` | Fraimic colour e-paper canvas (31.5" Large Canvas or 13.3"), driven over its local REST API with no app, cloud or firmware change. |
 | `koreader_client` | 758×1024 | `esp32_gray_bin`, `esp32_gray2_bin`, `esp32_bw_bin`, `kaleido_png` | Jailbroken Kindle, Kobo, and other e-readers running KOReader with the Tesserae plugin (dmellok/tesserae-koreader). |
@@ -71,14 +74,22 @@ The bundled client kinds Tesserae knows how to talk to. A flashed client announc
 
 ## Hardware SKUs
 
-Per-vendor catalog of specific device / panel SKUs Tesserae ships manifests for. Each entry maps to a device kind (protocol) + renderer combination that Tesserae picks automatically once the device pairs. Click a product name for the vendor's own page.
+Tesserae chooses each model's protocol and renderer when it pairs. Click a product name for the vendor's page.
 
 !!! info "Some links are affiliate links"
-    Seeed product links and the Pimoroni Inky Frame and Inky Impression links on this page carry a Tesserae affiliate tag: a purchase made through one pays a small commission that goes back into the project, and a Seeed link also gets a discount at checkout. Nothing on this page is listed because of it, and the tested / not-tested status of every panel is reported the same way it always has been. Links without the tag are plain product links.
+    Seeed product links and the Pimoroni Inky Frame and Inky Impression links carry a Tesserae affiliate tag. Buying through them pays a small commission to the project. Seeed links also give a discount at checkout.
+
+    Seeed also has a discount code: **TESSERAE** gives a discount at seeedstudio.com on the reTerminal E-Series, the reTerminal Sticky and the OpenDisplay kits.
+
+    Tags do not affect which products are listed or their tested / not-tested status. Other links are plain product links.
+
+    Fraimic links are plain links, with a discount code instead: **TESSERAE10** takes 10% off at fraimic.com. Fraimic supplied a Large Canvas to Tesserae free of charge, and Tesserae earns a commission on sales made with the code.
 
 ### [Seeed Studio](https://www.seeedstudio.com/)
 
-The reTerminal E-Series and XIAO ePaper family run the [Tesserae-native firmware](https://github.com/dmellok/tesserae-device-firmware); flash from the browser in one click at [tesserae.ink/flash](https://tesserae.ink/flash) (Chrome / Edge, Web Serial, no toolchain). Battery-powered, no assembly required. The XIAO 7.5" and TRMNL 7.5" OG DIY Kit also run the TRMNL BYOS firmware path if you'd rather stay on stock.
+The reTerminal E-Series and XIAO ePaper family run the [Tesserae-native firmware](https://github.com/dmellok/tesserae-device-firmware). Flash in one click at [tesserae.ink/flash](https://tesserae.ink/flash) using Chrome or Edge with Web Serial; no build tools are needed. They run on batteries and need no assembly.
+
+The XIAO 7.5" and TRMNL 7.5" OG DIY Kit also run the TRMNL BYOS firmware if you prefer stock.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -101,7 +112,10 @@ The reTerminal E-Series and XIAO ePaper family run the [Tesserae-native firmware
 
 ### [M5Stack](https://m5stack.com/)
 
-Runs the [Tesserae-native firmware](https://github.com/dmellok/tesserae-device-firmware). The PaperS3's glass has no controller chip: the ESP32-S3 drives the panel's parallel bus directly and the 16 greys come from a waveform table in the firmware, so greyscale tuning is a build-time edit rather than a vendor LUT. That also means no partial refresh yet, and so no tap echo or on-device touch widgets on this SKU. The original M5Paper shares the same 4.7" glass but reaches it through an IT8951 controller on the classic ESP32-D0WDQ6-V3, so it reuses the reTerminal E1003's greyscale driver unchanged; both M5Paper SKUs consume the identical 259200-byte frame.
+Runs the [Tesserae-native firmware](https://github.com/dmellok/tesserae-device-firmware).
+
+- PaperS3: the ESP32-S3 drives the parallel panel bus directly, without a controller chip. Its firmware waveform table produces 16 greys; tuning requires a build-time edit instead of a vendor LUT. Partial refresh, tap echo and on-device touch widgets are not supported yet.
+- Original M5Paper: the same 4.7" glass, with an IT8951 controller on the ESP32-D0WDQ6-V3. It uses the reTerminal E1003's greyscale driver unchanged. Both M5Paper SKUs use the same 259200-byte frame.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -116,9 +130,24 @@ Runs the [Tesserae-native firmware](https://github.com/dmellok/tesserae-device-f
 |---|---|---|---|---|
 | [LILYGO T5 E-Paper S3 Pro / Pro Lite](https://lilygo.cc/products/t5-e-paper-s3-pro) | 960×540 | `gray_16` | `esp32_client` <br> `esp32_gray_bin` | `lilygo_t5s3_pro` |
 
+### [Fraimic](https://fraimic.com/)
+
+Framed Spectra 6 colour e-paper canvases on battery, driven over the frame's own local REST API: no Fraimic account, app, cloud or firmware change. Tesserae sets the frame's wake schedule, uploads the latest picture at each wake and puts it back to sleep, with wakes as close as five minutes apart; see the [Fraimic quickstart](quickstart/fraimic.md). The Large Canvas is confirmed on the bench, and the Standard Canvas by a community report.
+
+The code **TESSERAE10** takes 10% off either canvas at [fraimic.com](https://fraimic.com/). Fraimic supplied the Large Canvas free of charge, and Tesserae earns a commission on sales made with the code.
+
+| SKU | Panel | Gamut | Protocol / Renderer | Kind id |
+|---|---|---|---|---|
+| [Fraimic Large Canvas (31.5")](https://fraimic.com/products/large-canvas) | 1440×2560 portrait | `spectra_6` | `fraimic` <br> `fraimic_bin` | `fraimic_large_canvas` |
+| [Fraimic Standard Canvas (13.3")](https://fraimic.com/products/standard-canvas) | 1200×1600 portrait | `spectra_6` | `fraimic` <br> `fraimic_bin` | `fraimic_standard_canvas` |
+
 ### [paperlesspaper](https://paperlesspaper.de/en)
 
-Open-hardware e-paper picture frames (ESP32-C6, NiMH cells) that run the [Tesserae-native firmware](https://github.com/dmellok/tesserae-device-firmware) in place of the vendor's cloud firmware; flash from [tesserae.ink/flash](https://tesserae.ink/flash). Flashing overwrites the region that holds the frame's vendor cloud certificate; paperlesspaper support can re-provision a frame that wants the vendor service back, or back up that region first to keep your own copy. The OpenPaper 7 and the OpenPaper L are both confirmed on the bench.
+Open-hardware picture frames with ESP32-C6 and NiMH batteries. Install [Tesserae-native firmware](https://github.com/dmellok/tesserae-device-firmware) instead of the vendor's cloud firmware at [tesserae.ink/flash](https://tesserae.ink/flash).
+
+Flashing overwrites the vendor cloud certificate. Back up its region first to keep a copy. paperlesspaper support can restore cloud access if you want to return to the vendor service.
+
+OpenPaper 7 and OpenPaper L are confirmed on hardware.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -127,7 +156,9 @@ Open-hardware e-paper picture frames (ESP32-C6, NiMH cells) that run the [Tesser
 
 ### [Pimoroni](https://shop.pimoroni.com/)
 
-The Inky Impressions run from a Raspberry Pi with [tesserae-device-pi](https://github.com/dmellok/tesserae-device-pi). The Inky Frame carries its own Pico and runs [tesserae-device-inkyframe](https://github.com/dmellok/tesserae-device-inkyframe); flash it from the browser at [tesserae.ink/flash/inky-frame](https://tesserae.ink/flash/inky-frame) (Chrome / Edge, WebUSB, no toolchain). The Badgers run [tesserae-device-badger](https://github.com/dmellok/tesserae-device-badger) as an app in their own launcher.
+- Inky Impressions: use a Raspberry Pi with [tesserae-device-pi](https://github.com/dmellok/tesserae-device-pi).
+- Inky Frame: has its own Pico and runs [tesserae-device-inkyframe](https://github.com/dmellok/tesserae-device-inkyframe). Flash in your browser at [tesserae.ink/flash/inky-frame](https://tesserae.ink/flash/inky-frame) using Chrome or Edge with WebUSB; no build tools are needed.
+- Badgers: run [tesserae-device-badger](https://github.com/dmellok/tesserae-device-badger) as an app in their launcher.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -140,7 +171,11 @@ The Inky Impressions run from a Raspberry Pi with [tesserae-device-pi](https://g
 
 ### [reMarkable](https://remarkable.com/)
 
-E-ink writing tablets running the [tesserae.remarkable](https://github.com/partridgeworks/tesserae.remarkable) client, an AppLoad app that lives inside the tablet's own interface (Developer Mode plus the XOVI/AppLoad runtime required). It speaks the v1 REST device API, paints the server-dithered frame through the tablet's display stack, and deep-sleeps between polls on an RTC alarm. The reMarkable 2 is confirmed on hardware; the reMarkable 1 and Paper Pro entries are built but not yet confirmed.
+Use the [tesserae.remarkable](https://github.com/partridgeworks/tesserae.remarkable) client, an AppLoad app inside the tablet's interface. Developer Mode and the XOVI/AppLoad runtime are required.
+
+It uses the v1 REST device API to draw server-dithered frames through the tablet's display system. It deep-sleeps between polls and wakes on an RTC alarm.
+
+reMarkable 2 is confirmed on hardware. reMarkable 1 and Paper Pro builds are not yet confirmed.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -168,7 +203,9 @@ E-ink writing tablets running the [tesserae.remarkable](https://github.com/partr
 
 ### [Xteink](https://www.xteink.com/)
 
-E-readers rather than dedicated dashboard panels. These run [CrossInk](https://github.com/uxjulia/CrossInk) firmware with Tesserae client support, which paints the dashboard as the reader's sleep screen on an explicit sleep transition rather than on a timer, so the radio never wakes the device on its own. The panels are mounted portrait, so the manifests compose at the portrait dimensions and let `esp32_bw_bin` pack at the landscape firmware-native stride.
+These e-readers run [CrossInk](https://github.com/uxjulia/CrossInk) firmware with Tesserae support. The dashboard appears as the sleep screen when the device enters sleep, without a timer. The radio never wakes it on its own.
+
+Panels are mounted portrait. Frames are composed at portrait dimensions, then `esp32_bw_bin` packs them at the firmware's native landscape stride.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -181,7 +218,9 @@ E-readers rather than dedicated dashboard panels. These run [CrossInk](https://g
 
 ### [Amazon Kindle](https://www.amazon.com/kindle)
 
-Kindles are e-readers, not dashboard panels, and need a jailbreak before KOReader can be installed. With the [Tesserae KOReader plugin](https://github.com/dmellok/tesserae-koreader) a Kindle pairs with a claim code, fetches 16-level greyscale frames on the interval the server sets, and sleeps in between on KOReader builds that expose the hardware alarm. The plugin reports the real screen size at pairing, so any Kindle KOReader runs on works; the models listed are the ones with a store entry and a known resolution.
+Jailbreak the Kindle before installing KOReader. The [Tesserae KOReader plugin](https://github.com/dmellok/tesserae-koreader) pairs with a claim code and downloads 16-level greyscale frames at the server's chosen interval. It sleeps between downloads on KOReader builds that expose the hardware alarm.
+
+Any Kindle running KOReader works; the plugin reports its actual screen size when pairing. The listed models have a store entry and known resolution.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -194,7 +233,7 @@ Kindles are e-readers, not dashboard panels, and need a jailbreak before KOReade
 
 ### [Kobo](https://www.kobo.com/ereaders)
 
-Kobo readers run KOReader without a jailbreak. The same [Tesserae KOReader plugin](https://github.com/dmellok/tesserae-koreader) applies, and KOReader's hardware wake is native on Kobo, so the reader sleeps between refreshes out of the box.
+Kobo readers run KOReader without a jailbreak. Use the same [Tesserae KOReader plugin](https://github.com/dmellok/tesserae-koreader) with native hardware wake, so the reader sleeps between refreshes without extra setup.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -225,7 +264,7 @@ Kobo readers run KOReader without a jailbreak. The same [Tesserae KOReader plugi
 
 ### Community
 
-Hardware supported by community-authored firmware. Each SKU below links to the firmware repo that talks Tesserae's device API on that hardware; credit sits with the firmware's author on the linked repo.
+These devices use community firmware that speaks Tesserae's device API. Each SKU links to its firmware repo, where its author is credited.
 
 | SKU | Panel | Gamut | Protocol / Renderer | Kind id |
 |---|---|---|---|---|
@@ -263,7 +302,7 @@ Hardware supported by community-authored firmware. Each SKU below links to the f
 
 ## What's been tested on real hardware
 
-Honest status from the maintainer's own bench. Untested doesn't mean broken, it means nobody's confirmed it yet. Got one working? [Open a PR or issue](https://github.com/dmellok/tesserae/issues) and we'll mark it.
+Results from the maintainer's hardware. Untested means unconfirmed, not broken. If yours works, [open a PR or issue](https://github.com/dmellok/tesserae/issues) and we'll mark it.
 
 | Renderer | Hardware | Status | Notes |
 |---|---|---|---|
@@ -273,7 +312,7 @@ Honest status from the maintainer's own bench. Untested doesn't mean broken, it 
 | `esp32_bw_bin` | Xteink X4 (GDEQ0426T82 / SSD1677, 800x480 mono) running CrossInk with Tesserae client support + Seeed reTerminal E1001 (800x480 mono) running tesserae-device-firmware + Waveshare ESP32-S3-RLCD-4.2 (400x300 reflective LCD, ST7305) running tesserae-device-firmware | :material-check-circle: Tested | 1-bpp packing confirmed end-to-end: a 48000-byte frame fetched and painted on the panel with no on-device decode, upright in the portrait_flipped composition. The X4 is an e-reader, so the dashboard is its sleep screen rather than a wake-cycle refresh. The remaining Seeed 800x480 mono SKUs (XIAO ePaper 7.5", EE04 7.5") and the Waveshare 4.2" e-paper module share this renderer but are still unconfirmed; the RLCD board is confirmed. |
 | `esp32_gray2_bin` | Xteink X4 (SSD1677, 800x480) and Xteink X3 (UC8279d, 792x528), both running CrossInk with Tesserae client support + Seeed reTerminal E1001 (4-gray mode) running tesserae-device-firmware + Seeed reTerminal Sticky (SSD1677, 480x800 portrait) running tesserae-device-firmware + M5Stack PaperMono (SSD1677, 480x800 portrait) running tesserae-device-firmware + Pimoroni Badger 2350 (SSD1680, 264x176, 4-level grey) running the tesserae-device-badger app on Badgeware 1.27.0 | :material-check-circle: Tested | 4-level grayscale confirmed end-to-end: the 2-bpp frame is fetched and composited as a base frame plus LSB/MSB planes, with distinct grey levels. Packing is byte-identical to the firmware's own 2-bpp bitmap reader, so no decode step is involved. Notable that this works on the X3's UC8253/UC8279d silicon as well as the UC8179-class panels the renderer was written for. The Sticky packs the same 96000 bytes at a portrait 120-byte stride because its firmware transposes on the device; only the stride distinguishes it from the E1001. The PaperMono is the Sticky's controller family on M5Stack's board and packs the same portrait stride; confirmed end-to-end on the bench 2026-09-12 (portal, register, dashboard frame, PMIC battery) once the firmware selected the glass's own four-grey OTP waveform. |
 | `esp32_gray_bin` | Seeed reTerminal E1003 (10.3" 1872x1404, 16-level grayscale) running tesserae-device-firmware; also the original M5Stack M5Paper (4.7" 960x540 via an IT8951 controller, classic ESP32-D0WDQ6-V3) running tesserae-device-firmware, plus the Seeed XIAO ePaper EE03 (same 10.3" panel on the XIAO driver board) and the M5Stack PaperS3 (4.7" 960x540, raw parallel glass), both not yet tested + reMarkable 2 (10.3" 1404x1872, 16-level greyscale) via the community tesserae.remarkable AppLoad app + M5Stack PaperDIY (4.7" 960x540 on the M5PM1 rail) via tesserae-device-firmware, verified by its contributor + LILYGO T5 E-Paper S3 Pro Lite (4.7" 960x540, TPS65185 power path) via tesserae-device-firmware, verified by its contributor | :material-check-circle: Tested | Confirmed end-to-end on the bench, including GT911 touch input round-tripping through the tap pipeline. The 4-bpp nibble-packed frame (1314144 bytes) is fetched over REST and painted with no on-device decode. The original M5Paper is also confirmed end-to-end (2026-09-10): the same it8951_gray driver on classic-ESP32 silicon at the PaperS3's 960x540 geometry, plus battery telemetry, the three side buttons, the SHT30 sensor and GT911 touch. Touch reports in the 540x960 composition space and needs the panel kept awake -- the classic ESP32 cannot wake from deep sleep on the touch INT. The EE03 paints a byte-identical frame to the E1003 (same ED103TC2 glass behind the same IT8951 controller); the PaperS3 shares this renderer at a different geometry. Those two are awaiting a first bring-up on real hardware. |
-| `fraimic_bin` | Fraimic 31.5" Large Canvas (EL315), firmware 0.2.31 | :material-progress-helper: Partial | Byte order and colour codes confirmed on the 31.5" panel with an asymmetric test pattern uploaded to /api/image. The wake-schedule loop and the 13.3" layout have not been run on hardware yet. |
+| `fraimic_bin` | Fraimic 31.5" Large Canvas (EL315), firmware 0.2.31; 13.3" Standard Canvas by community report | :material-progress-helper: Partial | Byte order and colour codes confirmed on the 31.5" panel with an asymmetric test pattern uploaded to /api/image, and the wake schedule runs on that frame. The 13.3" canvas is confirmed by a community report, not on the bench. |
 | `kaleido_png` | - | :material-circle-outline: Not yet tested | - |
 | `pi_bin` | Pimoroni Inky Impression (Spectra 6 / Waveshare E6) | :material-check-circle: Tested | Fastest Pi path, packed buffer written straight to inky's _buf. |
 | `pi_png` | Pimoroni Inky Impression (via inky set_image) | :material-check-circle: Tested | Works on every inky-supported panel; quantises on the Pi each frame. |

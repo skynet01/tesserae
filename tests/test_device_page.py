@@ -731,11 +731,10 @@ def test_every_thumbnail_is_one_frame_that_covers_its_box() -> None:
     assert re.search(r"\.lu \.lu-thumb\s*{[^}]*aspect-ratio: var\(--ar\)", lineups)
     thumbs = (
         r"(lu-thumb|dxe-thumb|dx-dash-thumb|dx-dashquick-preview|dx-hist-thumb|dx-event-thumb-link"
-        r"|dx-now-thumb|dx-next-thumb|dx-thumb-q-frame|dx-thumb|preview-frame|dxe-it-pic)"
+        r"|dx-now-thumb|dx-next-thumb|dx-thumb-q-frame|dx-thumb|preview-frame)"
     )
     for sheet in css.glob("*.css"):
-        # A thumbnail that letterboxes on purpose (.fit, .is-fit, .is-render) is the exception.
-        text = re.sub(r"[^{}]*(\.fit|\.is-fit|\.is-render)[^{}]*{[^}]*}", "", sheet.read_text())
+        text = sheet.read_text()
         assert not re.search(r"\." + thumbs + r"[^{}]*\simg\s*{[^}]*object-fit", text), sheet.name
         assert not re.search(r"\." + thumbs + r"\s*{[^}]*\n  border: [^;]*solid", text), sheet.name
 

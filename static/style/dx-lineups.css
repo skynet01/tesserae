@@ -2496,12 +2496,6 @@ main.page.lu-page {
   --thumb-edge: var(--t-border-strong);
   --thumb-bg: var(--lu-paper);
 }
-/* An item's preview fills the display's box as the frame shows it: cropped to
-   cover (the frame's default), or whole where the widget letterboxes (.fit),
-   on the paper. */
-.lu .lu-thumb.it.fit > img {
-  object-fit: contain;
-}
 .lu .lu-thumb-ph {
   display: grid;
   place-items: center;

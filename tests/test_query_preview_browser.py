@@ -171,17 +171,17 @@ def test_real_canvas_drawer_opens_preview_from_unsaved_options(app, browser, tmp
             return
         if parsed.path.endswith("/query-preview"):
             posts.append(parse_qs(request.post_data))
-        response = client.open(
+        with client.open(
             path,
             method=request.method,
             data=request.post_data_buffer,
             content_type=request.headers.get("content-type"),
-        )
-        route.fulfill(
-            status=response.status_code,
-            body=response.get_data(),
-            headers={"Content-Type": response.content_type},
-        )
+        ) as response:
+            route.fulfill(
+                status=response.status_code,
+                body=response.get_data(),
+                headers={"Content-Type": response.content_type},
+            )
 
     page.route("http://preview.test/**", serve)
     page.route("https://example.com/**", lambda route: route.fulfill(status=404))

@@ -1,7 +1,7 @@
 {
   "tesserae_compat": "1.x",
   "name": "Home Assistant, Dashboard",
-  "version": "0.1.1",
+  "version": "0.3.0",
   "kind": "widget",
   "locales": ["en", "cs", "de", "es", "fr", "it", "lt", "nb", "nl", "pl", "pt", "sk", "sv", "zh-CN", "zh-TW"],
   "description": "Shows one of your existing Home Assistant dashboards as-is, no rebuilding in Tesserae. The server opens the dashboard in headless Chromium, signed in with the Home Assistant Core token, hides the sidebar and header, and captures the view at the cell's size. Point it at any dashboard path (lovelace/0, dashboard-kitchen/overview). Frames are re-rendered on the interval you set and the last good frame is kept between renders.",
@@ -20,9 +20,9 @@
     {
       "name": "zoom",
       "type": "select",
-      "label": "Dashboard zoom",
+      "label": "Zoom",
       "default": "1",
-      "help": "Scales Home Assistant cards and text before capture. 75% fits more cards; 125% makes them larger. Applies to this dashboard capture.",
+      "help": "Scales the dashboard before capture. Larger values make cards bigger and easier to read on e-ink, fewer of them fit.",
       "choices": [
         {
           "value": "0.75",
@@ -47,27 +47,42 @@
       ]
     },
     {
+      "name": "fit",
+      "type": "boolean",
+      "label": "Fit to cell",
+      "default": false,
+      "help": "Shrinks the dashboard until all of it fits in the cell, so nothing is cut off at the bottom. Zoom is then the largest it may be drawn at. A long dashboard on a small panel comes out with small text; a view with fewer cards reads better."
+    },
+    {
+      "name": "theme",
+      "overrides_look": "uses Home Assistant's theme",
+      "type": "select",
+      "label": "Theme",
+      "help": "The Home Assistant theme to capture with, from the themes installed there. Only the capture uses it; your own browsers keep their theme.",
+      "default": "",
+      "choices_from": "theme"
+    },
+    {
       "name": "dark_mode",
       "overrides_look": "uses its own dark mode",
       "type": "boolean",
       "label": "Dark theme",
       "default": false,
-      "help": "Render with Home Assistant's dark mode. Light is usually the better fit for a panel."
+      "help": "Render with Home Assistant's dark mode, or the dark variant of the theme above if it has one. Light is usually the better fit for a panel."
     },
     {
       "name": "kiosk",
       "type": "boolean",
-      "label": "Add ?kiosk to the URL",
+      "label": "Kiosk query",
       "default": true,
       "advanced": true,
-      "help": "Only does something if you installed the kiosk-mode add-on from HACS; it then hides what that add-on is set to hide. Without it, this has no effect. To hide the header, use Hide HA header instead."
+      "help": "Appends ?kiosk to the URL so the kiosk-mode integration, if installed, strips the remaining chrome. Harmless without it."
     },
     {
       "name": "settle_seconds",
-      "unit": "s",
       "type": "number",
       "label": "Settle delay",
-      "help": "Seconds to wait after the dashboard loads, so cards that fetch their own data (history graphs, cameras, maps) finish drawing. 2 suits most dashboards; try 5 for cameras or maps. 0 to 12.",
+      "help": "Seconds to wait after the dashboard reports loaded, so cards that fetch their own data (history graphs, cameras, maps) have painted before capture.",
       "default": 2,
       "advanced": true,
       "min": 0,
@@ -75,63 +90,13 @@
     },
     {
       "name": "refresh_seconds",
-      "unit": "s",
       "type": "number",
-      "label": "Capture interval",
-      "help": "How long a capture is reused, in seconds. 300 is 5 minutes, 900 is 15 minutes, 3600 is 1 hour. 30 to 86400 (1 day). The next preview or display update after that takes a new one; refreshing the preview captures right away.",
+      "label": "Refresh",
+      "help": "Seconds a captured frame may age before the next render replaces it. Each render opens a browser for a few seconds, so keep this near the panel's own wake interval.",
       "default": 300,
       "advanced": true,
       "min": 30,
       "max": 86400
-    },
-    {
-      "name": "hide_header",
-      "type": "boolean",
-      "label": "Hide HA header",
-      "default": true,
-      "advanced": true,
-      "help": "Tesserae hides Home Assistant's top bar and sidebar before capture. Works without any add-on. Turn off to include the header."
-    },
-    {
-      "name": "offset_x",
-      "unit": "px",
-      "type": "number",
-      "label": "Canvas offset X",
-      "default": 0,
-      "min": -4096,
-      "max": 4096,
-      "advanced": true,
-      "help": "Moves the captured dashboard horizontally. Positive moves right; negative moves left. Content beyond the cell edge is clipped."
-    },
-    {
-      "name": "offset_y",
-      "unit": "px",
-      "type": "number",
-      "label": "Canvas offset Y",
-      "default": 0,
-      "min": -4096,
-      "max": 4096,
-      "advanced": true,
-      "help": "Moves the captured dashboard vertically. Positive moves down; negative moves up. Empty space uses the light or dark background."
-    },
-    {
-      "name": "ha_theme",
-      "overrides_look": "uses Home Assistant's theme",
-      "placeholder": "Google Dark Theme",
-      "type": "string",
-      "label": "Home Assistant theme",
-      "default": "",
-      "advanced": true,
-      "help": "Type the theme name exactly as Home Assistant shows it in your profile's theme list, including spaces and capitals. No YAML is needed. Leave blank to use the HA account's theme. Applies only to this capture session; a dashboard theme can override it."
-    },
-    {
-      "name": "language",
-      "placeholder": "pt-BR",
-      "type": "string",
-      "label": "Home Assistant language",
-      "default": "",
-      "advanced": true,
-      "help": "A language code such as en, de or pt-BR. Leave blank to use the HA account preference."
     }
   ],
   "render": { "dither": "ordered", "needs_network": true }

@@ -184,7 +184,19 @@ ClientFactory = Callable[[str], FraimicClient]
 
 
 def is_fraimic_device(device: Any) -> bool:
-    return getattr(device, "kind_of", None) == KIND
+    """Whether an instance or kind is a Fraimic canvas: the folder kind, an
+    instance of it, or a catalog SKU on its protocol (those share
+    devices/fraimic/device.py, which carries the PROTOCOL marker)."""
+    if getattr(device, "kind_of", None) == KIND or getattr(device, "id", None) == KIND:
+        return True
+    return getattr(getattr(device, "module", None), "PROTOCOL", None) == KIND
+
+
+def fraimic_kinds(devices: DeviceRegistry) -> list[Device]:
+    """The kinds a Fraimic can be added as: the generic kind first, then
+    the catalog models by name."""
+    kinds = [d for d in devices.devices.values() if not d.kind_of and is_fraimic_device(d)]
+    return sorted(kinds, key=lambda d: (d.id != KIND, str(d.name).casefold()))
 
 
 def schedule_matches(current: dict[str, Any], desired: dict[str, Any]) -> bool:
@@ -290,7 +302,7 @@ class FraimicPublisher:
     # -- helpers ----------------------------------------------------------
 
     def _frames(self) -> list[Device]:
-        return [d for d in self._devices.devices.values() if is_fraimic_device(d)]
+        return [d for d in self._devices.devices.values() if d.kind_of and is_fraimic_device(d)]
 
     def _cfg(self, device_id: str) -> dict[str, Any]:
         section = self._settings.get_section("devices") or {}
@@ -671,10 +683,16 @@ class FraimicPublisher:
                         events = upcoming(
                             device.id,
                             now=datetime.fromtimestamp(now, UTC),
-                            limit=fraimic_wakes.CHAIN_SLOTS,
+                            limit=fraimic_wakes.CHAIN_SLOTS * 2,
                             quiet_window=quiet,
                         )
-                        changes = [e.scheduled_at.timestamp() for e in events]
+                        # A dashboard's own Updates refresh is not a lineup
+                        # change, so it doesn't spend one of the frame's wakes.
+                        changes = [
+                            e.scheduled_at.timestamp()
+                            for e in events
+                            if getattr(e, "cause", None) != "dashboard_refresh"
+                        ][: fraimic_wakes.CHAIN_SLOTS]
                     except Exception:
                         logger.exception("fraimic %s: reading upcoming pushes failed", device.id)
             elif mode == fraimic_wakes.MODE_INTERVAL:

@@ -1144,3 +1144,103 @@ def test_inline_edit_warns_only_when_the_edit_changed_the_times(app: Flask) -> N
     assert same["warnings"] == []
     moved = client.post("/decks/lu/window", json={"start": "05:00"}).get_json()
     assert len(moved["warnings"]) == 1 and moved["warnings"][0].startswith("Starts at ")
+
+
+# -- item hooks are held to the widget's own limits ----------------------------
+
+
+def test_item_hooks_run_inside_the_widgets_capability_scope(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hook's network calls are checked against the widget's allowlist, as
+    its data fetch is, so the scope in force during the call is the widget's."""
+    from app import capabilities
+    from app.step_items import list_items
+
+    caps = capabilities.parse("scoped", {"network": ["photos.example"]})
+    seen: list[Any] = []
+
+    def lineup_items(options: dict[str, Any]) -> Any:
+        seen.append(capabilities._active.get())
+        yield from PAPERS  # read inside the scope too
+        seen.append(capabilities._active.get())
+
+    reg = app.config["PLUGIN_REGISTRY"]
+    real = reg.get
+    plugin = SimpleNamespace(
+        manifest={"lineups": {"pin_option": "paper"}},
+        server_module=SimpleNamespace(lineup_items=lineup_items),
+        capabilities=caps,
+    )
+    monkeypatch.setattr(reg, "get", lambda pid: plugin if pid == "scoped" else real(pid))
+    with app.test_request_context():
+        found = list_items(_widget_page(app, "scoped", {}, "p1"))
+    assert found.total == 2
+    assert seen == [caps, caps]
+    assert capabilities._active.get() is None
+
+
+def test_an_item_listing_is_capped_and_reused_for_a_moment(
+    app: Flask, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import itertools
+
+    from app.step_items import MAX_HOOK_ITEMS, list_items
+
+    calls: list[int] = []
+
+    def lineup_items(options: dict[str, Any]) -> Any:
+        calls.append(1)
+        return ({"key": f"k{i}", "label": f"Item {i}"} for i in itertools.count())
+
+    _install(
+        app,
+        monkeypatch,
+        endless={
+            "manifest": {"lineups": {"pin_option": "paper"}},
+            "module": SimpleNamespace(lineup_items=lineup_items),
+        },
+    )
+    with app.test_request_context():
+        page = _widget_page(app, "endless", {}, "p1")
+        assert list_items(page).total == MAX_HOOK_ITEMS
+        assert list_items(page, query="item 7").matched > 0
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("declared", "shown"),
+    [
+        ("papers", "papers"),
+        ("front pages", "front pages"),
+        ('"><img src=x onerror=alert(1)>', "items"),
+        ("x" * 40, "items"),
+        (7, "items"),
+    ],
+)
+def test_a_widgets_noun_is_letters_only(
+    app: Flask, monkeypatch: pytest.MonkeyPatch, declared: Any, shown: str
+) -> None:
+    from app.step_items import _noun
+
+    _install(app, monkeypatch, named={"manifest": {"lineups": {"noun": declared}}})
+    with app.test_request_context():
+        assert _noun("named") == shown
+
+
+def test_moving_a_lineup_clears_the_display_it_left(app: Flask) -> None:
+    """The old display's warmed frames and its place in the lineup go when the
+    lineup moves; before, only the new display was cleared."""
+    _register(app, "hall")
+    _register(app, "study")
+    app.config["PAGE_STORE"].save(Page(id="a", name="A", device_ids=["hall", "study"]))
+    _deck(app, device_ids=["hall"])
+    cleared: list[str] = []
+    app.config["PUSH_MANAGER"] = SimpleNamespace(clear_deck_cache=cleared.append)
+    nav = app.config["DECK_NAV_STORE"]
+    nav.set("hall", "lu", "a")
+    resp = _save(app, device_ids="study")
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    assert _stored(app).device_ids == ["study"]
+    assert sorted(cleared) == ["hall", "study"]
+    assert nav.get("hall") is None

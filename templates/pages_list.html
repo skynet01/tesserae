@@ -667,7 +667,7 @@
       const src = row.getAttribute('data-preview-src');
       const w = parseInt(row.getAttribute('data-preview-w') || '0', 10);
       const h = parseInt(row.getAttribute('data-preview-h') || '0', 10);
-      if (!png || !w || !h) return;
+      if ((!png && !src) || !w || !h) return;
       box.setAttribute('data-filled', '1');
       const img = document.createElement('img');
       img.alt = 'Preview of ' + (row.querySelector('.dx-dash-name') || {}).textContent;
@@ -694,6 +694,12 @@
         fit();
         if (window.ResizeObserver) new ResizeObserver(fit).observe(box);
       });
+      // A display never sent to has no picture while its draft is still being
+      // drawn (an empty data-preview-png): go straight to the live iframe.
+      if (!png) {
+        img.dispatchEvent(new Event('error'));
+        return;
+      }
       img.src = png;
       box.appendChild(img);
     }

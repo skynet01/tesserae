@@ -384,7 +384,7 @@
     const prevLabel = draw ? "Previous picture" : `Previous ${noun}`;
     const nextLabel = draw ? s.draw_label || "Draw the next picture" : `Next ${noun}`;
     const items = canPick
-      ? `<span class="lu-items" role="group" aria-label="${draw ? `Draw another ${esc(s.name)} picture` : `Choose which ${esc(s.name)} item to push`}"><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:-1" aria-label="${prevLabel}" title="${prevLabel}"${draw && !choice ? " disabled" : ""}>${ico("chevl")}</button><span class="lu-it-pos" aria-hidden="true">${choice && !draw ? `${choice.idx + 1}/${s.items.length}` : ""}</span><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:1" aria-label="${nextLabel}" title="${nextLabel}">${ico("chev")}</button></span>`
+      ? `<span class="lu-items" role="group" aria-label="${draw ? `Draw another ${esc(s.name)} picture` : `Choose which ${esc(s.name)} item to push`}"><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:-1" aria-label="${esc(prevLabel)}" title="${esc(prevLabel)}"${draw && !choice ? " disabled" : ""}>${ico("chevl")}</button><span class="lu-it-pos" aria-hidden="true">${choice && !draw ? `${choice.idx + 1}/${s.items.length}` : ""}</span><button type="button" class="lu-it" data-item="${esc(l.id)}:${s.index}:1" aria-label="${esc(nextLabel)}" title="${esc(nextLabel)}">${ico("chev")}</button></span>`
       : "";
     // A widget that draws a random photo is a collection too: it stacks, and says
     // "random" when it can't say how many it draws from.
@@ -588,7 +588,7 @@
       // its initial, never the step's picture standing in for it.
       const url = it && it.key ? it.thumb_url : (it && it.thumb_url) || s.thumb_url;
       items.push(
-        `<li class="lu-pk-item">${thumb(s.name, url, s.aspect, d.orientation || s.orientation, s.item_fit ? "it fit" : "it", label, false, d)}` +
+        `<li class="lu-pk-item">${thumb(s.name, url, s.aspect, d.orientation || s.orientation, s.item_fit ? "it fit thumb-frame--letterbox" : "it", label, false, d)}` +
           "</li>"
       );
     }

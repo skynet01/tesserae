@@ -1225,15 +1225,21 @@ main.page.dxe-page {
   place-items: center;
   width: 100%;
   aspect-ratio: var(--dxe-arw, 16) / var(--dxe-arh, 10);
-  --thumb-radius: var(--lu-r-xs);
-  --thumb-edge: var(--t-border-strong);
-  --thumb-bg: var(--lu-paper);
+  border-radius: var(--lu-r-xs);
+  border: 1px solid var(--t-border-strong);
+  background: var(--lu-paper);
+  overflow: hidden;
 }
-.lu.dxe .dxe-kids.is-fit .dxe-it-pic > img {
+.lu.dxe .dxe-it-pic img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.lu.dxe .dxe-kids.is-fit .dxe-it-pic img {
   object-fit: contain;
 }
 .lu.dxe .dxe-it.is-ghost .dxe-it-pic {
-  --thumb-bg: color-mix(in oklab, var(--t-fg) 7%, var(--lu-paper));
+  background: color-mix(in oklab, var(--t-fg) 7%, var(--lu-paper));
   animation: dxe-pulse 1.2s ease-in-out infinite alternate;
 }
 @keyframes dxe-pulse {
@@ -1250,7 +1256,7 @@ main.page.dxe-page {
   width: var(--dxe-tw);
   aspect-ratio: var(--dxe-arw, 16) / var(--dxe-arh, 10);
 }
-.lu.dxe .dxe-it.is-render .dxe-it-pic > img {
+.lu.dxe .dxe-it.is-render .dxe-it-pic img {
   object-fit: contain;
 }
 .lu.dxe .dxe-it-word {
@@ -1269,7 +1275,7 @@ main.page.dxe-page {
   outline-offset: 1px;
 }
 .lu.dxe button.dxe-it:hover .dxe-it-pic {
-  --thumb-edge: var(--t-fg);
+  border-color: var(--t-fg);
 }
 .lu.dxe .dxe-it-l {
   white-space: nowrap;

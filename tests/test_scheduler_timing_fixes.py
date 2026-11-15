@@ -107,6 +107,26 @@ def test_failed_bound_cycle_send_is_retried_next_tick(tmp_path):
     assert len(push.calls) == 2
 
 
+def test_a_send_that_keeps_failing_is_given_up_after_a_few_ticks(tmp_path):
+    """A display that is off fails every tick; the window is tried three
+    times, then recorded as spent, and the next window starts afresh."""
+    sched, push, _deck, _ds = _rig(tmp_path, dwells=(5, 5, 5))
+    push.fail_all = True
+    for tick in range(3):
+        assert _tick(sched, T + timedelta(seconds=30 * tick)) == [("lu", 0)]
+    assert len(push.calls) == 3
+    for tick in range(3, 9):
+        assert _tick(sched, T + timedelta(seconds=30 * tick)) == []
+    assert len(push.calls) == 3
+    assert sched.rotation_status()["lu"]["last_status"] == "failed"
+    # The next window gets its own three tries.
+    assert _tick(sched, T + timedelta(minutes=5)) == [("lu", 1)]
+    assert push.calls[-1][0] == "b"
+    push.fail_all = False
+    assert _tick(sched, T + timedelta(minutes=5, seconds=30)) == [("lu", 1)]
+    assert sched.rotation_status()["lu"]["last_status"] == "sent"
+
+
 def test_failed_display_retries_without_resending_the_successful_one(tmp_path):
     sched, push, _deck, _ds = _rig(tmp_path, devices=("p1", "p2"))
     push.fail_devices = {"p2"}

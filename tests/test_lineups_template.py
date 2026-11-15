@@ -544,8 +544,7 @@ def test_old_lineups_page_code_is_gone() -> None:
     assert ".dk-row" not in old and ".dk-group" not in old
     assert ".lu.dxe" in old  # the lineup editor keeps its styles
     # Thumbnails are the one frame in the display's shape (base.css): the picture
-    # covers it to the border, so the lineups sheet sets no object-fit on a
-    # thumbnail's picture except an item that letterboxes.
+    # covers it, so the lineups sheet sets no object-fit on a thumbnail's picture.
     assert not re.search(r"\.lu \.lu-thumb img \{[^}]*object-fit", CSS)
     assert re.search(r"\.lu \.lu-thumb \{[^}]*aspect-ratio: var\(--ar\)", CSS)
 

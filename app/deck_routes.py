@@ -1977,6 +1977,16 @@ def _edited_deck(
                 # and cycle branches).
                 stop = None if end_s == "24:00" else end_s
                 if len(deck.pages) > 1:
+                    # A rotation's whole cycle is capped at a week
+                    # (rotation_model); a cycle saved past that fails to load
+                    # and takes the Lineups page down with it.
+                    if deck.advance_cycle_minutes > 10_080:
+                        raise _EditError(
+                            "These dashboards' times add up to more than a week, "
+                            "so this push can't take an end time.",
+                            400,
+                            deck.id,
+                        )
                     changes.update(
                         advance_trigger="cycle",
                         advance_anchor=s,
@@ -3462,7 +3472,11 @@ def dashboard_items() -> Response:
         except ValueError:
             return default
 
+    # Only a display that exists: the id reaches the widget's item hook.
     display = (request.args.get("display_id") or "").strip()[:100] or None
+    registry = current_app.config.get("DEVICE_REGISTRY")
+    if display is not None and (registry is None or registry.get(display) is None):
+        display = None
     found = list_items(
         page,
         device_id=display,
@@ -3868,6 +3882,12 @@ def editor_save() -> Response:
         form, ordered, deck.device_ids[0] if deck.device_ids else None
     )
     _invalidate(deck)
+    if existing is not None:
+        # A lineup moved to another display leaves the old one too: its
+        # warmed frames and its place in this lineup go with it.
+        left = [d for d in existing.device_ids if d not in deck.device_ids]
+        if left:
+            _invalidate(existing.model_copy(update={"device_ids": left}))
     if (
         existing is not None
         and existing.page_ids != deck.page_ids

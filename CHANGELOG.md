@@ -20,6 +20,90 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
+- Home Assistant, Dashboard widget: a **Fit to cell** option shrinks the dashboard until all of it fits, so a view taller than the cell is no longer cut off at the bottom. **Zoom** then sets the largest size it may be drawn at.
+- Home Assistant, Dashboard widget: a **Theme** option, listing the themes installed in Home Assistant, captures the dashboard in the one you pick, so a panel can use a high-contrast or e-ink theme without changing the theme anyone sees in their browser. Blank keeps Home Assistant's default theme.
+- OpenDisplay via Home Assistant: **Add device → OpenDisplay** lists the tags Home Assistant knows under **Found in Home Assistant**, each with a one-click **Add** that takes the tag's size and colour palette from the tag itself.
+- OpenDisplay via Home Assistant: the tag's page shows whether the last picture arrived, with Home Assistant's reason when it did not, and a **Send again** button. A failed picture is tried again after 1, 5, 15 and then 30 minutes.
+- OpenDisplay via Home Assistant: **Colour conversion** can be set to Tesserae, which reduces the picture to the tag's palette the way previews are drawn and has Home Assistant send it unchanged. Home Assistant converting it stays the default.
+- OpenDisplay via Home Assistant: **Refresh** can be set to Fast, for less flashing on panels that support it.
+- OpenDisplay tags: a **Model** choice on the add form for known hardware, and two more palettes, black, white and yellow and seven colours.
+- Device kinds can list named hardware (`models`) for the add form.
+- OpenDisplay tags: **Panel → Colour palette** on the tag's page sets which colours the panel has (black and white, red, red and yellow, six colours, or greys), since the tag does not report it. Previews are drawn in those colours. Applies to the Home Assistant and bridge kinds.
+- Device kinds can list the palettes an operator may pick (`palettes`) and mark a replaced config field (`retired`) so it shows only on devices that still use it.
+- OpenDisplay via Home Assistant works from any install, not only the HA add-on. With the Home Assistant Core plugin configured, **Add device → OpenDisplay** shows the tag form, and Tesserae uploads each frame to HA's media folder through its API. The token must belong to an HA administrator. The add-on still writes to the shared `/media`, and now uploads instead when that folder is not writable.
+- Fraimic: the Large Canvas (31.5") and the Standard Canvas (13.3") are in the hardware catalog, so **Add device → Fraimic** has a **Model** choice that sets the panel size, and both are listed on the compatibility page. A frame added before this keeps working as it is.
+- Device kinds can place a config field in a named group (`group`) and show it only for some values (`show_if`).
+- Lineups: a + beside each display's chevron starts a new lineup for that display.
+- Lineups: a day tile you click shows a check (runs) or an x (off) for a moment, and a small one until the change is saved.
+- Lineups: click a lineup's name to rename it in place; Enter or clicking away saves, Escape cancels.
+- Lineups: a daily push can take an end time ("06:00-18:00"); with several dashboards it then steps through them in that window. Remove the end to go back to a single push.
+- Lineups: drag a lineup's dashboards left or right to reorder them, or press Alt+Left / Alt+Right on one; it saves on drop.
+- Lineup editor: rebuilt as When it runs, Dashboards and Timing, under what is on screen and the display's day bar.
+- Lineup editor: each dashboard says what it is ("Gallery · 412 photos") and opens to its items in a searchable grid, its first eight in the display's own shape.
+- Lineup editor: only the options that apply are shown; Priority when lineups overlap, Min hold when something can cut a dashboard short.
+- Lineup editor: Push now and a ... menu (Move to another display, Delete) sit top right by the On switch; a move applies on Save.
+- Lineup editor: drag or arrow-key this lineup's block on the day bar to set its time, click another lineup's block to open it, and Show all puts every day's bar in the header.
+- Lineup editor: a gear by a dashboard's name opens it in the dashboard editor; its arrows pick the item Push now sends, and the item control reads Rotate items or Show chosen.
+- Lineups: New lineup, and the + beside each display, open a three-step new-lineup page.
+- Lineups: album widgets that draw a random photo show as a stack badged "random" (or x N), with a Recent photos strip in the editor.
+- Widgets: item hooks can return a preview `thumb` per item and take a `ctx` (cell size, display); see the widget guide.
+
+### Changed
+
+- OpenDisplay via Home Assistant: the palette is set from what the tag reports, and follows the tag if it is reconfigured. A palette you pick afterwards is kept.
+- OpenDisplay via Home Assistant: removing a tag deletes its uploaded picture from Home Assistant's media folder.
+- OpenDisplay via Home Assistant: **Panel → Rotation** now turns the frame, so it is the only rotation setting and 180° and 270° work; **Underscan** applies too. The tag's page no longer shows the client rotation, scale and letterbox options, which never reached Home Assistant. A tag that used the old Home Assistant rotation keeps working as it was and shows it as **Turn in Home Assistant (older setup)** until it is set to None.
+- Devices: the messages for the numbered orientation card now call it that, not a calibration card, so it is not mistaken for colour calibration.
+- Docs: Seeed's OpenDisplay 4.26" Mono Kit and 7.3" Color Kit are listed in the README, the Seeed hardware page and the OpenDisplay guide, with store links. Seeed's discount code for Tesserae readers, TESSERAE, is on those pages and the compatibility page; it covers the reTerminal E-Series, the reTerminal Sticky and the OpenDisplay kits.
+- Docs: the Fraimic quickstart and the compatibility page carry Fraimic's discount code for Tesserae readers (TESSERAE10, 10% off at fraimic.com), with a disclosure that Fraimic supplied the Large Canvas free and that sales made with the code pay the project a commission.
+- Docs: plainer wording across the wiki, and corrected facts that no longer matched the app.
+- Docs: docs.tesserae.ink takes the Paper design of the app and tesserae.ink (warm paper, red ink, Archivo and Martian Mono) in place of the teal Material theme, in light and dark. The fonts are served from the docs site, so its pages no longer load anything from Google Fonts.
+- Fix contextual help buttons in the canvas editor.
+- Keep selection marks and reorder handles visible for selected list items.
+- Samsung The Frame: its Power and Art Mode settings sit in groups of their own, and the Home Assistant switch field shows only when Power control is a Home Assistant switch.
+- Samsung The Frame: the TV's own slideshow setting reads "Managed by Tesserae" or "Managed by the TV".
+- Let gallery widgets preview matches for the current editor options.
+
+### Fixed
+
+- Home Assistant, Dashboard widget: the **Theme** and **Dark theme** options now take effect on Home Assistant versions that save each person's theme to their account. The capture used to come out in whatever theme the owner of the access token had picked for themselves.
+- OpenDisplay via Home Assistant: with **Colour conversion** set to Tesserae, colours no longer shift on the tag (green came out yellow on a six-colour panel). Home Assistant was still applying its automatic tone compression to the already-converted picture; Tesserae now turns that off for these pictures.
+- OpenDisplay via Home Assistant: a tag that is taller than wide, such as a Solum 3.5", gets its picture the right way round. Tesserae assumed every tag was wider than tall and turned a portrait dashboard sideways, which Home Assistant then shrank to fit. It now reads each tag's size and rotation from Home Assistant.
+- OpenDisplay via Home Assistant: sending to one display no longer makes other OpenDisplay tags repaint the frame they already show first. Tesserae forgot what each tag had been sent after a restart or any device settings save, so the next send re-uploaded every tag in turn. It now remembers, and when several tags are due the one just rendered goes first.
+- Calendar: events with a floating time (no `TZID` and no `Z`, e.g. `DTSTART:20261116T090000`) show at their local time. They were read as UTC, so a 9:00 event showed at 04:00 in New York. To-do due times get the same fix.
+- Blank pictures on a frame: a render whose images fail to load is retried once, and a scheduled, lineup or refresh send that still has broken images keeps the previous frame. A manual send goes out with a warning in History.
+- Device page: dashboard schedules have their own list instead of sitting in the Lineups list.
+- Lineups: a greyed row says why in a small tag (Not today, Done for today, Off, Not playing), so grey pictures aren't mistaken for black and white.
+- Lineups: a long day tag such as "Mon Tue Wed Sat Sun" no longer runs under the lineup's title.
+- Lineups: the time editor shows AM or PM in full.
+- Lineups: a display's day bar stays when you fold it; only its lineup rows fold.
+- Lineups: the day picker's calendar icon sits level with the middle of the day bar, at any width.
+- Lineups: reordering a live rotation sends the dashboard now in its slot.
+- Thumbnails fill their frame-shaped box on every page, so no thin light line shows along an edge.
+- Dashboards: a dashboard shared by displays of different shapes shows, under each display, that display's own ratio, picture and size.
+- Lineups: a dashboard bound to displays of different shapes shows each display its own ratio and picture, not the largest panel's.
+- A lineup send that failed is retried on the next tick instead of being counted as done, so a failed 06:00 send no longer misses its whole slot. It is tried three times, then left until the next slot.
+- Smart sync waits for the displays a lineup sends to, not every display its dashboards are bound to.
+- A timer-only lineup ("Taps also flip" off) no longer follows its page links or touch zones, on the server or on a display that navigates from its own cache.
+- The lineup's current step follows its conditions and priority mode, and reads as held when every rule fails, instead of showing the clock's slot.
+- The Lineups Next pill, tick and countdown follow what the scheduler will send: minimum hold, rules, priority mode and a sleeping display's check-in.
+- "Next update" counts a dashboard's own Updates refresh, not only the next lineup change. A battery display still sleeps to its own interval and does not wake early for these.
+- Lineups: the quiet-hours warning says what happens and only shows when a save changes the times, days or display.
+- Lineups: widget preview images (e.g. Immich) load under Home Assistant ingress instead of showing "?".
+- Lineups and the lineup editor: a short block on the day bar is a sliver of its own, 1px from its neighbours, never under them.
+- Lineup editor: a daily or interval lineup edits its own time, a window with several dashboards takes them in turn, and cut to one it keeps its pace.
+- Lineup editor: Smart sync can be switched off again, and a daily or interval lineup set to also take taps now runs.
+- Lineup editor: saving keeps a lineup's other displays and the settings it doesn't show, and a save from a stale tab is refused instead of undoing newer edits.
+- Lineup editor: Timing follows each dashboard's own time and quiet hours count only on their days.
+
+### Security
+
+- Widgets: a widget's lineup item hooks (`lineup_items`, `lineup_item_count`) run inside its declared network allowlist, like its data fetch; a listing is capped at 5000 entries and its `lineups.noun` is letters only.
+
+## [0.511.0], 2026-11-13
+
+### Added
+
 - Fraimic: wakes closer than an hour and more than four a day. **Wake every** goes down to 5 minutes with a **Counted from** anchor, and **At set times each day** takes any number of times. The frame's own schedule can't express these, so Tesserae leads the frame along: at each wake it writes the next four wake times, the first being the wake it wants and the rest a fallback if one is missed. Hourly-or-slower intervals from midnight and up to four times still use the frame's own schedule.
 - Fraimic: a **When the picture is due to change** wake schedule, which wakes the frame for the next lineup step, schedule or page refresh rather than on a fixed interval, with a ceiling (6 hours by default) between wakes.
 - Fraimic: wakes skip quiet hours, follow a wake interval the page on the glass declares (down to 15 minutes), and with **Wake less often on a low battery** stretch to twice the gap below 20% and four times below 10%.

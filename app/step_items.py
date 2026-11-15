@@ -107,13 +107,68 @@ def _accepts_ctx(fn: Callable[..., Any]) -> bool:
     )
 
 
-def _call_hook(fn: Callable[..., Any], options: dict[str, Any], ctx: dict[str, Any] | None) -> Any:
+#: Most entries taken from one ``lineup_items`` listing; a widget that lists
+#: more is cut here, so a runaway hook cannot fill the process.
+MAX_HOOK_ITEMS = 5000
+
+#: (widget, hook, options, ctx) -> (when, result). The editor and the Lineups
+#: page ask the same question several times while drawing one page, and a
+#: hook may be a network call, so an answer is kept for a few seconds.
+_HOOK_CACHE: dict[str, tuple[float, Any]] = {}
+_HOOK_CACHE_TTL_S = 20.0
+_HOOK_CACHE_MAX = 128
+
+
+def _call_hook(
+    plugin_id: str, fn: Callable[..., Any], options: dict[str, Any], ctx: dict[str, Any] | None
+) -> Any:
     """Call a widget's ``lineup_items`` / ``lineup_item_count`` hook; the
     render ``ctx`` goes only to a hook that declares it, so a widget written
-    with one argument keeps working."""
-    if ctx is not None and _accepts_ctx(fn):
-        return fn(dict(options), ctx=ctx)
-    return fn(dict(options))
+    with one argument keeps working.
+
+    The call runs inside the widget's capability scope, as its data fetch
+    does, so a hook reaches only the hosts the widget declared. A listing is
+    read at most ``MAX_HOOK_ITEMS`` entries deep, and an answer is reused for
+    a few seconds."""
+    import itertools
+    import json
+
+    from app.capabilities import capability_scope
+
+    try:
+        key: str | None = json.dumps(
+            [plugin_id, getattr(fn, "__name__", ""), id(fn), options, ctx],
+            sort_keys=True,
+            default=str,
+        )
+    except (TypeError, ValueError):
+        key = None
+    now = time.monotonic()
+    if key is not None:
+        hit = _HOOK_CACHE.get(key)
+        if hit is not None and now - hit[0] < _HOOK_CACHE_TTL_S:
+            return hit[1]
+    reg = current_app.config.get("PLUGIN_REGISTRY")
+    plugin = reg.get(plugin_id) if reg is not None else None
+    with capability_scope(getattr(plugin, "capabilities", None)):
+        if ctx is not None and _accepts_ctx(fn):
+            result = fn(dict(options), ctx=ctx)
+        else:
+            result = fn(dict(options))
+        if result is not None and not isinstance(result, (int, float, str, bytes, dict)):
+            # Read a listing here, inside the scope: it may be a generator
+            # that fetches as it goes.
+            result = list(itertools.islice(result, MAX_HOOK_ITEMS))
+    if key is not None:
+        if len(_HOOK_CACHE) >= _HOOK_CACHE_MAX:
+            for stale in [
+                k for k, (at, _r) in _HOOK_CACHE.items() if now - at >= _HOOK_CACHE_TTL_S
+            ]:
+                _HOOK_CACHE.pop(stale, None)
+            while len(_HOOK_CACHE) >= _HOOK_CACHE_MAX:
+                _HOOK_CACHE.pop(next(iter(_HOOK_CACHE)), None)
+        _HOOK_CACHE[key] = (now, result)
+    return result
 
 
 def _item_ctx(page: Any, placement: Any, plugin_id: str, device_id: str | None) -> dict[str, Any]:
@@ -288,7 +343,7 @@ def _declared_items(
         if not callable(lister) or str(cell.options.get(option) or "").strip():
             return None  # no list to offer, or the cell is already pinned to one entry
         try:
-            listed = [dict(x) for x in _call_hook(lister, dict(cell.options), ctx)]
+            listed = [dict(x) for x in _call_hook(plugin_id, lister, dict(cell.options), ctx)]
         except Exception:
             current_app.logger.warning("%s: lineup_items failed", plugin_id, exc_info=True)
             return None
@@ -306,6 +361,7 @@ def _declared_items(
 
 #: Widgets that pick a random item on every fetch but live in their own
 #: repositories, so they cannot declare it themselves.
+_NOUN_RE = re.compile(r"[A-Za-z][A-Za-z '-]{0,31}")
 _KNOWN_DRAW_WIDGETS = frozenset({"picture_google_album", "picture_apple_album"})
 
 
@@ -533,8 +589,11 @@ def _declared(plugin_id: str) -> dict[str, Any]:
 def _noun(plugin_id: str) -> str:
     if plugin_id == "picture_gallery":
         return "photos"
+    # A manifest string that ends up in the editor's markup: letters only,
+    # short, or the stock word (the schema says the same).
     noun = _declared(plugin_id).get("noun")
-    return noun.strip() if isinstance(noun, str) and noun.strip() else "items"
+    noun = noun.strip() if isinstance(noun, str) else ""
+    return noun if _NOUN_RE.fullmatch(noun) else "items"
 
 
 def _catalog(page: Any) -> tuple[str, Any] | None:
@@ -550,7 +609,7 @@ def _draw_count(plugin_id: str, options: dict[str, Any], ctx: dict[str, Any] | N
     if not callable(counter):
         return 0
     try:
-        n = _call_hook(counter, options, ctx)
+        n = _call_hook(plugin_id, counter, options, ctx)
     except Exception:
         current_app.logger.warning("%s: lineup_item_count failed", plugin_id, exc_info=True)
         return 0
@@ -565,7 +624,7 @@ def _declared_listing(
         return []
     rest = {k: v for k, v in options.items() if k != option}
     try:
-        listed = [dict(x) for x in _call_hook(lister, rest, ctx)]
+        listed = [dict(x) for x in _call_hook(plugin_id, lister, rest, ctx)]
     except Exception:
         current_app.logger.warning("%s: lineup_items failed", plugin_id, exc_info=True)
         return []
