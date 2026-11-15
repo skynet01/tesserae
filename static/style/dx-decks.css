@@ -828,6 +828,15 @@ main.page.dxe-page {
   outline: 2px solid var(--t-fg);
   outline-offset: 4px;
 }
+/* A thumbnail frame is its own stacking layer (base.css), so the zoom icon and the
+   item arrows inside it ranked as one with the picture, under the cover button: a
+   click on them selected the tile instead. The picture sits above the cover, so its
+   controls work; a click on the picture itself still selects the tile (the click
+   handler treats it as the tile), and a drag starts from the whole row. */
+.lu.dxe .dxe-tiles .lu-tile .lu-thumb {
+  z-index: 2;
+  cursor: pointer;
+}
 /* The open dashboard: an accent frame round the whole tile, its stack
    included (the tile's own button grows over the back cards), so it never
    cuts through them; the accent is the primary buttons', in both themes. */

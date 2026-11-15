@@ -2056,3 +2056,35 @@ def test_now_and_next_pills_sit_above_the_stack_and_the_selection_outline(
                 _settle(page)
                 assert errors == []
                 browser.close()
+
+
+def test_a_tiles_zoom_icon_opens_the_lightbox_not_the_tile(real: tuple[str, Flask]) -> None:
+    """The tile's full-cover select button must sit under the zoom icon: a thumbnail
+    frame isolates its own stacking, which once put the icon below the cover. A real
+    mouse click goes to whatever is on top at the icon, as a person's does."""
+    from playwright.sync_api import sync_playwright
+
+    base, _app = real
+    with sync_playwright() as p:
+        browser, page, errors = _open(p, base, "/decks/art/edit")
+        _settle(page)
+        for sid in ("photos", "clock", "climate"):
+            zoom = page.locator(f'[data-step="{sid}"] .lu-zoom')
+            zoom.evaluate("e => e.scrollIntoView({ block: 'center' })")
+            box = zoom.bounding_box()
+            assert box is not None
+            page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            dialog = page.locator(".lu-lb[data-lb]")
+            dialog.wait_for(state="visible")
+            assert page.locator(f'.dxe-step.is-open[data-step="{sid}"]').count() == 0
+            page.keyboard.press("Escape")
+            dialog.wait_for(state="hidden")
+        # A click on the picture itself still selects the tile.
+        thumb = page.locator('[data-step="clock"] .lu-thumb')
+        thumb.evaluate("e => e.scrollIntoView({ block: 'center' })")  # clear of the sticky save bar
+        pic = thumb.bounding_box()
+        assert pic is not None
+        page.mouse.click(pic["x"] + 10, pic["y"] + pic["height"] / 2)
+        page.locator('.dxe-step.is-open[data-step="clock"]').wait_for()
+        assert errors == []
+        browser.close()

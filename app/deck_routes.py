@@ -3296,6 +3296,19 @@ def _editor_state(deck: Deck | None) -> dict[str, Any]:
             ),
             "shared": shared.get(p.id, 0),
         }
+    # A dashboard shared by displays of different shapes has one preview, drawn at its
+    # largest panel (a 16:9 TV's landscape picture cropped into a portrait frame's
+    # tile). Show the lineup's own display what it shows, as the Lineups page does.
+    shot_device_id = (
+        deck.device_ids[0] if deck is not None and deck.device_ids else request.args.get("display")
+    )
+    shot_device = devices_reg.get(shot_device_id) if devices_reg and shot_device_id else None
+    if shot_device is not None:
+        sw, sh, _spec = _device_size(shot_device)
+        for pid, shot in _display_shots(
+            shot_device, sw, sh, [p for p in pages if p.id in page_meta]
+        ).items():
+            page_meta[pid].update(thumb=shot.thumb_url, w=shot.width, h=shot.height)
     # A step whose dashboard was deleted still belongs to the lineup: list it,
     # flagged, so it can be seen and removed rather than kept on every save.
     for dp in deck.pages if deck is not None else []:
