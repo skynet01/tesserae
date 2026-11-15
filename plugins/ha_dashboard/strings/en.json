@@ -1,5 +1,9 @@
 {
   "dashboard": "Dashboard",
   "rendering": "Rendering dashboard…",
-  "cell_options.path.placeholder": "dashboard-kitchen/overview"
+  "cell_options.path.placeholder": "dashboard-kitchen/overview",
+  "cell_options.ha_theme.placeholder": "Google Dark Theme",
+  "cell_options.ha_theme.help": "Type the theme name exactly as Home Assistant shows it in your profile's theme list, including spaces and capitals. No YAML is needed. Leave blank to use the HA account's theme. Applies only to this capture session; a dashboard theme can override it.",
+  "cell_options.language.placeholder": "pt-BR",
+  "cell_options.language.help": "A language code such as en, de or pt-BR. Leave blank to use the HA account preference."
 }

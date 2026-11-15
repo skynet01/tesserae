@@ -47,7 +47,7 @@ def _render(app, **fields):
     ("options", "message", "field"),
     [
         ({"dark_mode": True}, "uses its own dark mode", "opt_dark_mode"),
-        ({"theme": "Graphite"}, "uses Home Assistant's theme", "opt_theme"),
+        ({"ha_theme": "Graphite"}, "uses Home Assistant's theme", "opt_ha_theme"),
     ],
 )
 def test_ha_look_options_warn_in_server_html(app, options, message, field):
@@ -62,7 +62,7 @@ def test_ha_look_options_warn_in_server_html(app, options, message, field):
     assert "Reset cell look overrides" not in warning
 
 
-@pytest.mark.parametrize("options", [{}, {"dark_mode": False, "theme": ""}])
+@pytest.mark.parametrize("options", [{}, {"dark_mode": False, "ha_theme": ""}])
 def test_default_ha_look_options_do_not_warn(app, options):
     context, body, warning = _render(app, options=options)
     assert context["look_overrides"] == []
