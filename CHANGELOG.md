@@ -21,6 +21,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 - Add a dashboard editor with guided steps, live preview and widget option examples. Switch back to classic from its help menu.
 - Widgets: a choice can be `disabled` with a `reason`, and `choices()` can read the cell's options (`choices_depends_on`). The editor greys out a choice that can't work for the current setup and says why.
+- Lineup editor: on a display that sleeps, Timing says how often it wakes and warns when sends outrun the wakes, with the cost for widgets that pay per render (new `render.paid`). New lineups there send just before each wake.
 
 ### Fixed
 
