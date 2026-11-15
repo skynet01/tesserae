@@ -212,6 +212,29 @@ def test_when_a_run_is_due(tmp_path: Path) -> None:
     assert not pipeline.due(tmp_path, "06:05", morning)
 
 
+def test_no_paid_run_for_a_day_already_past(tmp_path: Path) -> None:
+    """Home at 03:00 after a missed day: the stories stay up until run_at
+    rather than paying for yesterday's edition and again for today's."""
+    night = _at("2026-10-25 03:00")
+    store.save_stories(tmp_path, [{"title": "x"}])
+    store.save_state(tmp_path, {"edition": "2026-10-23"})
+    assert pipeline.edition(night, "06:05") == "2026-10-24"
+    assert pipeline.due(tmp_path, "06:05", night) == ""
+    assert pipeline.due(tmp_path, "06:05", _at("2026-10-25 06:04")) == ""
+    assert pipeline.due(tmp_path, "06:05", _at("2026-10-25 06:05")) == "schedule"
+
+
+def test_before_run_at_a_first_run_and_pictures_still_go_ahead(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    night = _at("2026-10-25 03:00")
+    assert pipeline.due(tmp_path, "06:05", night) == "schedule", "no stories at all"
+    store.save_stories(tmp_path, [{"title": "x"}])
+    store.save_state(tmp_path, {"edition": "2026-10-23"})
+    monkeypatch.setattr(pipeline, "owed", lambda data_dir, now: True)
+    assert pipeline.due(tmp_path, "06:05", night) == "collect"
+
+
 def test_a_failed_day_is_retried_a_little_later_then_left(tmp_path: Path) -> None:
     """The backoff (media_lifecycle): 30 minutes after the first
     try, then an hour, then two, and at most MAX_ATTEMPTS tries a day."""

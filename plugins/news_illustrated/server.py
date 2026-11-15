@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import importlib.machinery
 import importlib.util
+import math
 import re
 import sys
 import time
@@ -76,11 +77,22 @@ def _register_package() -> None:
 
 _register_package()
 
-from . import config, painters, pipeline, store, text  # noqa: E402
+from . import config, feeds, painters, pipeline, store, summarise, text  # noqa: E402
 
 PLUGIN_ID = pipeline.PLUGIN_ID
-# How often editors and the push follow-ups look again while a run is going.
+# How often editors and the push follow-ups look again while a run is going, at
+# the least; the hint grows with the work left (``live_hint``).
 LIVE_REFRESH_S = 15
+# The host's ceiling for the hint (app/composer.py) and how many times it
+# follows a push up in a row (app/push.py ``FOLLOWUP_LIMIT``): the hint is
+# spread so those follow-ups cover the run.
+LIVE_REFRESH_MAX_S = 120
+HOST_FOLLOW_UPS = 8
+# The longest one story can take: the feed, the article, the summary and the
+# pictures' whole time budget.
+STORY_WORST_S = (
+    feeds.FEED_TIMEOUT_S + feeds.ARTICLE_TIMEOUT_S + summarise.TIMEOUT_S + painters.BUDGET_S
+)
 
 RENDER_SAFE_ENDPOINTS: tuple[str, ...] = ("news_illustrated_admin.image",)
 
@@ -124,8 +136,9 @@ def fetch(
         "look": look(values),
     }
     if out["running"]:
-        out["live_refresh_s"] = LIVE_REFRESH_S
-        out["live_pending"] = pipeline.RUNNER.pending(data_dir)
+        pending = pipeline.RUNNER.pending(data_dir)
+        out["live_refresh_s"] = live_hint(pending)
+        out["live_pending"] = pending
     if not cfg.painters_ready:
         out["notice"] = "No image provider has a key yet, so stories are text only."
 
@@ -141,6 +154,15 @@ def fetch(
         index = (index + max(0, int(options.get("_browse") or 0))) % len(stories)
     out.update(story_data(data_dir, stories[index], index, len(stories)))
     return out
+
+
+def live_hint(pending: int) -> int:
+    """Seconds until the frame should be sent again while ``pending`` stories
+    are still to make: the worst case for them spread over the host's
+    follow-ups, never under ``LIVE_REFRESH_S`` nor over the host's ceiling. A
+    fixed short wait ran the follow-ups out long before a slow run was done."""
+    worst = max(1, pending) * STORY_WORST_S
+    return int(min(LIVE_REFRESH_MAX_S, max(LIVE_REFRESH_S, math.ceil(worst / HOST_FOLLOW_UPS))))
 
 
 def story_index(stories: list[dict[str, Any]], key: Any) -> int | None:
