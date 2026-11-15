@@ -258,7 +258,8 @@ def edition(now: datetime, run_at: str) -> str:
 def due(data_dir: Path, run_at: str, now: datetime) -> str:
     """Why a settled render should start a run, or "" when it should not.
     "schedule": there are no stories yet, or today's edition has not been made
-    (nor tried too often). "collect": a picture already paid for is still to
+    (nor tried too often); before ``run_at`` only the first, since yesterday's
+    edition is not worth paying for again. "collect": a picture already paid for is still to
     be collected, which does not wait for tomorrow's edition."""
     state = store.load_state(data_dir)
     if _scheduled(state, data_dir, edition(now, run_at), now):
@@ -271,7 +272,13 @@ def due(data_dir: Path, run_at: str, now: datetime) -> str:
 
 
 def _scheduled(state: dict[str, Any], data_dir: Path, current: str, now: datetime) -> bool:
-    if state.get("edition") == current and store.load_stories(data_dir):
+    stories = store.load_stories(data_dir)
+    if stories and current != now.date().isoformat():
+        # Before run_at the edition is yesterday's, already past. A display
+        # coming home at 03:00 would otherwise pay for it, and again at run_at
+        # for today's. The stories on disk stay up until then.
+        return False
+    if state.get("edition") == current and stories:
         return False
     tries = [float(t) for t in (state.get("attempts") or {}).get(current, [])]
     if len(tries) >= MAX_ATTEMPTS:
