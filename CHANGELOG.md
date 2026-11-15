@@ -17,6 +17,31 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Fix contextual help icons in the canvas editor's configuration drawer.
 - Fix query previews in the canvas editor and place Preview query after the widget options.
 - Let image widgets preview their current query in the dashboard editors.
+### Added
+
+- Add a dashboard editor with guided steps, live preview and widget option examples. Switch back to classic from its help menu.
+- Widgets: a choice can be `disabled` with a `reason`, and `choices()` can read the cell's options (`choices_depends_on`). The editor greys out a choice that can't work for the current setup and says why.
+
+### Fixed
+
+- New dashboard editor: adding a dashboard to a rotating lineup, or removing it, shows the right dashboard on the next tick instead of at the next boundary. A lineup is deleted by leaving it only when the request confirms it, and a lineup whose times can't be described no longer stops the editor from opening.
+
+## [0.513.0], 2026-11-15
+
+### Security
+
+- RSS widget: the feed address is fetched through the same guard as the REST widget. It was fetched as given, so a feed address could point the server at itself, at a device on the local network, at a cloud metadata address or at a local file. Only public http(s) addresses are fetched now, each redirect is checked, and the browser fallback used for bot-protected feeds checks its redirects too. A feed served from the local network (a self-hosted reader at a 192.168 address, say) is refused and its cell says so. Reported and fixed by Peter Wilfahrt ([p-w](https://github.com/p-w)).
+- Widgets: a widget's dynamic editor choices (`choices()`) run inside its declared network allowlist, like its data fetch. They ran with no limit before.
+
+### Added
+
+- Home Assistant, Dashboard widget: **Dashboard hides its own header** skips the header crop for dashboards that have no header (kiosk-mode, or a theme that hides it), so their top row is no longer cut off.
+
+### Fixed
+
+- Widgets that declare `plugin:ha_core` can reach Home Assistant again. The delegate granted no host, so an entity picker or a data fetch in such a widget failed with a host permission error. The grant is the hostname in the current Home Assistant URL only, and follows the setting when it changes.
+
+## [0.512.0], 2026-11-15
 
 ### Added
 

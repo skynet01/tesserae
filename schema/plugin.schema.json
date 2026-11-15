@@ -122,11 +122,24 @@
                   "type": "array",
                   "items": {},
                   "description": "Values an earlier manifest used for this choice. A cell that still holds one shows this choice selected (not \"Unavailable\"), show_if reads it as this choice, and the next save writes value."
+                },
+                "disabled": {
+                  "type": "boolean",
+                  "description": "The choice can't work for this setup: the editor lists it greyed and it can't be picked. A cell that already holds it keeps it, with a warning. Usually set by a choices() provider. See docs/widgets.md."
+                },
+                "reason": {
+                  "type": "string",
+                  "description": "Why a disabled choice can't be picked, in a short sentence the editor shows beside it."
                 }
               }
             }
           },
           "choices_from": { "type": "string" },
+          "choices_depends_on": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "For a choices_from field: the options its rows depend on. The widget's choices(name, options=...) gets the cell's option values, and the editor asks for this field's rows again when one of these options changes. See docs/widgets.md."
+          },
           "presets": {
             "type": "array",
             "description": "For a textarea: an Examples dropdown above it; picking one fills the textarea with the preset's value, to be edited from there.",

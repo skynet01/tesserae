@@ -1130,6 +1130,8 @@
     const boxOf = (o) => o.closest(".pic-cell") || o;
     const visibleOpts = (f) =>
       Array.from(f.querySelectorAll(".pic-opt")).filter((o) => !boxOf(o).hidden);
+    // a choice the widget marked disabled is shown, with its reason, never chosen
+    const isOff = (o) => o.getAttribute("aria-disabled") === "true";
 
     function sync(f) {
       const sel = native(f);
@@ -1143,6 +1145,8 @@
       const opt = sel.options[sel.selectedIndex];
       const label = f.querySelector("[data-pic-current-label]");
       if (label) label.textContent = opt ? opt.textContent : "";
+      const trig = trigger(f);
+      if (trig) trig.classList.toggle("is-unavailable", !!(chosen && isOff(chosen)));
       const thumb = f.querySelector("[data-pic-current-thumb]");
       if (thumb) {
         const src = chosen && chosen.dataset.picImage;
@@ -1179,7 +1183,7 @@
     }
     function choose(f, o) {
       const sel = native(f);
-      if (!sel) return;
+      if (!sel || isOff(o)) return;
       if (sel.value !== o.dataset.picValue) {
         sel.value = o.dataset.picValue;
         sel.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1256,11 +1260,14 @@
       img.alt = name;
       view.el.setAttribute("aria-label", name);
       view.el.querySelector("[data-pv-name]").textContent = name;
-      view.el.querySelector("[data-pv-pos]").textContent = `${view.at + 1} of ${view.pics.length}`;
       const use = view.el.querySelector("[data-pv-use]");
       const chosen = o.getAttribute("aria-selected") === "true";
-      use.textContent = chosen ? "Chosen" : "Choose";
-      use.disabled = chosen;
+      const off = isOff(o);
+      use.textContent = chosen ? "Chosen" : off ? "Not available" : "Choose";
+      use.disabled = chosen || off;
+      const why = o.dataset.picWhy || (off ? "Not available here" : "");
+      view.el.querySelector("[data-pv-pos]").textContent =
+        `${view.at + 1} of ${view.pics.length}` + (why ? ` · ${why}` : "");
       // the one after is fetched ahead, so stepping is instant
       const next = view.pics[(view.at + 1) % view.pics.length];
       if (next && next !== o) new Image().src = next.dataset.picLarge;
@@ -1351,7 +1358,8 @@
       const at = opts.indexOf(ev.target);
       if (ev.key === "Enter" && ev.target.matches("[data-pic-filter]") && opts.length) {
         ev.preventDefault();
-        choose(f, opts[0]);
+        const first = opts.find((o) => !isOff(o));
+        if (first) choose(f, first);
         return;
       }
       const grid = f.querySelector(".pic-grid");
@@ -1365,6 +1373,96 @@
         ev.preventDefault();
         opts[0].focus();
       }
+    });
+  })();
+
+  // A select whose saved value is a disabled choice keeps it (selected and
+  // submitted) with a warning under the field. Once something else is picked
+  // the warning goes and the disabled choice can't be picked back.
+  document.addEventListener("change", (ev) => {
+    const sel = ev.target;
+    if (!(sel instanceof HTMLSelectElement)) return;
+    const field = sel.closest(".field");
+    const warn = field && field.querySelector("[data-choice-warn]");
+    if (!warn) return;
+    const opt = sel.options[sel.selectedIndex];
+    const off = !!(opt && opt.hasAttribute("data-choice-disabled"));
+    warn.hidden = !off;
+    if (!off) {
+      sel.querySelectorAll("option[data-choice-disabled]").forEach((o) => {
+        o.disabled = true;
+      });
+    }
+  });
+
+  // A ``choices_from`` field with ``choices_depends_on`` (auto_field wraps it
+  // in ``[data-choices-refresh]``) is drawn again by the server when one of
+  // those options changes, so its rows, and which of them are disabled and
+  // why, follow the unsaved form. The value stays what the form holds.
+  // Delegated on the document: forms the editor injects later work too.
+  (function attachChoicesRefresh() {
+    const seq = new WeakMap();
+    function formData(scope) {
+      const form = scope.closest("form") || scope.querySelector("form");
+      if (form) return new FormData(form);
+      const fd = new FormData();
+      scope.querySelectorAll("[name]").forEach((el) => {
+        if (el.disabled) return;
+        if ((el.type === "checkbox" || el.type === "radio") && !el.checked) return;
+        if (el instanceof HTMLSelectElement && el.multiple) {
+          Array.from(el.selectedOptions).forEach((o) => fd.append(el.name, o.value));
+        } else fd.append(el.name, el.value);
+      });
+      return fd;
+    }
+    async function refresh(wrap, scope) {
+      const n = (seq.get(wrap) || 0) + 1;
+      seq.set(wrap, n);
+      const q = new URLSearchParams({
+        plugin: wrap.dataset.choicesPlugin || "",
+        option: wrap.dataset.choicesOption || "",
+        field_id: wrap.dataset.choicesFieldId || "",
+      });
+      wrap.setAttribute("aria-busy", "true");
+      try {
+        const resp = await fetch(`${wrap.dataset.choicesUrl}?${q}`, {
+          method: "POST",
+          body: formData(scope),
+          headers: { "X-Requested-With": "fetch" },
+          credentials: "same-origin",
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const html = await resp.text();
+        if (seq.get(wrap) !== n || !wrap.isConnected) return;
+        const tpl = document.createElement("template");
+        tpl.innerHTML = html.trim();
+        const next = tpl.content.querySelector("[data-choices-refresh]");
+        if (!next) return;
+        wrap.replaceWith(next);
+        if (window.tesseraeComponents) window.tesseraeComponents.attachShowIf(scope);
+      } catch (err) {
+        console.warn("[choices] refresh failed:", err);
+      } finally {
+        wrap.removeAttribute("aria-busy");
+      }
+    }
+    document.addEventListener("change", (ev) => {
+      const el = ev.target;
+      const name = el && el.name;
+      if (!name || !name.startsWith("opt_")) return;
+      const scope = el.closest("[data-opt-scope]");
+      if (!scope) return;
+      const option = name.slice(4);
+      scope.querySelectorAll("[data-choices-refresh]").forEach((wrap) => {
+        if (wrap.contains(el)) return;
+        let deps = [];
+        try {
+          deps = JSON.parse(wrap.dataset.choicesDepends || "[]");
+        } catch {
+          deps = [];
+        }
+        if (Array.isArray(deps) && deps.includes(option)) refresh(wrap, scope);
+      });
     });
   })();
 

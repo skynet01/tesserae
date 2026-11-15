@@ -31,6 +31,7 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import Mapping
 from typing import Any, Final
 from urllib.parse import urlsplit
 
@@ -43,6 +44,7 @@ from flask import (
     jsonify,
     redirect,
     render_template,
+    render_template_string,
     request,
     url_for,
 )
@@ -75,6 +77,7 @@ from app.state.deck_model import Deck, DeckPage
 from app.state.legacy_projections import is_timed_view_deck
 from app.state.page_store import Cell, Page, PageStore, Panel, clean_custom_css
 from app.state.settings_store import SettingsStore
+from app.widget_choices import wants_options
 from app.widget_look import editor_look_context
 from app.widget_picker import CATEGORIES as WIDGET_CATEGORIES
 from app.widget_picker import display_name as widget_display_name
@@ -516,10 +519,44 @@ def _apply_layout_to_cells(layout_slug: str, page: Page) -> list[Cell]:
     return out
 
 
-def _materialize_cell_options(plugins: list[Any]) -> dict[str, list[dict[str, Any]]]:
+def _choices_depends_on(spec: Mapping[str, Any]) -> list[str]:
+    """The option names a ``choices_from`` field's rows depend on."""
+    names = spec.get("choices_depends_on")
+    if isinstance(names, str):
+        names = [names]
+    if not isinstance(names, list):
+        return []
+    return [n for n in names if isinstance(n, str) and n]
+
+
+def _materialize_cell_choices(
+    page: Any, plugins: list[Any], shared: dict[str, list[dict[str, Any]]]
+) -> dict[str, list[dict[str, Any]]]:
+    """Per-cell option specs for the cells whose widget's ``choices`` reads
+    the cell's options; every other cell uses its widget's shared specs."""
+    by_id = {p.id: p for p in plugins}
+    out: dict[str, list[dict[str, Any]]] = {}
+    for cell in getattr(page, "cells", None) or []:
+        plugin = by_id.get(cell.plugin) if cell.plugin else None
+        if plugin is None or plugin.id not in shared or not wants_options(plugin):
+            continue
+        out[cell.id] = _materialize_cell_options([plugin], cell.options or {}).get(plugin.id, [])
+    return out
+
+
+def _materialize_cell_options(
+    plugins: list[Any], options: Mapping[str, Any] | None = None
+) -> dict[str, list[dict[str, Any]]]:
     """For each widget plugin, return its cell_options spec with any
     ``choices_from`` fields swapped to concrete ``choices`` lists by
     calling the plugin's ``choices(name)`` function.
+
+    ``options`` is one cell's option values, handed to a provider whose
+    ``choices`` takes an ``options`` keyword (``choices(name, options=...)``),
+    so its rows can depend on the cell (a choice that can't work for the
+    printer picked above it, say). A field whose manifest lists
+    ``choices_depends_on`` also gets ``choices_plugin``, so the editor can
+    ask for fresh rows when one of those options changes.
 
     Plugins that don't expose ``choices`` (or that raise) get an empty
     list, the editor will render an empty dropdown rather than break.
@@ -536,16 +573,16 @@ def _materialize_cell_options(plugins: list[Any]) -> dict[str, list[dict[str, An
 
     out: dict[str, list[dict[str, Any]]] = {}
     for plugin in plugins:
-        options = localized_option_specs(plugin, "cell_options")
+        specs = localized_option_specs(plugin, "cell_options")
         resolver = getattr(plugin.server_module, "choices", None) if plugin.server_module else None
         materialized: list[dict[str, Any]] = []
         plugin_label = str(plugin.manifest.get("name") or plugin.id)
-        for opt in options:
+        for opt in specs:
             spec = dict(opt)
             source = spec.pop("choices_from", None)
             if source and callable(resolver):
                 try:
-                    spec["choices"] = choice_rows(plugin, opt)
+                    spec["choices"] = choice_rows(plugin, opt, options)
                 except SecretBoxError:
                     logger.warning(
                         "plugin %s: choices(%r) hit SecretBoxError, the stored "
@@ -575,6 +612,8 @@ def _materialize_cell_options(plugins: list[Any]) -> dict[str, list[dict[str, An
             note = guidance_note(spec.get("choices")) if source else None
             if note:
                 spec["choices_note"] = note
+            if source and _choices_depends_on(spec):
+                spec["choices_plugin"] = plugin.id
             materialized.append(spec)
         out[plugin.id] = materialized
     return out
@@ -760,6 +799,7 @@ def _editor_context(page: Page) -> dict[str, Any]:
         new="1" if is_new else None,
         _anchor="lineup" if is_new else "schedules",
     )
+    cell_options = _materialize_cell_options(widgets)
 
     return {
         "page": page,
@@ -804,7 +844,8 @@ def _editor_context(page: Page) -> dict[str, Any]:
             ],
         },
         "widget_names": {w.id: widget_display_name(w.name, w.id) for w in widgets},
-        "plugin_cell_options": _materialize_cell_options(widgets),
+        "plugin_cell_options": cell_options,
+        "cell_option_specs": _materialize_cell_choices(page, widgets, cell_options),
         "fonts": sorted(plugins.fonts.values(), key=lambda f: f.name.lower()),
         "layouts": LAYOUTS,
         "active_layout": active_layout.slug if active_layout else None,
@@ -2230,6 +2271,43 @@ def preview(page_id: str) -> Response:
     if request.headers.get("X-Requested-With") == "fetch":
         return jsonify({"ok": True, "groups": hydrated_groups})
     return _flash_save(True, "preview-ready")
+
+
+_OPTION_FIELD = """{% from '_components.html' import auto_field %}
+{%- if opt.choices_note is defined %}{% set opt = dict(opt, choices=[{'value': '', 'label': 'Nothing to pick yet, see above'}]) %}{% endif -%}
+{{ auto_field(field_id, 'opt_' ~ opt.name, opt, value, readonly=readonly, visible=option_visible(opt, values, opts)) }}"""
+
+
+@bp.post("/option-field")
+def option_field() -> Response:
+    """One widget option's field, drawn again for the cell's current values.
+
+    The editor asks for this when an option that a field's choices depend on
+    (``choices_depends_on``) changes, so the rows (which choices are disabled,
+    and why) follow the unsaved form. Query: ``plugin``, ``option``,
+    ``field_id``. Body: the cell's form, read as a save would read it."""
+    plugin = _plugins().get(request.args.get("plugin") or "")
+    name = request.args.get("option") or ""
+    field_id = request.args.get("field_id") or ""
+    if plugin is None or not name or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", field_id):
+        abort(404)
+    values = _cell_options_from_form(plugin, request.form)
+    opts = _materialize_cell_options([plugin], values).get(plugin.id, [])
+    opt = next((o for o in opts if o.get("name") == name), None)
+    if opt is None:
+        abort(404)
+    fill = opt.get("fill_from") if isinstance(opt.get("fill_from"), dict) else None
+    filled = (fill.get("map") or {}).get(values.get(fill.get("option"))) if fill else None
+    html = render_template_string(
+        _OPTION_FIELD,
+        opt=opt,
+        opts=opts,
+        values=values,
+        field_id=field_id,
+        value=filled if filled is not None else values.get(name, opt.get("default", "")),
+        readonly=filled is not None,
+    )
+    return current_app.response_class(html, mimetype="text/html")
 
 
 @bp.post("/<page_id>/cells/<cell_id>")
