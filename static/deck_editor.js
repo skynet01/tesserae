@@ -1238,9 +1238,7 @@
       drawBtn = `<button type="button" class="lu-btn-ghost lu-btn-line dxe-act dxe-draw" data-draw="${esc(id)}" data-fk="draw-${esc(id)}"${ok && !busy ? "" : ` disabled title="${ok ? "Drawing…" : "Save first to draw"}"`}>${ico("refresh")}<span>Draw another</span></button>`;
     }
     const sub = p.subtitle && p.subtitle !== p.name ? p.subtitle : "";
-    const body = S.isNew
-      ? `<div class="dxe-sum"><span class="dxe-sum-r"><button type="button" class="dxe-link quiet" data-remove="${esc(id)}" data-fk="rm-${esc(id)}" aria-label="Remove ${esc(p.name)}">Remove</button></span></div>`
-      : `${childrenHtml(s, p)}${settingsHtml(s, p, i)}`;
+    const body = S.isNew ? newStepBody(s, p) : `${childrenHtml(s, p)}${settingsHtml(s, p, i)}`;
     return (
       `<section class="dxe-detail" id="dxe-detail" data-panel="${esc(id)}" aria-label="${esc(p.name)}">` +
       `<div class="dxe-detail-head"><span class="dxe-plug" aria-hidden="true"><i class="ph ${esc(p.icon || "ph-squares-four")}"></i></span>` +
@@ -1248,6 +1246,26 @@
       `<span class="dxe-detail-acts">${drawBtn}${push}</span><button type="button" class="lu-ibtn dxe-close" data-expand="${esc(id)}" data-fk="close-${esc(id)}" aria-label="Close ${esc(p.name)} details" title="Close (Esc)">${ico("x")}</button></div>` +
       body +
       `</section>`
+    );
+  }
+
+  // A new lineup's dashboard: what it does, an optional condition (closed
+  // until asked for) and Remove.
+  function newStepBody(s, p) {
+    const id = esc(s.id);
+    const open = showConditions(s);
+    const rm = `<button type="button" class="dxe-link quiet" data-remove="${id}" data-fk="rm-${id}" aria-label="Remove ${esc(p.name)}">Remove</button>`;
+    if (!open)
+      return (
+        `<div class="dxe-sum"><span class="dxe-soft dxe-sum-t">Shows whenever the lineup runs.</span>` +
+        `<span class="dxe-sum-r"><button type="button" class="dxe-link" data-add-cond="${id}" data-fk="addcond-${id}" aria-label="Add a condition for ${esc(p.name)}">Add a condition</button>${rm}</span></div>`
+      );
+    return (
+      `<div class="dxe-sum"><span class="dxe-sum-t"><b id="dxe-cond-t-${id}">Only show while…</b> <span class="dxe-soft">optional</span></span>` +
+      `<span class="dxe-sum-r"><button type="button" class="dxe-link quiet" data-clear-cond="${id}" data-fk="clearcond-${id}" aria-label="Clear the condition for ${esc(p.name)}">Clear condition</button>${rm}</span></div>` +
+      `<div class="dxe-cond dxe-cond-new" role="group" aria-labelledby="dxe-cond-t-${id}">` +
+      `<small class="dxe-soft">Skipped while a condition fails. If none pass, the display keeps its last picture.</small>` +
+      `<div class="condition-picker" data-condition-picker data-empty-message="No condition yet."><textarea rows="2" spellcheck="false" data-cond="${id}" data-fk="cond-${id}" placeholder="[]" aria-label="Conditions for ${esc(p.name)}">${esc(s.conditions)}</textarea></div></div>`
     );
   }
 
@@ -2155,6 +2173,31 @@
   const whenReady = () =>
     st.when.mode === "manual" ||
     (st.when.days.some(Boolean) && Number.isFinite(T(st.when.start)) && !endBeforeStart());
+  const newReady = () => !!st.display && whenReady() && st.steps.length > 0;
+  // The save bar's line: the step that is open, what is missing, or what Create
+  // will make.
+  function newStatus() {
+    const dev = deviceOf(st.display);
+    if (!dev) return "Step 1 of 3: pick a display.";
+    if (ui.step < 3) return "Step 2 of 3: choose when it runs.";
+    if (!st.steps.length) return "Add at least one dashboard to create it.";
+    if (!whenReady()) return "Choose when it runs to create it.";
+    const when = whenSummary();
+    return `Ready: ${plural(st.steps.length, "dashboards")} on ${dev.name}, ${when.charAt(0).toLowerCase()}${when.slice(1)}.`;
+  }
+  // Create pressed before it can be: say what is missing and go there.
+  function missingStep() {
+    ui.msg = newStatus();
+    ui.msgKind = "err";
+    drawFooter();
+    live(ui.msg);
+    const to = !st.display
+      ? "[data-pick-display]"
+      : ui.step < 3
+        ? "[data-goto='3']"
+        : "[data-picker]";
+    root.querySelector(to)?.focus();
+  }
   function newFlowHtml() {
     const dev = deviceOf(st.display);
     let html = "";
@@ -2162,23 +2205,23 @@
     // A lineup started from a display's + is for that display: no Change.
     if (ui.step > 1 && dev) html += doneLine(1, "Display", dev.name, 1, S.displayLocked);
     else
-      html += `<section class="dxe-sec">${secHead(1, "Display", "Pick the display it runs on.", "dxe-h-display")}${displayCards()}</section>`;
+      html += `<section class="dxe-sec is-current" aria-labelledby="dxe-h-display" aria-current="step">${secHead(1, "Display", "Pick the display it runs on.", "dxe-h-display")}${displayCards()}</section>`;
     // 2 When
     if (ui.step > 2) html += doneLine(2, "When it runs", whenSummary(), 2);
     else if (ui.step === 2)
       html +=
-        `<section class="dxe-sec" aria-labelledby="dxe-h-when">${secHead(2, "When it runs", whenLead(), "dxe-h-when")}${whenCard()}` +
+        `<section class="dxe-sec is-current" aria-labelledby="dxe-h-when" aria-current="step">${secHead(2, "When it runs", whenLead(), "dxe-h-when")}${whenCard()}` +
         `<div class="dxe-next-step"><button type="button" class="lu-btn-primary" data-goto="3" data-fk="goto-3"${whenReady() ? "" : ' aria-disabled="true"'}>Continue</button></div></section>`;
     else html += waitingHead(2, "When it runs", "Pick a display first.");
     // 3 Dashboards
     if (ui.step === 3) {
-      const chosen = st.steps.length
-        ? stripHtml()
-        : `<p class="dxe-empty">${ico("layers")}<span>No dashboards yet.</span></p>`;
+      const n = st.steps.length;
+      const lead = n
+        ? `${plural(n, "dashboards")}, shown in this order.${n > 1 ? "" : " Add more if you like."}`
+        : "Pick what it shows.";
       html +=
-        `<section class="dxe-sec" aria-labelledby="dxe-h-dash">${secHead(3, "Dashboards", "Pick what it shows, in order.", "dxe-h-dash")}` +
-        `<div class="dxe-card dxe-steps-card"${shapeVars()}>${chosen}</div>` +
-        pickerHtml() +
+        `<section class="dxe-sec is-current" aria-labelledby="dxe-h-dash" aria-current="step">${secHead(3, "Dashboards", lead, "dxe-h-dash")}` +
+        stepsCard() +
         `</section>`;
     } else html += waitingHead(3, "Dashboards", "Choose when it runs first.");
     return html;
@@ -2299,15 +2342,11 @@
     const btns = $("dxe-actionbar-btns");
     const state = $("dxe-save-state");
     if (S.isNew) {
-      const ready = !!st.display && st.steps.length > 0;
-      state.className = "dxe-actionbar-status" + (ui.msgKind ? ` is-${ui.msgKind}` : "");
-      state.textContent =
-        ui.msg ||
-        (ready
-          ? "Ready to create."
-          : ui.step < 3
-            ? `Step ${ui.step} of 3`
-            : "Add a dashboard to create it.");
+      const ready = newReady();
+      state.className = "dxe-actionbar-status" + (ui.msgKind ? ` is-${ui.msgKind}` : ready ? " is-ok" : "");
+      state.textContent = ui.msg || newStatus();
+      // One Cancel link, then the one primary action. It stays focusable while it
+      // can't be used, and says why (the line beside it, and on a press).
       setButtons(
         btns,
         `<a class="lu-btn-ghost lu-btn-line" href="${esc(S.urls.back)}" data-fk="f-cancel">Cancel</a>` +
@@ -2449,7 +2488,12 @@
       });
       if ((conditions || "").trim()) stepHadConditions.add(id);
       if (!st.home) st.home = "";
+      ui.picker = false;
+      ui.elsewhere = false;
+      ui.open.clear();
+      ui.open.add(id);
     });
+    if (!S.isNew) loadStrip(id);
     live(`Added ${pageOf(id).name}.`);
     // After the closing dialog hands the focus back to what opened it.
     window.setTimeout(() => {
@@ -2468,7 +2512,9 @@
       st.steps = st.steps.filter((s) => s.id !== id);
       if (st.home === id) st.home = "";
       ui.open.delete(id);
+      ui.condOpen.delete(id);
       delete ui.choice[id];
+      delete ui.consent[id];
     });
     live(`Removed ${pageOf(id).name}.`);
     const next = root.querySelectorAll("[data-step]")[Math.max(0, i - 1)];
@@ -3166,6 +3212,19 @@
       else if (c && c.mode === "draw") c.pos = pos;
       return itemChanged();
     }
+    if (d.clearCond) {
+      const s = stepOf(d.clearCond);
+      if (!s) return;
+      change(() => {
+        s.conditions = "";
+        stepHadConditions.delete(s.id);
+        ui.condOpen.delete(s.id);
+        ui.rawOpen.delete(s.id);
+      });
+      live(`${pageOf(s.id).name} shows whenever the lineup runs.`);
+      root.querySelector(`[data-add-cond="${CSS.escape(s.id)}"]`)?.focus();
+      return;
+    }
     if (d.addCond) {
       ui.condOpen.add(d.addCond);
       draw();
@@ -3236,7 +3295,10 @@
     if (d.pushLineup !== undefined) return pushNow(st.home || st.steps[0].id);
     if (d.reload !== undefined) return window.location.reload();
     if (d.save !== undefined) return save();
-    if (d.create !== undefined) return create();
+    if (d.create !== undefined) {
+      if (t.getAttribute("aria-disabled") === "true") return missingStep();
+      return create();
+    }
     if (d.discard !== undefined) return discard();
     if (d.delete !== undefined) {
       if (window.confirm(`Delete ${st.name || "this lineup"}?`)) $("dxe-delete-form").submit();
@@ -3350,6 +3412,17 @@
       e.preventDefault();
       move(row.dataset.step, e.key === "ArrowUp" || e.key === "ArrowLeft" ? -1 : 1);
       return;
+    }
+    // Esc closes the picker and goes back to its button.
+    if (e.key === "Escape" && ui.picker && !(LB && LB.isOpen())) {
+      const inside = e.target.closest && e.target.closest("#dxe-picker, [data-picker]");
+      if (inside) {
+        e.preventDefault();
+        ui.picker = false;
+        draw();
+        root.querySelector("[data-picker]")?.focus();
+        return;
+      }
     }
     // Esc closes the open details and goes back to its tile.
     if (e.key === "Escape" && ui.open.size && !(LB && LB.isOpen())) {
