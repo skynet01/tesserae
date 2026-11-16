@@ -12,7 +12,7 @@ from app.state.conditions import Condition
 def _cond(**kw: Any) -> Condition:
     base = {
         "source_kind": "ha_entity",
-        "source_id": "sensor.p1s_print_status",
+        "source_id": "sensor.activity",
         "operator": "==",
         "value": "running",
     }
@@ -25,7 +25,7 @@ def _evaluator(states: Any) -> ConditionEvaluator:
     return ev
 
 
-RUNNING = [{"entity_id": "sensor.p1s_print_status", "state": "running"}]
+RUNNING = [{"entity_id": "sensor.activity", "state": "running"}]
 
 
 def test_default_still_fails_open_on_a_missing_entity() -> None:
@@ -36,7 +36,7 @@ def test_default_still_fails_open_on_a_missing_entity() -> None:
 def test_fail_closed_on_missing_entity_and_unavailable_state() -> None:
     ev = _evaluator(lambda: [{"entity_id": "sensor.other", "state": "on"}])
     assert ev.all_pass([_cond(if_unknown="fail")]) is False
-    ev = _evaluator(lambda: [{"entity_id": "sensor.p1s_print_status", "state": "unavailable"}])
+    ev = _evaluator(lambda: [{"entity_id": "sensor.activity", "state": "unavailable"}])
     res = ev.evaluate([_cond(if_unknown="fail", operator="!=", value="idle")])[0]
     assert res.passed is False and "unavailable" in res.observed
 
@@ -64,3 +64,28 @@ def test_fail_closed_before_home_assistant_was_ever_read() -> None:
 def test_if_unknown_round_trips_and_defaults_to_pass() -> None:
     assert _cond().if_unknown == "pass"
     assert Condition.model_validate(_cond(if_unknown="fail").model_dump()).if_unknown == "fail"
+
+
+def test_fail_closed_on_empty_refresh_and_recovers():
+    snapshots = iter([RUNNING, [], RUNNING])
+    ev = _evaluator(lambda: next(snapshots))
+    assert ev.all_pass([_cond(if_unknown="fail")])
+    assert not ev.refresh_ha_states()
+    assert not ev.all_pass([_cond(if_unknown="fail")])
+    assert ev.all_pass([_cond()])
+    assert ev.refresh_ha_states()
+    assert ev.all_pass([_cond(if_unknown="fail")])
+
+
+def test_unreadable_states_fail_even_for_inequality():
+    for state in ("unknown", "unavailable", ""):
+        ev = _evaluator(lambda state=state: [{"entity_id": "sensor.activity", "state": state}])
+        assert not ev.all_pass([_cond(if_unknown="fail", operator="!=", value="idle")])
+
+
+def test_test_endpoint_accepts_fail_closed_condition(app):
+    response = app.test_client().post(
+        "/api/conditions/test", json={"conditions": [_cond(if_unknown="fail").model_dump()]}
+    )
+    assert response.status_code == 200
+    assert response.json["all_passed"] is False

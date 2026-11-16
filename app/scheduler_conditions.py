@@ -92,7 +92,8 @@ class ConditionEvaluator:
             states = list(self._ha_get_states())
         except Exception as err:
             logger.warning("HA state refresh failed: %s", err)
-            self._ha_fresh = False
+            with self._ha_lock:
+                self._ha_fresh = False
             return False
         new_cache = {s["entity_id"]: s for s in states if "entity_id" in s}
         with self._ha_lock:
@@ -145,7 +146,9 @@ class ConditionEvaluator:
         except Exception as err:
             return ConditionResult(
                 condition=cond,
-                passed=cond.if_unknown != "fail",  # fail-open unless the row says otherwise
+                passed=not (
+                    cond.is_ha_entity() and cond.if_unknown == "fail"
+                ),  # fail-open unless the row says otherwise
                 observed="evaluation error",
                 reason=f"{type(err).__name__}: {err}",
             )
@@ -159,18 +162,19 @@ class ConditionEvaluator:
     # -- HA entity resolver --------------------------------------------
 
     def _eval_ha(self, cond: Condition) -> ConditionResult:
-        state = self.ha_state(cond.source_id)
+        with self._ha_lock:
+            state = self._ha_cache.get(cond.source_id)
+            fresh = self._ha_fresh
         if cond.if_unknown == "fail":
             raw_state = str((state or {}).get("state", ""))
-            why = (
-                "Home Assistant unreachable"
-                if not self._ha_fresh
-                else "entity not found"
-                if state is None
-                else f"state {raw_state}"
-                if raw_state in ("unavailable", "unknown", "")
-                else ""
-            )
+            if not fresh:
+                why = "Home Assistant unreachable"
+            elif state is None:
+                why = "entity not found"
+            elif raw_state in ("unavailable", "unknown", ""):
+                why = f"state {raw_state}"
+            else:
+                why = ""
             if why:
                 return ConditionResult(
                     condition=cond,

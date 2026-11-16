@@ -2296,7 +2296,7 @@ def test_a_tiles_zoom_icon_opens_the_lightbox_not_the_tile(real: tuple[str, Flas
         browser, page, errors = _open(p, base, "/decks/art/edit")
         _settle(page)
         for sid in ("photos", "clock", "climate"):
-            zoom = page.locator(f'[data-step="{sid}"] .lu-zoom')
+            zoom = page.locator(f'[data-step="{sid}"] .lu-zoom:not(.dxe-duplicate)')
             zoom.evaluate("e => e.scrollIntoView({ block: 'center' })")
             box = zoom.bounding_box()
             assert box is not None
@@ -2314,4 +2314,37 @@ def test_a_tiles_zoom_icon_opens_the_lightbox_not_the_tile(real: tuple[str, Flas
         page.mouse.click(pic["x"] + 10, pic["y"] + pic["height"] / 2)
         page.locator('.dxe-step.is-open[data-step="clock"]').wait_for()
         assert errors == []
+        browser.close()
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_unreadable_condition_choice_survives_save_and_reload(real, width):
+    from playwright.sync_api import sync_playwright
+
+    base, app = real
+    pages = app.config["PAGE_STORE"]
+    pages.save(pages.get("clock").model_copy(update={"device_ids": ["hall"]}))
+    with sync_playwright() as p:
+        browser, page, errors = _open(p, base, "/decks/morning/edit", width=width)
+        page.locator("[data-picker]").click()
+        page.locator('[data-add="clock"]').click()
+        picker = page.locator("#dxe-picker")
+        picker.get_by_role("button", name="Add condition", exact=True).click()
+        picker.locator(".cp-row input[list]").fill("sensor.example_state")
+        choice = picker.get_by_label("Not met when it can't be read")
+        assert not choice.is_checked()
+        choice.check()
+        page.locator("[data-add-confirm]").click()
+        _save(page)
+        step = next(
+            s for s in app.config["DECK_STORE"].get("morning").pages if s.page_id == "clock"
+        )
+        assert step.conditions[0].if_unknown == "fail"
+        page.reload()
+        row = page.locator('[data-panel="clock"]')
+        page.locator('[data-expand="clock"]').click()
+        page.locator('[data-edit="clock"]').click()
+        assert row.get_by_label("Not met when it can't be read").is_checked()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        assert not errors
         browser.close()
