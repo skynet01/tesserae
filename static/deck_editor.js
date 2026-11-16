@@ -2910,6 +2910,7 @@
     }
     if (d.picker !== undefined) {
       ui.picker = !ui.picker;
+      if (ui.adding) delete ui.consent[ui.adding.id];
       ui.adding = null;
       if (ui.picker) ui.open.clear(); // one panel under the strip at a time
       draw();
@@ -2923,6 +2924,7 @@
       return;
     }
     if (d.add) {
+      if (d.elsewhere !== undefined && !(await confirmBind([d.add], st.display))) return;
       ui.adding = {
         id: d.add,
         elsewhere: d.elsewhere !== undefined,
@@ -2935,6 +2937,7 @@
     }
     if (d.addCancel !== undefined) {
       const id = ui.adding.id;
+      delete ui.consent[id];
       ui.adding = null;
       draw();
       root.querySelector(`[data-add="${CSS.escape(id)}"]`)?.focus();
