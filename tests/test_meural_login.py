@@ -209,3 +209,169 @@ def test_frame_picker_rejects_a_frame_outside_the_linked_account(app, provider):
     assert (
         app.config["SETTINGS_STORE"].get_section("devices")["lounge"]["cloud_device_id"] == "16036"
     )
+
+
+def held_frame(app, client):
+    from app.meural_cloud import delivery_for_device
+
+    _, config = begin(client)
+    assert (
+        client.post("/settings/devices/lounge/meural/login", json=payload(config)).status_code
+        == 200
+    )
+    delivery, target = delivery_for_device(app, app.config["DEVICE_REGISTRY"].devices["lounge"])
+    original = {
+        "gallery_id": "27",
+        "item_id": "28",
+        "settings": {"galleryRotation": True, "schedulerEnabled": False},
+    }
+    delivery.path.parent.mkdir(parents=True, exist_ok=True)
+    delivery.path.write_text(
+        json.dumps(
+            {
+                "scope": f"17:{target}",
+                "owned": [],
+                "original": original,
+                "paused": True,
+                "last_key": "current",
+            }
+        )
+    )
+    return delivery, original
+
+
+def test_resume_native_playback_stops_delivery_and_restores_saved_settings(
+    app, provider, monkeypatch
+):
+    client = app.test_client()
+    delivery, original = held_frame(app, client)
+    restored = []
+    monkeypatch.setattr(
+        "app.meural_cloud.MeuralCloudClient.restore_playback",
+        lambda self, target, state: restored.append((target, state)),
+    )
+    response = client.post("/settings/devices/lounge/meural/manage", data={"action": "release"})
+    assert response.status_code == 302
+    assert restored == [("16036", original)]
+    assert app.config["SETTINGS_STORE"].get_section("devices")["lounge"]["meural_management_paused"]
+    page = client.get("/settings/devices/lounge").get_data(as_text=True)
+    assert "creates no Meural galleries" in page
+    assert "Let Tesserae manage" in page
+    assert not json.loads(delivery.path.read_text()).get("original")
+    assert (
+        client.post("/settings/devices/lounge/meural/manage", data={"action": "manage"}).status_code
+        == 302
+    )
+    assert not app.config["SETTINGS_STORE"].get_section("devices")["lounge"][
+        "meural_management_paused"
+    ]
+
+
+def test_signout_restores_before_removing_credentials(app, provider, monkeypatch):
+    client = app.test_client()
+    _, original = held_frame(app, client)
+    restored = []
+
+    def restore(self, target, state):
+        assert self.config()["meural_refresh_token_secret"] == "private-refresh"
+        restored.append((target, state))
+
+    monkeypatch.setattr("app.meural_cloud.MeuralCloudClient.restore_playback", restore)
+    assert client.post("/settings/devices/lounge/meural/logout").status_code == 302
+    assert restored == [("16036", original)]
+    assert (
+        not app.config["SETTINGS_STORE"]
+        .get_section("devices")["lounge"]
+        .get("meural_refresh_token_secret")
+    )
+
+
+def test_failed_restore_keeps_credentials_and_blocks_delivery_for_retry(app, provider, monkeypatch):
+    from app.meural_auth import CannotConnect
+
+    client = app.test_client()
+    delivery, original = held_frame(app, client)
+
+    def offline(*args):
+        raise CannotConnect("offline")
+
+    monkeypatch.setattr("app.meural_cloud.MeuralCloudClient.restore_playback", offline)
+    assert client.post("/settings/devices/lounge/meural/logout").status_code == 400
+    cfg = app.config["SETTINGS_STORE"].get_section("devices")["lounge"]
+    assert cfg["meural_refresh_token_secret"] == "private-refresh"
+    assert cfg["meural_management_paused"]
+    assert json.loads(delivery.path.read_text())["original"] == original
+
+
+def test_deleting_managed_frame_restores_native_playback_first(app, provider, monkeypatch):
+    client = app.test_client()
+    _, original = held_frame(app, client)
+    restored = []
+    monkeypatch.setattr(
+        "app.meural_cloud.MeuralCloudClient.restore_playback",
+        lambda self, target, state: restored.append((target, state)),
+    )
+    assert client.post("/settings/devices/lounge/delete").status_code == 302
+    assert restored == [("16036", original)]
+    assert "lounge" not in app.config["DEVICE_REGISTRY"].devices
+
+
+def test_reauthentication_uses_new_tokens_to_restore_an_expired_session(app, provider, monkeypatch):
+    from app.meural_auth import AuthResult
+    from app.meural_cloud import save_tokens
+
+    client = app.test_client()
+    held_frame(app, client)
+    save_tokens(
+        app.config["SETTINGS_STORE"],
+        "lounge",
+        AuthResult("expired", "expired-refresh", 1, "trusted"),
+    )
+    restored = []
+
+    def restore(self, target, original):
+        assert self.config()["meural_access_token_secret"] == "private-access"
+        restored.append(target)
+
+    monkeypatch.setattr("app.meural_cloud.MeuralCloudClient.restore_playback", restore)
+    _, config = begin(client)
+    assert (
+        client.post("/settings/devices/lounge/meural/login", json=payload(config)).status_code
+        == 200
+    )
+    assert restored == ["16036"]
+
+
+@pytest.mark.parametrize("owned_sleep", [True, False])
+def test_release_wakes_only_a_frame_tesserae_put_to_sleep(app, provider, monkeypatch, owned_sleep):
+    from pathlib import Path
+
+    client = app.test_client()
+    held_frame(app, client)
+    device = app.config["DEVICE_REGISTRY"].devices["lounge"]
+    sleep = Path(device.data_dir) / "meural_sleep.json"
+    if owned_sleep:
+        sleep.write_text(json.dumps({"host": "192.0.2.10"}))
+    wake = []
+
+    class Frame:
+        def __init__(self, host):
+            assert owned_sleep
+            assert host == "192.0.2.10"
+
+        def is_sleeping(self):
+            return True
+
+        def set_sleep(self, sleeping):
+            wake.append(sleeping)
+
+    monkeypatch.setattr("app.meural.MeuralClient", Frame)
+    monkeypatch.setattr("app.meural_cloud.MeuralCloudClient.restore_playback", lambda *a: None)
+    assert (
+        client.post(
+            "/settings/devices/lounge/meural/manage", data={"action": "release"}
+        ).status_code
+        == 302
+    )
+    assert wake == ([False] if owned_sleep else [])
+    assert not sleep.exists()

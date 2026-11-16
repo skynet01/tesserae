@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import secrets
+import threading
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from flask import Response, abort, current_app, jsonify, redirect, render_template, request, url_for
@@ -12,7 +15,16 @@ from werkzeug.wrappers import Response as RedirectResponse
 
 from app import meural_auth
 from app.device_loader import Device
-from app.meural_cloud import API, clear_session, get_cloud_client, resource_id, save_session
+from app.meural import MeuralError, release_sleep
+from app.meural_cloud import (
+    API,
+    clear_session,
+    delivery_for_device,
+    get_cloud_client,
+    resource_id,
+    save_session,
+    save_tokens,
+)
 
 from ._shared import bp, devices, rebuild_transport_fn, settings_store
 
@@ -36,6 +48,37 @@ def _stop_publisher() -> None:
 
 def _config(instance_id: str) -> dict[str, Any]:
     return (settings_store().get_section("devices") or {}).get(instance_id) or {}
+
+
+@contextmanager
+def _changing_frame() -> Iterator[None]:
+    _stop_publisher()
+    try:
+        with current_app.config.setdefault("MEURAL_IO_LOCK", threading.Lock()):
+            yield
+    finally:
+        rebuild_transport_fn()()
+
+
+def _release_native(device: Device) -> None:
+    """Caller holds the delivery lock and keeps credentials until restoration succeeds."""
+    settings_store().update_item("devices", device.id, {"meural_management_paused": True})
+    delivery = delivery_for_device(current_app, device)
+    try:
+        release_sleep(device, str(_config(device.id).get("host") or ""))
+        if delivery is not None:
+            delivery[0].release(delivery[1])
+    except (
+        meural_auth.MeuralAuthError,
+        meural_auth.HttpError,
+        MeuralError,
+        OSError,
+        ValueError,
+    ) as exc:
+        abort(
+            400,
+            description=f"Could not restore Meural playback: {exc}. Saved settings were kept. Try again.",
+        )
 
 
 @bp.route("/settings/devices/<instance_id>/meural/login", methods=["GET", "POST"])
@@ -142,7 +185,7 @@ def meural_login(instance_id: str) -> Response | tuple[Response, int]:
                 break
             page += 1
         account_id = resource_id(user.get("id"))
-        with client.lock:
+        with _changing_frame(), client.lock:
             if (
                 sessions.get(instance_id) is not pending
                 or devices().devices.get(instance_id) is not device
@@ -150,19 +193,19 @@ def meural_login(instance_id: str) -> Response | tuple[Response, int]:
             ):
                 abort(400)
             sessions.pop(instance_id)
-            _stop_publisher()
-            try:
-                save_session(
-                    settings_store(),
-                    instance_id,
-                    result,
-                    email=email.strip(),
-                    account_id=account_id,
-                    devices=frames,
-                )
-                client.reset_auth()
-            finally:
-                rebuild_transport_fn()()
+            if str(_config(instance_id).get("meural_account_id")) == account_id:
+                # Reauthentication must also recover frames whose old tokens expired.
+                save_tokens(settings_store(), instance_id, result)
+            _release_native(device)
+            save_session(
+                settings_store(),
+                instance_id,
+                result,
+                email=email.strip(),
+                account_id=account_id,
+                devices=frames,
+            )
+            client.reset_auth()
     except (meural_auth.MeuralAuthError, meural_auth.HttpError, ValueError) as exc:
         with client.lock:
             if sessions.get(instance_id) is pending:
@@ -173,35 +216,53 @@ def meural_login(instance_id: str) -> Response | tuple[Response, int]:
 
 @bp.post("/settings/devices/<instance_id>/meural/logout")
 def meural_logout(instance_id: str) -> RedirectResponse:
-    _device(instance_id)
+    device = _device(instance_id)
     client = get_cloud_client(current_app, instance_id)
-    with client.lock:
-        _stop_publisher()
+    with _changing_frame(), client.lock:
         current_app.config.get("MEURAL_LOGIN_SESSIONS", {}).pop(instance_id, None)
+        settings_store().update_item("devices", instance_id, {"meural_management_paused": True})
+        _release_native(device)
         clear_session(settings_store(), instance_id)
         client.reset_auth()
-    rebuild_transport_fn()()
     return redirect(_return_url(instance_id))
 
 
 @bp.post("/settings/devices/<instance_id>/meural/frame")
 def meural_select_frame(instance_id: str) -> RedirectResponse:
-    _device(instance_id)
+    device = _device(instance_id)
     client = get_cloud_client(current_app, instance_id)
-    with client.lock:
+    with _changing_frame(), client.lock:
         cfg = _config(instance_id)
         selected = request.form.get("cloud_device_id")
         frame = next((f for f in cfg.get("meural_devices", []) if f["id"] == selected), None)
         if frame is None:
             abort(400)
-        _stop_publisher()
+        if str(cfg.get("cloud_device_id")) != selected:
+            _release_native(device)
         settings_store().update_item(
             "devices",
             instance_id,
             {
                 "cloud_device_id": selected,
                 "host": frame.get("host", ""),
+                "meural_management_paused": False,
             },
         )
-    rebuild_transport_fn()()
+    return redirect(_return_url(instance_id))
+
+
+@bp.post("/settings/devices/<instance_id>/meural/manage")
+def meural_manage(instance_id: str) -> RedirectResponse:
+    device = _device(instance_id)
+    action = request.form.get("action")
+    if action not in ("manage", "release"):
+        abort(400)
+    with _changing_frame(), get_cloud_client(current_app, instance_id).lock:
+        settings_store().update_item(
+            "devices",
+            instance_id,
+            {"meural_management_paused": action == "release"},
+        )
+        if action == "release":
+            _release_native(device)
     return redirect(_return_url(instance_id))

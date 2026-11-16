@@ -148,18 +148,25 @@ def test_cloud_is_default_and_unchanged_images_are_not_uploaded_again(setup, mon
             self.uploads = []
             self.loads = []
 
-        def create_gallery(self, name):
-            return "300"
+        def get_playback(self, target):
+            return {
+                "gallery_id": "27",
+                "item_id": "28",
+                "settings": {
+                    "galleryRotation": True,
+                    "schedulerEnabled": True,
+                },
+            }
+
+        def pause_rotation(self, target):
+            pass
 
         def upload(self, image, name):
             self.uploads.append(image)
             return "100"
 
-        def add_to_gallery(self, gallery, item):
-            pass
-
-        def load_gallery(self, target, gallery):
-            self.loads.append((target, gallery))
+        def show_item(self, target, item):
+            self.loads.append((target, item))
 
     cloud = Cloud()
     cfg = dict(setup.settings.get_section("devices")["lounge"])
@@ -171,12 +178,21 @@ def test_cloud_is_default_and_unchanged_images_are_not_uploaded_again(setup, mon
         setup.clock[0] = moment
         setup.publisher().poll_once()
     assert len(cloud.uploads) == 1
-    assert cloud.loads == [("16036", "300")]
+    assert cloud.loads == [("16036", "100")]
     assert setup.frame.uploads == []
     with setup.app.app_context():
         from app.settings.index_routes import _transport_badge
 
         assert _transport_badge(setup.device) == "Cloud"
+
+
+def test_released_frame_is_not_sent_new_previews(setup):
+    setup.settings.update_item("devices", "lounge", {"meural_management_paused": True})
+    setup.publisher().poll_once()
+    assert setup.frame.uploads == []
+    setup.settings.update_item("devices", "lounge", {"meural_management_paused": False})
+    setup.publisher().poll_once()
+    assert len(setup.frame.uploads) == 1
 
 
 def test_cloud_error_does_not_silently_enable_local_previews(setup, monkeypatch):

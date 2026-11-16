@@ -3,7 +3,7 @@
   "name": "Netgear Meural",
   "icon": "frame-corners",
   "version": "0.1.0",
-  "description": "Sign in to Netgear and choose a frame. Tesserae uploads changed pages to its own Meural playlist, where they stay until the next update. Local previews are available as a backup in Delivery method. An optional LAN address enables quiet-hours sleep control; frames asleep from their own controls or light sensor stay asleep.",
+  "description": "Sign in to Netgear and choose a frame. Tesserae displays one image at a time and creates no Meural galleries. Cloud delivery pauses Meural's gallery rotation and scheduler; Resume Meural gallery restores your previous playback. Local previews are available as a backup. An optional LAN address enables quiet-hours sleep control.",
   "renderers": ["pi_png"],
   "transport": "push",
   "panel": {
@@ -23,10 +23,10 @@
       "label": "Delivery method",
       "default": "cloud",
       "choices": [
-        {"value": "cloud", "label": "Cloud playlist"},
+        {"value": "cloud", "label": "Cloud image"},
         {"value": "local", "label": "Local preview (backup)"}
       ],
-      "help": "Cloud uploads only changed pages and keeps them on the frame. Local previews need Tesserae running and repeat the upload before the preview expires."
+      "help": "Cloud uploads only changed pages and displays one image at a time, without creating galleries. Local previews need Tesserae running and repeat the upload before the preview expires."
     },
     "host": {
       "type": "string",

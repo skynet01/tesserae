@@ -9,7 +9,12 @@ import urllib.error
 
 import pytest
 
-from app.meural_auth import AuthenticationBlocked, AuthResult, InvalidAuth, NetgearAuthenticator
+from app.meural_auth import (
+    AuthenticationBlocked,
+    AuthResult,
+    InvalidAuth,
+    NetgearAuthenticator,
+)
 from app.meural_cloud import CloudDelivery, MeuralCloudClient, save_session
 from app.secret_box import SecretBox
 from app.state.settings_store import SettingsStore
@@ -165,20 +170,73 @@ def test_expiring_session_refreshes_before_upload(store, monkeypatch):
     assert urls[1] == "https://api.meural.com/v1/items"
 
 
+def test_showing_one_cloud_image_synchronizes_without_creating_a_gallery(store, monkeypatch):
+    session(store)
+    requests = []
+
+    def urlopen(request, timeout):
+        requests.append((request.get_method(), request.full_url))
+        return response({})
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    MeuralCloudClient(store, "lounge").show_item("16036", "30")
+    assert requests == [
+        ("POST", "https://api.meural.com/v1/devices/16036/items/30"),
+        ("POST", "https://api.meural.com/v1/devices/16036/sync"),
+    ]
+
+
+def test_takeover_snapshot_excludes_credentials_and_preserves_rotation_settings(store, monkeypatch):
+    session(store)
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *a, **kw: response(
+            {
+                "data": {
+                    "frameStatus": {"currentGallery": 27, "currentItem": 28},
+                    "galleryRotation": True,
+                    "schedulerEnabled": False,
+                    "brightness": 29,
+                    "credentials": "private-credentials",
+                }
+            }
+        ),
+    )
+    assert MeuralCloudClient(store, "lounge").get_playback("16036") == {
+        "gallery_id": "27",
+        "item_id": "28",
+        "settings": {"galleryRotation": True, "schedulerEnabled": False},
+    }
+
+
 class Cloud:
     account_id = "17"
 
     def __init__(self):
         self.uploads = []
-        self.members = set()
         self.loaded = []
         self.deleted = []
         self.fail_load = False
-        self.created = 0
+        self.fail_restore = False
+        self.pauses = 0
+        self.snapshots = 0
+        self.restored = []
 
-    def create_gallery(self, name):
-        self.created += 1
-        return "300"
+    def get_playback(self, target):
+        self.snapshots += 1
+        return {
+            "gallery_id": "27",
+            "item_id": "28",
+            "settings": {"galleryRotation": True, "schedulerEnabled": False},
+        }
+
+    def pause_rotation(self, target):
+        self.pauses += 1
+
+    def restore_playback(self, target, original):
+        if self.fail_restore:
+            raise OSError("offline")
+        self.restored.append((target, original))
 
     def upload(self, image, name):
         item = str(100 + len(self.uploads))
@@ -188,17 +246,10 @@ class Cloud:
     def find_upload(self, name):
         return next((i for i, _, n in self.uploads if n == name), None)
 
-    def add_to_gallery(self, gallery, item):
-        assert gallery == "300"
-        self.members.add(item)
-
-    def remove_from_gallery(self, gallery, item):
-        self.members.discard(item)
-
-    def load_gallery(self, target, gallery):
+    def show_item(self, target, item):
         if self.fail_load:
             raise OSError("offline")
-        self.loaded.append((target, gallery, set(self.members)))
+        self.loaded.append((target, item))
 
     def delete_item(self, item):
         self.deleted.append(item)
@@ -207,23 +258,23 @@ class Cloud:
 def test_cloud_holds_one_image_without_periodic_uploads_and_survives_restart(tmp_path):
     client = Cloud()
     path = tmp_path / "delivery.json"
-    delivery = CloudDelivery(path, client, "Lounge")
+    delivery = CloudDelivery(path, client)
     assert delivery.deliver(b"first", "first", "16036") is True
     for _ in range(3):
-        assert CloudDelivery(path, client, "Lounge").deliver(b"first", "first", "16036") is False
+        assert CloudDelivery(path, client).deliver(b"first", "first", "16036") is False
     assert len(client.uploads) == 1
-    assert client.loaded == [("16036", "300", {"100"})]
-    assert client.created == 1
+    assert client.loaded == [("16036", "100")]
+    assert client.snapshots == client.pauses == 1
 
 
-def test_new_pages_replace_managed_playlist_and_only_clean_up_owned_uploads(tmp_path):
+def test_new_pages_show_one_item_and_only_clean_up_owned_uploads(tmp_path):
     client = Cloud()
-    delivery = CloudDelivery(tmp_path / "delivery.json", client, "Lounge")
+    delivery = CloudDelivery(tmp_path / "delivery.json", client)
     for page in ("first", "second", "third"):
         assert delivery.deliver(page.encode(), page, "16036")
-    assert client.members == {"102"}
     assert client.deleted == ["100"]
-    assert client.loaded[-1] == ("16036", "300", {"102"})
+    assert client.loaded[-1] == ("16036", "102")
+    assert client.snapshots == client.pauses == 1
 
 
 def test_interrupted_cloud_delivery_reuses_pending_image(tmp_path):
@@ -231,8 +282,92 @@ def test_interrupted_cloud_delivery_reuses_pending_image(tmp_path):
     path = tmp_path / "delivery.json"
     client.fail_load = True
     with pytest.raises(OSError):
-        CloudDelivery(path, client, "Lounge").deliver(b"jpeg", "first", "16036")
+        CloudDelivery(path, client).deliver(b"jpeg", "first", "16036")
     client.fail_load = False
-    assert CloudDelivery(path, client, "Lounge").deliver(b"jpeg", "first", "16036")
+    assert CloudDelivery(path, client).deliver(b"jpeg", "first", "16036")
     assert len(client.uploads) == 1
-    assert client.members == {"100"}
+    assert client.loaded == [("16036", "100")]
+
+
+def test_release_restores_original_gallery_and_flags_after_restart(tmp_path):
+    client = Cloud()
+    path = tmp_path / "delivery.json"
+    CloudDelivery(path, client).deliver(b"jpeg", "first", "16036")
+    assert CloudDelivery(path, client).release("16036") is True
+    assert client.restored == [
+        (
+            "16036",
+            {
+                "gallery_id": "27",
+                "item_id": "28",
+                "settings": {"galleryRotation": True, "schedulerEnabled": False},
+            },
+        )
+    ]
+    assert CloudDelivery(path, client).release("16036") is False
+    assert CloudDelivery(path, client).deliver(b"jpeg", "first", "16036")
+    assert len(client.uploads) == 1
+    assert client.snapshots == client.pauses == 2
+
+
+def test_failed_release_keeps_the_original_snapshot_for_retry(tmp_path):
+    client = Cloud()
+    path = tmp_path / "delivery.json"
+    delivery = CloudDelivery(path, client)
+    delivery.deliver(b"jpeg", "first", "16036")
+    client.fail_restore = True
+    with pytest.raises(OSError):
+        delivery.release("16036")
+    assert json.loads(path.read_text())["original"]["gallery_id"] == "27"
+    client.fail_restore = False
+    assert CloudDelivery(path, client).release("16036")
+
+
+def test_corrupt_playback_backup_is_not_overwritten(tmp_path):
+    client = Cloud()
+    path = tmp_path / "delivery.json"
+    path.write_text("{broken")
+    with pytest.raises(ValueError, match="saved Meural playback"):
+        CloudDelivery(path, client).deliver(b"jpeg", "first", "16036")
+    assert path.read_text() == "{broken"
+    assert client.snapshots == client.pauses == 0
+
+
+@pytest.mark.parametrize("missing_gallery", [False, True])
+def test_restore_uses_existing_gallery_and_restores_only_saved_rotation_flags(
+    store, monkeypatch, missing_gallery
+):
+    session(store)
+    sent = []
+
+    def urlopen(request, timeout):
+        sent.append(request)
+        if len(sent) == 1 and missing_gallery:
+            raise urllib.error.HTTPError(request.full_url, 404, "gone", {}, io.BytesIO(b"{}"))
+        return response({})
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    MeuralCloudClient(store, "lounge").restore_playback(
+        "16036",
+        {
+            "gallery_id": "27",
+            "item_id": "28",
+            "settings": {"galleryRotation": True, "schedulerEnabled": False},
+        },
+    )
+    assert [(r.get_method(), r.full_url) for r in sent] == [
+        ("POST", "https://api.meural.com/v1/devices/16036/galleries/27"),
+        ("PUT", "https://api.meural.com/v1/devices/16036"),
+        ("POST", "https://api.meural.com/v1/devices/16036/sync"),
+    ]
+    assert json.loads(sent[1].data) == {"galleryRotation": True, "schedulerEnabled": False}
+
+
+def test_pause_records_only_the_native_controls_tesserae_takes_over(store, monkeypatch):
+    session(store)
+    sent = []
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda request, **kw: sent.append(request) or response({})
+    )
+    MeuralCloudClient(store, "lounge").pause_rotation("16036")
+    assert json.loads(sent[0].data) == {"galleryRotation": False, "schedulerEnabled": False}

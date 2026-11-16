@@ -2045,6 +2045,16 @@ def devices_delete(instance_id: str) -> Response:
     marker so a later re-register can decide whether to auto-wipe
     via the MAC-differs check (issue #48)."""
     device_to_delete = devices().get(instance_id)
+    if device_to_delete is not None and device_to_delete.kind_of == "meural":
+        from .meural_routes import _changing_frame, _release_native
+
+        with _changing_frame():
+            settings_store().update_item(
+                "devices",
+                instance_id,
+                {"meural_management_paused": True},
+            )
+            _release_native(device_to_delete)
     last_mac = (
         str(device_to_delete.manifest.get("mac") or "").strip()
         if device_to_delete is not None

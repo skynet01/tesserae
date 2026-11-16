@@ -663,7 +663,7 @@
             <div class="dx-band-text">
               <p class="dx-band-title">Meural account</p>
               {% if account.signed_in %}
-              <p class="dx-help">Signed in as {{ account.email }}. Cloud pages stay in a Tesserae playlist until the next update.</p>
+              <p class="dx-help">Signed in as {{ account.email }}.</p>
               {% if account.frames %}
               <form method="post" action="{{ account.frame_url }}" class="dx-fg">
                 <label class="dx-f"><span class="dx-f-label">Meural frame</span>
@@ -682,8 +682,17 @@
               {% else %}
               <p class="dx-help">Sign in to Netgear to upload changed pages once and keep them on your frame.</p>
               {% endif %}
+              <p class="dx-help">Tesserae displays one image at a time and creates no Meural galleries. Cloud delivery pauses Meural rotation and scheduling. Resume Meural gallery restores your previous gallery and rotation settings.</p>
+              {% if account.paused %}
+              <p class="dx-help">{{ 'Restoration is pending. Retry Resume Meural gallery.' if account.held else 'Tesserae delivery is paused.' }}</p>
+              {% elif account.cloud %}
+              <p class="dx-help">The last image stays on the frame if Tesserae stops. Resume Meural gallery before shutting Tesserae down to restore native playback.</p>
+              {% endif %}
             </div>
             <div class="dx-band-actions">
+              <form method="post" action="{{ account.manage_url }}">
+                <button class="dx-btn is-sm" type="submit" name="action" value="{{ 'manage' if account.paused and not account.held else 'release' }}">{{ 'Let Tesserae manage' if account.paused and not account.held else 'Resume Meural gallery' }}</button>
+              </form>
               <a class="dx-btn is-sm" href="{{ account.login_url }}" target="_blank" rel="noopener">{{ 'Sign in again' if account.signed_in else 'Sign in to Netgear' }}</a>
               {% if account.signed_in %}
               <form method="post" action="{{ account.logout_url }}"><button class="dx-btn is-sm is-ghost" type="submit">Sign out</button></form>

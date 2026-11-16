@@ -118,6 +118,20 @@ class MeuralClient:
         return out
 
 
+def release_sleep(device: Device, host: str) -> None:
+    """Wake only a frame that Tesserae put to sleep on this LAN address."""
+    path = Path(device.data_dir) / "meural_sleep.json"
+    try:
+        owned = json.loads(path.read_text()) == {"host": host}
+    except (OSError, ValueError):
+        return
+    if owned:
+        client = MeuralClient(host)
+        if client.is_sleeping():
+            client.set_sleep(False)
+        path.unlink(missing_ok=True)
+
+
 class MeuralPublisher:
     """One worker owns uploads, renewals and quiet-hours transitions."""
 
@@ -247,6 +261,8 @@ class MeuralPublisher:
 
     def _visit(self, device: Device) -> None:
         cfg = (self._settings.get_section("devices") or {}).get(device.id) or {}
+        if cfg.get("meural_management_paused"):
+            return
         if cfg.get("delivery_method", "cloud") != "local":
             self._visit_cloud(device, cfg)
             return
@@ -308,7 +324,6 @@ class MeuralPublisher:
             Path(device.data_dir)
             / f"meural_cloud_{resource_id(client.account_id)}_{resource_id(target)}.json",
             client,
-            device.name,
             cancelled=lambda: (
                 self._stop.is_set() or self._devices.devices.get(device.id) is not device
             ),

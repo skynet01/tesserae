@@ -2366,6 +2366,9 @@ def _meural_account_view(device: Device) -> dict[str, Any] | None:
     if device.kind_of != "meural":
         return None
     cfg = (settings_store().get_section("devices") or {}).get(device.id) or {}
+    from app.meural_cloud import delivery_for_device
+
+    delivery = delivery_for_device(current_app, device)
     return {
         "signed_in": bool(cfg.get("meural_refresh_token_secret")),
         "email": cfg.get("meural_email", ""),
@@ -2374,6 +2377,11 @@ def _meural_account_view(device: Device) -> dict[str, Any] | None:
         "login_url": url_for("auth.meural_login", instance_id=device.id),
         "logout_url": url_for("auth.meural_logout", instance_id=device.id),
         "frame_url": url_for("auth.meural_select_frame", instance_id=device.id),
+        "manage_url": url_for("auth.meural_manage", instance_id=device.id),
+        "paused": bool(cfg.get("meural_management_paused")),
+        "cloud": cfg.get("delivery_method") != "local",
+        "held": bool(delivery and delivery[0].held(delivery[1]))
+        or (Path(device.data_dir) / "meural_sleep.json").is_file(),
     }
 
 

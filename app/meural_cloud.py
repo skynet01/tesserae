@@ -14,6 +14,7 @@ from typing import Any
 
 from flask import Flask
 
+from app.device_loader import Device
 from app.meural_auth import (
     AuthResult,
     HttpError,
@@ -72,7 +73,10 @@ def save_session(
     chosen = next((d for d in inventory if d["id"] == str(current.get("cloud_device_id"))), None)
     if chosen is None and len(inventory) == 1:
         chosen = inventory[0]
-    selection: dict[str, Any] = {"cloud_device_id": chosen["id"] if chosen else ""}
+    selection: dict[str, Any] = {
+        "cloud_device_id": chosen["id"] if chosen else "",
+        "meural_management_paused": False,
+    }
     if chosen and (
         not current.get("host")
         or current.get("cloud_device_id") != chosen["id"]
@@ -92,13 +96,32 @@ def save_session(
             "meural_devices": inventory,
             **selection,
         },
-        [*SESSION_FIELDS, {"name": "cloud_device_id"}, {"name": "host"}],
+        [
+            *SESSION_FIELDS,
+            {"name": "cloud_device_id"},
+            {"name": "host"},
+            {"name": "meural_management_paused"},
+        ],
     )
 
 
 def clear_session(settings: SettingsStore, device_id: str) -> None:
     keys = [f["name"] + ("_secret" if f.get("secret") else "") for f in SESSION_FIELDS]
     settings.update_item("devices", device_id, {}, remove=keys)
+
+
+def save_tokens(settings: SettingsStore, device_id: str, result: AuthResult) -> None:
+    settings.update_for_namespace(
+        "devices",
+        device_id,
+        {
+            "meural_access_token": result.access_token,
+            "meural_refresh_token": result.refresh_token,
+            "meural_expires_at": result.expires_at,
+            "meural_trust_id": result.trust_id,
+        },
+        SESSION_FIELDS,
+    )
 
 
 class MeuralCloudClient:
@@ -138,17 +161,7 @@ class MeuralCloudClient:
                 self._failed_refresh = refresh
                 self._retry_auth_at = time.monotonic() + 60
                 raise
-            self._settings.update_for_namespace(
-                "devices",
-                self._device_id,
-                {
-                    "meural_access_token": result.access_token,
-                    "meural_refresh_token": result.refresh_token,
-                    "meural_expires_at": result.expires_at,
-                    "meural_trust_id": result.trust_id,
-                },
-                SESSION_FIELDS,
-            )
+            save_tokens(self._settings, self._device_id, result)
             self.reset_auth()
             return result.access_token
 
@@ -219,21 +232,6 @@ class MeuralCloudClient:
                 return resource_id(item.get("id"))
         return None
 
-    def create_gallery(self, name: str) -> str:
-        data = self._data(self.request("POST", "galleries", json_data={"name": name}))
-        return resource_id(data.get("id"))
-
-    def add_to_gallery(self, gallery: str, item: str) -> None:
-        path = f"galleries/{resource_id(gallery)}/items/{resource_id(item)}"
-        try:
-            self.request("POST", path)
-        except HttpError as exc:
-            if exc.status != 409:
-                raise
-            data = self._data(self.request("GET", f"galleries/{resource_id(gallery)}"))
-            if item not in {str(i) for i in data.get("itemIds", [])}:
-                raise
-
     def _delete(self, path: str) -> None:
         try:
             self.request("DELETE", path)
@@ -241,14 +239,52 @@ class MeuralCloudClient:
             if exc.status != 404:
                 raise
 
-    def remove_from_gallery(self, gallery: str, item: str) -> None:
-        self._delete(f"galleries/{resource_id(gallery)}/items/{resource_id(item)}")
-
     def delete_item(self, item: str) -> None:
         self._delete(f"items/{resource_id(item)}")
 
-    def load_gallery(self, target: str, gallery: str) -> None:
-        self.request("POST", f"devices/{resource_id(target)}/galleries/{resource_id(gallery)}")
+    def show_item(self, target: str, item: str) -> None:
+        target = resource_id(target)
+        self.request("POST", f"devices/{target}/items/{resource_id(item)}", timeout=60)
+        self.request("POST", f"devices/{target}/sync", timeout=60)
+
+    def get_playback(self, target: str) -> dict[str, Any]:
+        data = self._data(self.request("GET", f"devices/{resource_id(target)}"))
+        if not isinstance(data, dict) or not isinstance(data.get("frameStatus"), dict):
+            raise ValueError("Meural did not return the frame's current playback")
+        flags = {k: data.get(k) for k in ("galleryRotation", "schedulerEnabled")}
+        if not all(isinstance(value, bool) for value in flags.values()):
+            raise ValueError("Meural did not return the frame's rotation settings")
+        return {
+            "gallery_id": resource_id(data["frameStatus"].get("currentGallery")),
+            "item_id": resource_id(data["frameStatus"].get("currentItem")),
+            "settings": flags,
+        }
+
+    def pause_rotation(self, target: str) -> None:
+        self.request(
+            "PUT",
+            f"devices/{resource_id(target)}",
+            json_data={"galleryRotation": False, "schedulerEnabled": False},
+            timeout=60,
+        )
+
+    def restore_playback(self, target: str, original: dict[str, Any]) -> None:
+        target = resource_id(target)
+        flags = {k: original["settings"][k] for k in ("galleryRotation", "schedulerEnabled")}
+        if not all(isinstance(value, bool) for value in flags.values()):
+            raise ValueError("Invalid saved Meural rotation settings")
+        try:
+            self.request(
+                "POST",
+                f"devices/{target}/galleries/{resource_id(original['gallery_id'])}",
+                timeout=60,
+            )
+        except HttpError as exc:
+            if exc.status != 404:
+                raise
+        finally:
+            self.request("PUT", f"devices/{target}", json_data=flags, timeout=60)
+            self.request("POST", f"devices/{target}/sync", timeout=60)
 
 
 def get_cloud_client(app: Flask, device_id: str) -> MeuralCloudClient:
@@ -259,16 +295,15 @@ def get_cloud_client(app: Flask, device_id: str) -> MeuralCloudClient:
 
 
 class CloudDelivery:
-    """Keep an app-created playlist on one frame, with only its latest image."""
+    """Show one image at a time; preserve native playback for explicit release."""
 
     def __init__(
         self,
         path: Path,
         client: Any,
-        name: str,
         cancelled: Callable[[], bool] = lambda: False,
     ) -> None:
-        self.path, self.client, self.name, self.cancelled = path, client, name, cancelled
+        self.path, self.client, self.cancelled = path, client, cancelled
 
     def _save(self, state: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -276,29 +311,59 @@ class CloudDelivery:
         temporary.write_text(json.dumps(state))
         temporary.replace(self.path)
 
-    def deliver(self, jpeg: bytes, key: str, target: str) -> bool:
-        target = resource_id(target)
+    def _state(self, target: str) -> dict[str, Any]:
         try:
             state = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            state = {}
+        except FileNotFoundError:
+            return {
+                "scope": f"{self.client.account_id}:{target}",
+                "owner": uuid.uuid4().hex[:12],
+                "owned": [],
+            }
+        except (OSError, ValueError) as exc:
+            raise ValueError("Could not read the saved Meural playback state") from exc
         scope = f"{self.client.account_id}:{target}"
         if not isinstance(state, dict) or state.get("scope") != scope:
-            state = {"scope": scope, "owner": uuid.uuid4().hex[:12], "owned": []}
+            raise ValueError("The saved Meural playback state belongs to a different frame")
+        return state
+
+    def held(self, target: str) -> bool:
+        try:
+            return bool(self._state(resource_id(target)).get("original"))
+        except ValueError:
+            return True
+
+    def release(self, target: str) -> bool:
+        target = resource_id(target)
+        state = self._state(target)
+        if not state.get("original"):
+            return False
+        self.client.restore_playback(target, state["original"])
+        state.pop("original")
+        state.update(paused=False, last_key=None)
+        self._save(state)
+        return True
+
+    def deliver(self, jpeg: bytes, key: str, target: str) -> bool:
+        target = resource_id(target)
+        state = self._state(target)
+        if self.cancelled():
+            return False
+        if not state.get("original"):
+            state["original"] = self.client.get_playback(target)
+            self._save(state)
+        if not state.get("paused"):
+            self.client.pause_rotation(target)
+            state["paused"] = True
+            self._save(state)
         if self.cancelled():
             return False
         if state.get("last_key") == key:
             self._cleanup(state)
             return False
-        gallery = state.get("gallery_id")
-        if not gallery:
-            gallery = self.client.create_gallery(f"Tesserae - {self.name}")
-            state["gallery_id"] = gallery
-            self._save(state)
-        if self.cancelled():
-            return False
         if state.get("pending_key") != key:
-            state.update(pending_key=key, pending_item=None, upload_started=False)
+            cached = state.get("current_item") if state.get("current_key") == key else None
+            state.update(pending_key=key, pending_item=cached, upload_started=False)
             self._save(state)
         item = state.get("pending_item")
         if not item:
@@ -315,17 +380,10 @@ class CloudDelivery:
             self._save(state)
         if self.cancelled():
             return False
-        self.client.add_to_gallery(gallery, item)
-        for previous in state["owned"]:
-            if self.cancelled():
-                return False
-            if previous != item:
-                self.client.remove_from_gallery(gallery, previous)
-        if self.cancelled():
-            return False
-        self.client.load_gallery(target, gallery)
+        self.client.show_item(target, item)
         state.update(
             last_key=key,
+            current_key=key,
             current_item=item,
             pending_key=None,
             pending_item=None,
@@ -337,8 +395,24 @@ class CloudDelivery:
 
     def _cleanup(self, state: dict[str, Any]) -> None:
         for old in list(state["owned"][:-2]):
+            if old in {
+                state.get("current_item"),
+                state.get("pending_item"),
+                (state.get("original") or {}).get("item_id"),
+            }:
+                continue
             if self.cancelled():
                 return
             self.client.delete_item(old)
             state["owned"].remove(old)
             self._save(state)
+
+
+def delivery_for_device(app: Flask, device: Device) -> tuple[CloudDelivery, str] | None:
+    """Resolve the current account/frame journal without making network requests."""
+    cfg = (app.config["SETTINGS_STORE"].get_section("devices") or {}).get(device.id) or {}
+    account, target = cfg.get("meural_account_id"), cfg.get("cloud_device_id")
+    if not account or not target:
+        return None
+    path = Path(device.data_dir) / f"meural_cloud_{resource_id(account)}_{resource_id(target)}.json"
+    return CloudDelivery(path, get_cloud_client(app, device.id)), str(target)
