@@ -416,7 +416,7 @@
   </div>
   <p class="ev2-sub" data-ev2-sub>
     {%- if _is_new -%}
-    Four short steps: where it shows, how the screen is split, what goes in each part, and how it looks. Then, if you like, add it to a lineup.
+    Choose a display, a layout and widgets. Then, if you like, add it to a lineup.
     {%- else -%}
     Shows on {% if _using_test %}a {{ _td.w }}×{{ _td.h }} test display{% else %}{{ _bound | map(attribute='label') | join(' and ') }}{% endif %}. {{ _cells | length }} cell{{ '' if _cells | length == 1 else 's' }}, {{ _filled | length }} with widgets.
     {%- endif -%}
