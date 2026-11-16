@@ -24,7 +24,9 @@ def _tops(page, strip_class: str, pills: list[str]) -> list[float]:
         + "".join(_STEP.format(pill=p) for p in pills)
         + "</ol></div>"
     )
-    return page.evaluate("[...document.querySelectorAll('.lu-tile')].map(e => e.getBoundingClientRect().top)")
+    return page.evaluate(
+        "[...document.querySelectorAll('.lu-tile')].map(e => e.getBoundingClientRect().top)"
+    )
 
 
 @pytest.fixture

@@ -49,7 +49,7 @@ def editor_look_context(page: Page, widgets: Iterable[Any]) -> dict[str, Any]:
 
     rows = []
     for cell in page.cells:
-        if cell.id == page.status_bar_cell_id or cell.plugin not in plugins:
+        if cell.id == page.status_bar_cell_id or cell.plugin is None or cell.plugin not in plugins:
             continue
         plugin = plugins[cell.plugin]
         reasons = [
@@ -91,6 +91,6 @@ def editor_look_context(page: Page, widgets: Iterable[Any]) -> dict[str, Any]:
     content = [c for c in page.cells if c.id != page.status_bar_cell_id and c.plugin]
     visible = bool(content) and (
         bool(page.custom_css.strip() or page.gap or page.corner_radius)
-        or any(not rules.get(c.plugin, {}).get("always") for c in content)
+        or any(not rules.get(c.plugin or "", {}).get("always") for c in content)
     )
     return {"look_overrides": rows, "widget_look_rules": rules, "look_visible": visible}

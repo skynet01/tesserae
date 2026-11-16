@@ -8,7 +8,7 @@ from pathlib import Path
 
 PLUGIN_ID = "pics"
 REASON = (
-    "Not available for Big Bertha: Home Assistant gets no sliced files from it. "
+    "Not available for Printer A: Home Assistant gets no sliced files from it. "
     "Availability depends on the printer. Save and reopen to refresh."
 )
 
@@ -18,16 +18,16 @@ REASON = {REASON!r}
 
 def choices(name, options=None):
     if name == "printer":
-        return [{{"value": "h3c", "label": "Big Bertha"}}, {{"value": "p1s", "label": "P1S"}}]
+        return [{{"value": "alpha", "label": "Printer A"}}, {{"value": "beta", "label": "BETA"}}]
     if name == "method":
-        printer = (options or {{}}).get("printer") or "h3c"
+        printer = (options or {{}}).get("printer") or "alpha"
         rows = [
             {{"value": "toolpath", "label": "Toolpaths", "image": "/plugins/pics/static/toolpath.svg"}},
             {{"value": "preview", "label": "Line art from the preview",
               "image": "/plugins/pics/static/preview.svg"}},
             {{"value": "ai", "label": "AI engraving", "image": "/plugins/pics/static/ai.svg"}},
         ]
-        if printer == "h3c":
+        if printer == "alpha":
             rows[0].update(disabled=True, reason=REASON)
         return rows
     return []

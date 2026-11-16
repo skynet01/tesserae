@@ -76,7 +76,9 @@ def read_json(path: Path, default: Any) -> Any:
         return default
     except (OSError, ValueError) as err:
         if path.name in (JOBS, STATE, STORIES):
-            raise RuntimeError("Saved news run state is unreadable; paid calls are blocked") from err
+            raise RuntimeError(
+                "Saved news run state is unreadable; paid calls are blocked"
+            ) from err
         return default
 
 

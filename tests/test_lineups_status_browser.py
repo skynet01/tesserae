@@ -1,4 +1,4 @@
-"""The Door Frame case in a live Chromium: one Live row, the print lineup that
+"""The Test Display case in a live Chromium: one Live row, the print lineup that
 won but has not landed Queued, the one whose printer is idle Waiting, and the
 day bar drawing the three all-day lineups in separate lanes, on a desktop and
 a phone, from the server's markup and from the page's own redraw."""
@@ -17,12 +17,12 @@ from flask import Flask, render_template
 
 from app.lineups_view import build_view
 from app.main import create_app
-from tests.test_lineups_browser import _HAS_CHROMIUM, _launch
+from tests.test_lineups_browser import _HAS_CHROMIUM, _launch, _open_displays_on_phones
 from tests.test_lineups_status import DASH, DOOR_FRAME, NOW, door
 
 pytestmark = pytest.mark.skipif(not _HAS_CHROMIUM, reason="Playwright Chromium not installed")
 
-DOOR = '.lu-ds[data-display="reterminal_e1004_d856d4"]'
+DOOR = '.lu-ds[data-display="test_display"]'
 
 
 def _vm(merged: bool = False) -> dict[str, Any]:
@@ -89,17 +89,17 @@ def _check(got: dict[str, Any]) -> None:
     rows = {r["id"]: r for r in got["rows"]}
     assert [r["status"] for r in got["rows"]].count("live") == 1, got["rows"]
     assert rows["photos_all_day"]["status"] == "live"
-    assert rows["print_h3c_door"]["status"] == "queued"
-    assert rows["print_h3c_door"]["tag"].lower() == "queued"
-    assert rows["print_h3c_door"]["why"].startswith("lands ~")
-    p1s = rows["print_p1s_door"]
-    assert p1s["status"] == "waiting" and p1s["tag"].lower() == "waiting" and p1s["grey"]
-    assert p1s["why"] == "until P1S Printer Print status is running"
+    assert rows["print_alpha_door"]["status"] == "queued"
+    assert rows["print_alpha_door"]["tag"].lower() == "queued"
+    assert rows["print_alpha_door"]["why"].startswith("lands ~")
+    beta = rows["print_beta_door"]
+    assert beta["status"] == "waiting" and beta["tag"].lower() == "waiting" and beta["grey"]
+    assert beta["why"] == "until BETA Printer Print status is running"
     blocks = {b["id"]: b for b in got["blocks"]}
-    assert set(blocks) == {"photos_all_day", "print_h3c_door", "print_p1s_door"}
+    assert set(blocks) == {"photos_all_day", "print_alpha_door", "print_beta_door"}
     assert [b["id"] for b in got["blocks"] if b["live"]] == ["photos_all_day"]
-    assert "st-queued" in blocks["print_h3c_door"]["cls"]
-    assert "st-waiting" in blocks["print_p1s_door"]["cls"]
+    assert "st-queued" in blocks["print_alpha_door"]["cls"]
+    assert "st-waiting" in blocks["print_beta_door"]["cls"]
     # Every lane is visible: inside the track, reachable, stacked without overlap.
     ordered = sorted(blocks.values(), key=lambda b: b["top"])
     assert ordered[0]["id"] == "photos_all_day"
@@ -129,6 +129,8 @@ def test_door_frame_shows_one_live_row_and_laned_day_bar(
         page = ctx.new_page()
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
+        # Phones start with every display collapsed; this one is opened.
+        _open_displays_on_phones(page, ["test_display"])
         page.route(
             "**/decks/view.json*",
             lambda route: route.fulfill(
@@ -168,9 +170,9 @@ _STRIP = """(row) => [...row.querySelectorAll('.lu-step')].map((st) => ({
 
 def _check_strip(steps: list[dict[str, Any]]) -> None:
     assert [s["meta"] for s in steps] == ["1st choice", "2nd choice", "3rd choice"]
-    assert steps[0]["chip"] == "Only while Big-Bertha Print status is running"
+    assert steps[0]["chip"] == "Only while Printer A Print status is running"
     assert "ok" in steps[0]["chipCls"].split()
-    assert steps[0]["title"] == "Shows only while Big-Bertha Print status is running."
+    assert steps[0]["title"] == "Shows only while Printer A Print status is running."
     assert "no" in steps[1]["chipCls"].split()
     assert steps[2]["chip"] == "Fallback"
     assert [s["sep"] for s in steps] == ["otherwise", "otherwise", None]
@@ -196,6 +198,8 @@ def test_priority_lineup_reads_as_choices_with_condition_chips(live: str) -> Non
         page = ctx.new_page()
         errors: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
+        # Phones start with every display collapsed; this one is opened.
+        _open_displays_on_phones(page, ["test_display"])
         page.route(
             "**/decks/view.json*",
             lambda route: route.fulfill(

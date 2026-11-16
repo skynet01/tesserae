@@ -667,7 +667,9 @@
   gap: var(--ev2-gap-tight, 8px);
   margin-bottom: var(--ev2-gap-tight, 8px);
 }
-.ev2pv-panel-controls[hidden] { display: none; }
+.ev2pv-panel-controls[hidden] {
+  display: none;
+}
 .ev2pv-panel-controls label {
   display: flex;
   align-items: center;
@@ -675,7 +677,10 @@
   min-height: 44px;
   font-size: var(--ev2-fs-label, 13px);
 }
-.ev2pv-panel-controls p { flex-basis: 100%; margin: 0; }
+.ev2pv-panel-controls p {
+  flex-basis: 100%;
+  margin: 0;
+}
 .ev2pv.is-panel-native .ev2pv-stage {
   display: block;
   overflow: auto;

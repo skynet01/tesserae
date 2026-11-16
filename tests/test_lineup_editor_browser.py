@@ -66,20 +66,20 @@ def test_add_dashboard_offers_optional_conditions(real, conditional, width):
             page.locator("#dxe-picker").get_by_role(
                 "button", name="Add condition", exact=True
             ).click()
-            page.locator("#dxe-picker .cp-row input[list]").fill("sensor.printer_state")
-            page.locator("#dxe-picker .cond-unknown input").check()
+            page.locator("#dxe-picker .cp-row input[list]").fill("sensor.example_state")
         page.locator("[data-add-confirm]").click()
         assert "clock" in _steps(page)
-        if conditional:
-            assert page.locator("[data-mode-sel]").input_value() == "scheduled"
-            page.locator("[data-mode-sel]").select_option("priority")
+        # Adding a conditioned dashboard never changes how the lineup picks,
+        # and the legacy pick mode is not offered where it isn't already set.
+        assert page.locator("[data-add-mode]").count() == 0
+        assert page.locator("[data-mode-sel]").count() == 0
         _save(page)
         saved = app.config["DECK_STORE"].get("morning")
         step = next(s for s in saved.pages if s.page_id == "clock")
         assert bool(step.conditions) is conditional
         if conditional:
-            assert step.conditions[0].if_unknown == "fail"
-        assert saved.advance_mode == ("priority" if conditional else "scheduled")
+            assert step.conditions[0].source_id == "sensor.example_state"
+        assert saved.advance_mode == "scheduled"
         assert not errors
         browser.close()
 
@@ -97,8 +97,9 @@ def real(tmp_path: Path) -> Iterator[tuple[str, Flask]]:
         devices_dir=REPO_ROOT / "devices",
     )
     app.config["TESTING"] = True
+    app.config["SCHEDULER"].stop()  # These browser tests drive the routes themselves.
     settings = app.config["SETTINGS_STORE"]
-    settings.patch_section("app", {"onboarded": True})
+    settings.patch_section("app", {"onboarded": True, "locale": "en-US"})
     settings.patch_section("auth", {"disabled": True})
     c = app.test_client()
     for dev, kind in (("hall", "esp32_client"), ("tv", "opendisplay_ha")):
@@ -478,7 +479,7 @@ def test_new_lineup_steps_and_creates(real: tuple[str, Flask]) -> None:
         page.locator("#dxe-picker .cp-row").get_by_role("combobox").first.select_option(
             "time_window"
         )
-        page.locator("[data-add-mode]").select_option("priority")
+        assert page.locator("[data-add-mode]").count() == 0
         page.locator("[data-add-confirm]").click()
         assert create.is_enabled()
         page.locator("#dxe-title").fill("Day art")
@@ -490,7 +491,7 @@ def test_new_lineup_steps_and_creates(real: tuple[str, Flask]) -> None:
         d = made[0]
         assert page.url.endswith(f"/decks/{d.id}/edit")
         assert (d.name, d.device_ids, d.page_ids) == ("Day art", ["tv"], ["photos", "clock"])
-        assert d.advance_mode == "priority"
+        assert d.advance_mode == "scheduled"
         assert len(d.pages[1].conditions) == 1
         assert (d.advance_trigger, d.advance_anchor, d.advance_end_at) == (
             "cycle",

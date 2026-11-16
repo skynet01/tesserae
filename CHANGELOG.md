@@ -6,42 +6,33 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
-- Lineups: a NEXT or QUEUED tag on one dashboard no longer pushes it below the others in the row.
-- Fix wake estimates after quiet hours to follow the interval sent to the display.
-- Offer optional conditions when adding a dashboard to a lineup.
-- Hide dashboard Look when no widgets use it, and restore it when one does.
-- Dashboard test displays can choose a panel type. Panel previews preserve dither pixels and show each device separately.
+### Security
 
-- Dashboard editor: widget settings are compact, with switches in one list and short fields side by side.
-- Dashboard editor: replacing a widget drops choices the new one doesn't list, and long widget names keep their tag.
-- Dashboard editor: widget status (like HA capture) shows at the bottom of the open row, and number fields show their units.
-- Show example values in empty widget inputs and explain Home Assistant theme names and language codes.
-- Fix HA dashboard clipping and add capture controls, fresh preview, and display-aware dithering.
-- Close Fraimic HTTP-error responses after reading them.
-- Keep selection marks and reorder handles visible when selecting items in a list.
-- Add a Show tags toggle to query previews.
-- Fix contextual help icons in the canvas editor's configuration drawer.
-- Fix query previews in the canvas editor and place Preview query after the widget options.
-- Let image widgets preview their current query in the dashboard editors.
+- Zero-touch pairing: a display's MAC address collects its access token only once. Before, any request to `/api/v1/device/discover` carrying the MAC of a registered display was given that display's token, and a MAC can be read by anything on the network. Now the match stops working after the display's first request with its token. A display that is re-flashed or factory reset shows **This display is asking to pair again** on its page and on Settings › Devices, and **Allow re-pair** lets it collect its token again with its pages and history kept. Displays you already have are not affected until they lose their token. (#515)
+
 ### Added
 
-- Add Meural cloud sign-in, single-image delivery with rotation pause/restore, and local previews.
+- Offer optional conditions when adding a dashboard to a lineup.
+- Widget choices can be shown as unavailable in the editors, with a reason, and can depend on saved cell options. The flag guides the editors only; saves are not checked against it.
+- The lineup editor shows display wake times and warns about renders between wakes.
+- Choose a test display panel type and preview each display at exact pixel sizes.
+- Lineups on phones start collapsed, with a filter toggle and compact rows.
+- Add kie.ai as a selectable image service, with saved tasks and shared spending limits.
 - Add a dashboard editor with guided steps, live preview and widget option examples. Switch back to classic from its help menu.
-- Widgets: a choice can be `disabled` with a `reason`, and `choices()` can read the cell's options (`choices_depends_on`). The editor greys out a choice that can't work for the current setup and says why.
-- Lineup editor: on a display that sleeps, Timing says how often it wakes and warns when sends outrun the wakes, with the cost for widgets that pay per render (new `render.paid`). New lineups there send just before each wake.
-- Widgets can explain unavailable choices using the cell's saved options.
 
 ### Fixed
 
-- Smart sync: a wake caused by a button press (and the beat right after it) no longer resets a display's wake-time trust, so a frame that is pressed now and then can still earn it.
-- Lineups: only the lineup on the glass is Live. Others with an open window are Queued (with when they land, or what they wait behind) or Waiting (with the condition), and overlapping lineups get their own lane on the day bar.
-- Lineups and the lineup editor: a conditional dashboard says when it shows, and a priority lineup reads as ranked choices with a fallback instead of a loop.
-- Skip pre-renders while displays are paused or asleep and when dashboard conditions fail; discard stale automated follow-ups.
-- New dashboard editor: hiding the tab saves pending edits after earlier autosaves, so the latest edit survives.
+- Lineups show the delivered, queued and waiting states, with separate lanes for overlapping windows.
+- Smart sync: button wakes no longer reset wake-time trust.
+- Pre-renders and warm-ahead runs are skipped for a display that is paused, in quiet hours, or whose lineup conditions for that dashboard fail, so background renders no longer spend money nobody can see. A dashboard on the glass keeps its refreshes and edits as before. An automated follow-up is dropped once a newer frame has reached the display, and a display coming back from a pause gets a fresh render instead of a frame drawn before it. (#535)
+- Hiding or closing the dashboard editor tab keeps the latest edit: an earlier autosave still on its way can no longer overwrite it, and closing the tab sends the edit at once.
+- Show when a held update will land in the next refresh tooltip.
 - Buttons: a press on a lineup starts from the dashboard the lineup is showing, not its first one. Refresh re-sends that dashboard and Next goes to the one after it. This applies to every lineup that runs on a schedule, with or without conditions. Next and Previous also skip dashboards whose conditions fail, and History says where the press landed. A button set to a fixed step still goes to that step.
 - Device page: a display's **Own hours** switch under Quiet hours can be turned off again. Saving with it off left it on, because the page sent nothing for that section. The window you set is kept for when you switch it back on. (#523)
 - Lineup editor: a dashboard switched from canvas to grid lists its items again (its leftover canvas data counted as a second widget).
 - New dashboard editor: adding a dashboard to a rotating lineup, or removing it, shows the right dashboard on the next tick instead of at the next boundary. A lineup is deleted by leaving it only when the request confirms it, and a lineup whose times can't be described no longer stops the editor from opening.
+- News, Wikipedia On This Day: the date follows your timezone setting. It used UTC, so west of Greenwich it showed tomorrow's entries from the early evening until local midnight.
+- GTFS: when the agency publishes a new timetable, a pushed board now updates once the rebuild lands instead of keeping the old times. The stop list and the timetable also no longer download the same feed twice at once.
 
 ## [0.513.0], 2026-11-15
 
@@ -151,24 +142,6 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Fraimic: wakes skip quiet hours, follow a wake interval the page on the glass declares (down to 15 minutes), and with **Wake less often on a low battery** stretch to twice the gap below 20% and four times below 10%.
 - Fraimic: the frame's next wake feeds smart sync, the device page's next check-in and Home Assistant's online flag. A frame that wakes on time three times is trusted, and schedules and rotations with smart sync then render just before its wake. A tap doesn't count against it.
 - Fraimic: **On a tap** can step the display to its next page, **Redraw a picture that hasn't changed** redraws after a day or a week to clear ghosting, and a wake the frame doesn't answer is logged and counted (`missed_wakes` in its status).
-- Lineups: album widgets that draw a random photo show as a stack badged "random" (or ×N), with a Recent photos strip in the editor; NOW/NEXT pills stay above the stack.
-- Lineups: New lineup, and the + beside each display's chevron, open a three-step new-lineup page.
-- Lineups: a day tile you click shows a check (runs) or an x (off) for a moment, and a small one until the change is saved.
-- Lineups: click a lineup's name to rename it in place; Enter or clicking away saves, Escape cancels.
-- Lineup editor: a gear by a dashboard's name opens it in the dashboard editor; the item line says "Rotates through them" or "Shows the chosen one".
-- Lineups: a daily push can take an end time ("06:00–18:00"); with several dashboards it then steps through them in that window. Remove the end to go back to a single push.
-- Lineups: drag a lineup's dashboards left or right to reorder them, or press Alt+Left / Alt+Right on one; it saves on drop.
-- Lineup editor: rebuilt as When it runs, Dashboards and Timing, under what is on screen and the display's day bar.
-- Lineup editor: each dashboard says what it is ("Gallery · 412 photos") and opens to its items in a searchable grid.
-- Lineup editor: only the options that apply are shown; Priority when lineups overlap, Min hold when something can cut a dashboard short, Touch also flips on touch displays.
-- Lineup editor: Move… and Delete sit in a ⋯ menu by Push now and the On switch; a move applies on Save.
-- Lineup editor: drag or arrow-key this lineup's block on the day bar to set its time; it applies on Save; click another lineup's block to open its editor.
-- Lineup editor: Show all puts every day's bar in the header, so the whole week can be edited from one page.
-- Lineup editor: dashboards are big Lineups-style tiles; click one for its details and use its arrows to pick the item Push now sends. A dashboard's first eight items show in the display's own shape, then +N more.
-- Widgets: item hooks can return a preview `thumb` per item and take a `ctx` (cell size, display); see the widget guide.
-- Widgets: image widgets can preview their current query in the dashboard editors.
-- Device kinds can place a config field in a named group (`group`) and show it only for some values (`show_if`); Samsung The Frame uses them for its Power and Art Mode settings.
-- Samsung The Frame: the TV's own slideshow setting reads "Managed by Tesserae" or "Managed by the TV".
 
 ### Changed
 
@@ -178,34 +151,6 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 ### Fixed
 
 - Fraimic: a scheduled wake with nothing new to send put the frame back to sleep within a few seconds of waking, which can stop it setting its next alarm (seen on firmware 0.2.31 with wakes minutes apart: the frame then slept until tapped). It is now left up for 40 seconds first.
-- Blank pictures on a frame: a page whose images fail to load is rendered once more, and a scheduled, lineup or refresh send that still has broken pictures keeps the previous frame instead of replacing it. The log names the host and the HTTP status or error of each failed image; a manual send still goes out, with a warning in History.
-- Lineups: the quiet-hours warning says what happens ("Starts at 8 AM: 6–8 AM is in …") and only shows when a save changes the times, days or display.
-- Thumbnails fill their frame-shaped box on every page, so no thin light line shows along an edge.
-- A lineup send that failed is retried on the next tick instead of being counted as done, so a failed 06:00 send no longer misses its whole slot.
-- Smart sync waits for the displays a lineup sends to, not every display its dashboards are bound to.
-- A timer-only lineup ("Taps also flip" off) no longer follows its page links or touch zones.
-- The lineup's current step follows its conditions and priority mode, and reads as held when every rule fails, instead of showing the clock's slot.
-- The Lineups Next pill, tick and countdown follow what the scheduler will send: minimum hold, rules, priority mode and a sleeping display's check-in.
-- "Next update" counts a dashboard's own Updates refresh, not only the next lineup change.
-- Lineups: widget preview images (e.g. Immich) load under Home Assistant ingress instead of showing "?".
-- Lineups: a greyed row says why in a small tag (Not today, Done for today, Off, Not playing), so grey pictures aren't mistaken for black and white.
-- Lineups: a long day tag such as "Mon Tue Wed Sat Sun" no longer runs under the lineup's title.
-- Lineups: the time editor shows AM or PM in full.
-- Lineups: a display's day bar stays when you fold it; only its lineup rows fold.
-- Lineups: the day picker's calendar icon sits level with the middle of the day bar, at any width.
-- Lineups and the lineup editor: a short block on the day bar is a sliver of its own, 1px from its neighbours, never under them.
-- Lineups: a dashboard bound to displays of different shapes shows each display its own ratio and picture, not the largest panel's.
-- Device page: dashboard schedules have their own list instead of sitting in the Lineups list.
-- Device cards and Lineups thumbnails fill to the border, so no thin light line shows along one edge.
-- Lineup editor: a daily or interval lineup edits its own time, and a window with several dashboards takes them in turn, and cut to one it keeps its pace.
-- Lineup editor: Smart sync can be switched off again.
-- Lineup editor: the on-screen picture takes the display's shape, and Discard resets everything.
-- Lineup editor: a daily or interval lineup set to also take taps now runs.
-- Lineup editor: Background refresh is Keep ready, in the display's options, and no longer claims to replace Updates.
-- Lineup editor: Timing follows each dashboard's own time, quiet hours count only on their days, and NOW / NEXT stay current.
-- Lineup editor: saving keeps a lineup's other displays and the settings it doesn't show.
-- Lineup editor: a save from a stale tab is refused instead of undoing newer edits.
-- Dashboards: a dashboard shared by displays of different shapes shows, under each display, that display's own ratio, picture and size.
 
 ## [0.510.1], 2026-11-11
 

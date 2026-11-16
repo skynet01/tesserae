@@ -1,8 +1,8 @@
 """Disabled choices in both dashboard editors, at desktop and phone width.
 
-A cell on Big Bertha (no sliced files) shows Toolpaths greyed with its reason,
+A cell on Printer A (no sliced files) shows Toolpaths greyed with its reason,
 can't pick it, and warns that the saved value won't work. Switching the cell's
-printer to the P1S keeps the current choices until save and reload.
+printer to the BETA keeps the current choices until save and reload.
 Screenshots land in $DISABLED_CHOICES_SHOTS when set.
 """
 
@@ -94,7 +94,7 @@ def _reset(app: Flask, editor: str) -> None:
                     y=0,
                     w=800,
                     h=480,
-                    options={"printer": "h3c", "method": "toolpath", "size": "s"},
+                    options={"printer": "alpha", "method": "toolpath", "size": "s"},
                 )
             ],
         )
@@ -170,7 +170,7 @@ def test_a_disabled_choice_is_greyed_and_refreshes_after_save(
         assert not state["scrollsSideways"]
         if _SHOTS:
             Path(_SHOTS).mkdir(parents=True, exist_ok=True)
-            field.screenshot(path=f"{_SHOTS}/{editor}-{width}-big-bertha.png")
+            field.screenshot(path=f"{_SHOTS}/{editor}-{width}-printer-a.png")
 
         # Clicking the greyed tile picks nothing; a choice that works does.
         # (force: Playwright itself won't click an aria-disabled control)
@@ -187,12 +187,15 @@ def test_a_disabled_choice_is_greyed_and_refreshes_after_save(
 
         # Changing the printer leaves the Picture field alone until a save
         # and reload. The user's new Picture selection must survive.
-        page.select_option(f"#{fid}-printer", "p1s")
+        page.select_option(f"#{fid}-printer", "beta")
         page.wait_for_load_state("networkidle")
         state = page.evaluate(STATE_JS, fid)
         assert state["disabled"], "availability refreshes only when fields render again"
         assert state["value"] == "preview"
-        assert "Availability depends on the printer. Save and reopen to refresh." in field.text_content()
+        assert (
+            "Availability depends on the printer. Save and reopen to refresh."
+            in field.text_content()
+        )
         if editor == "v2":
             page.evaluate("() => EV2.flush()")
         else:
@@ -213,10 +216,10 @@ def test_a_disabled_choice_is_greyed_and_refreshes_after_save(
         assert page.evaluate(STATE_JS, fid)["value"] == "toolpath"
         if _SHOTS:
             field.locator("[data-pic-trigger]").click()
-            field.screenshot(path=f"{_SHOTS}/{editor}-{width}-p1s.png")
+            field.screenshot(path=f"{_SHOTS}/{editor}-{width}-beta.png")
 
-        # Back to Big Bertha: the open choices and current value stay put.
-        page.select_option(f"#{fid}-printer", "h3c")
+        # Back to Printer A: the open choices and current value stay put.
+        page.select_option(f"#{fid}-printer", "alpha")
         page.wait_for_load_state("networkidle")
         assert not page.evaluate(STATE_JS, fid)["disabled"]
         assert page.evaluate(STATE_JS, fid)["value"] == "toolpath"

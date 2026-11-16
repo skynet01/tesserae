@@ -86,7 +86,7 @@ def test_a_sleeper_says_how_often_it_wakes_and_where_to_change_it(app: Flask) ->
 def test_wake_times_count_as_learned_only_when_smart_sync_trusts_them(
     app: Flask, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Door Frame's telemetry said "firmware" but had no on-time wakes:
+    """The Test Display's telemetry said "firmware" but had no on-time wakes:
     the editor said "Wake times learned" while smart sync still sent on the
     timer. Learned means what the scheduler's gate means: trusted."""
     _sleeper(app)
@@ -216,6 +216,35 @@ def test_a_new_lineup_on_a_sleeper_sends_just_before_each_wake(app: Flask) -> No
     app.config["PAGE_STORE"].save(Page(id="b", name="B"))
     assert _create(app, "door").advance_smart_sync is True
     assert _create(app, "tv", "b").advance_smart_sync is False
+
+
+def _create_saying(app: Flask, page: str, start: str, said: list[str]) -> Deck:
+    resp = app.test_client().post(
+        "/decks/new/lineup",
+        data={
+            "name": "New",
+            "when": "between",
+            "start": start,
+            "end": f"{int(start[:2]) + 2:02d}:00",
+            "page_ids": [page],
+            "device_ids": ["door"],
+            "advance_smart_sync": said,
+        },
+    )
+    data = resp.get_json()
+    assert data and data["ok"], data
+    deck = app.config["DECK_STORE"].get(data["id"])
+    assert deck is not None
+    return deck
+
+
+def test_a_new_lineup_saves_the_choice_it_posts(app: Flask) -> None:
+    """The default is only for a create that doesn't say: one that posts
+    the choice ("on" after a "0", as an edit does) has it saved."""
+    _sleeper(app)
+    app.config["PAGE_STORE"].save(Page(id="b", name="B"))
+    assert _create_saying(app, "a", "07:00", ["0"]).advance_smart_sync is False
+    assert _create_saying(app, "b", "12:00", ["0", "on"]).advance_smart_sync is True
 
 
 def test_an_existing_lineup_keeps_its_saved_choice(app: Flask) -> None:

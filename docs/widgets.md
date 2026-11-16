@@ -122,11 +122,14 @@ Lowercase `[a-z0-9_]` is a convention, not a requirement. Name it
     Don't ship a `variant` option for visual direction. Page-level `data-style` controls shapes across widgets.
     For layout choices such as `stack` vs `side`, use an option named `layout` with values that describe the shape.
 
-* `overrides_look` is a plain-text description, such as `"uses its own dark mode"`, on a cell option that changes appearance apart from the dashboard look.
-    The editor warns while that option is visible and differs from its default; warning links open the relevant settings.
-
-    Put it on the widget manifest itself to warn whenever the widget is used, as with an embedded website.
-    Resetting a cell's look overrides clears its theme, style, font and padding; widget options stay unchanged.
+* `overrides_look` accepts a plain-text description such as
+  `"uses its own dark mode"`. Add it to a cell option that changes
+  appearance independently of the dashboard look. The editor warns when
+  that option is visible and differs from its default. Put it on the
+  widget manifest itself to warn whenever the widget is used, as with an
+  embedded website. Warning links open the relevant settings. Resetting
+  cell look overrides clears cell theme, style, font and padding; widget
+  options stay unchanged.
 
 * A `select` choice may carry `image`: a server path or an `https` URL.
     For example, `/plugins/<plugin_id>/static/styles/poster.jpg` comes from the plugin's `static/` folder.
@@ -317,12 +320,20 @@ Mark a choice `"disabled": true` when it can't work for the current setup, and s
 
 ```python
 {"value": "toolpath", "label": "Toolpaths", "disabled": True,
- "reason": "Not available for Big Bertha: Home Assistant gets no sliced files from it."}
+ "reason": "Not available for Printer A: Home Assistant gets no sliced files from it."}
 ```
 
-The editor lists the choice greyed, with the reason beside it, and it can't be picked.
+The editors list the choice greyed, with the reason beside it, and it can't be picked there.
 A cell that already holds a disabled choice keeps it: the editor shows a warning with the reason under the field, and a save leaves the value alone.
-Your widget still has to cope with that value at render time.
+A manifest `default` that is a disabled choice is treated the same way on a new cell.
+
+`disabled` is a hint to the editors, not a rule the host enforces.
+Nothing checks it when a cell is saved, so a disabled value can still reach your widget:
+
+- the API and MCP agents can set any value;
+- the editor's list is the one it loaded when it opened, so a choice that became unavailable since (the user changed the option it depends on, say) can still be picked and saved.
+
+Validate the value at render time and draw a clear message when it can't work.
 Static `choices` can carry `disabled` and `reason` too.
 Older servers ignore both keys and show the choice as usual.
 
@@ -338,7 +349,9 @@ def choices(name: str, options: dict | None = None) -> list[dict]:
     ...
 ```
 
-`options` is `{}` when there is no cell to ask about, such as when an agent lists the widget's choices.
+`options` is `{}` when the caller has no cell's options to pass.
+Only the editors pass them; MCP agents listing a widget's choices, the composer and the template market all call without them.
+Return a sensible list for `{}`, and don't rely on those callers seeing the per-cell `disabled` flags.
 Older servers call `choices(name)`, so give `options` a default.
 
 Choices reflect the saved options when the editor renders the fields. Changing another option does not refresh them live. Tell users when availability depends on another option, for example: "Availability depends on the printer. Save and reopen to refresh."
@@ -516,23 +529,6 @@ The host shows at most 20 images in a keyboard-accessible popup. Use `error`,
 `warning` and `stale` to explain incomplete or cached results. The endpoint is
 an authenticated POST to `/plugins/<id>/query-preview`, and agents can call it too.
 
-### Query previews
-
-Image widgets can set `"query_preview": true` in their manifest and export
-`query_preview(options, settings, *, ctx)` from `server.py`. The grid editor
-and canvas source drawer show **Preview query**, passing the current unsaved
-options through the normal form parser and calling the hook under the widget's
-declared capabilities, with runtime settings, `data_dir`, `cell_w`, `cell_h`,
-`preview=True` and `settled=False`. Preview must not advance a display's cursor
-or repeat history.
-
-Return `{"images": [...], "total": 42}`. Each image has an HTTPS `url`, optional
-HTTPS `thumbnail` and `permalink`, `width`, `height`, optional `username` or
-`prompt`, and `matches` (text badges explaining its eligibility). The host
-shows at most 20 images in a keyboard-accessible popup. `error`, `warning` and
-`stale` can explain incomplete or cached results. The authenticated POST
-endpoint is `/plugins/<id>/query-preview`; it is also callable by agents.
-
 ### Admin pages, `blueprint()`
 
 A widget or `_core` plugin can export `server.py:blueprint()` to get a `/plugins/<id>/` admin page.
@@ -685,27 +681,18 @@ Every widget on a page gets the same `ctx.locale`, chosen once per render in thi
 `ctx.strings` comes from the widget's `strings/<locale>.json`.
 Missing tags fall back to the base language (`fr-CA` → `fr`), then English.
 
-Editor fields accept a `placeholder` containing a plain example value, such
-as `Google Dark Theme`, `pt-BR`, or `0.00`. It appears only while the field
-is empty and is never saved. Translate option metadata in the same strings
-files with keys such as `cell_options.ha_theme.placeholder`,
-`cell_options.ha_theme.help`, or `settings.base_url.label`. Editors use the
-app locale (or its base language), then English for any missing metadata
-key, then the manifest text. These editor keys are optional in other locales; panel text keys
-remain required in every locale.
-
-Translating a widget is a normal contribution to that widget: a PR
-adding `strings/<locale>.json` (bundled widgets) or a new catalog
-release (marketplace widgets, installed the normal way from Browse).
-There's no separate override mechanism, and no per-widget forking
-required to add a language. The language pickers (Settings → Server,
-Settings → Devices, and the dev preview) list whatever locales the
-installed widgets ship, plus English, so a new `strings/<tag>.json`
-becomes selectable as soon as the widget loads.
-
 For dates and numbers, use `Intl.DateTimeFormat(ctx.locale, {...})` /
 `Intl.NumberFormat(ctx.locale, {...})` directly.
 The browser supplies day names, ordering and separators; don't maintain your own month/weekday table.
+
+Editor fields accept a `placeholder` containing a plain example value, such
+as `Home` or `0.00`. It appears only while the field
+is empty and is never saved. Translate option metadata in the same strings
+files with keys such as `cell_options.path.placeholder`,
+`cell_options.path.help`, or `settings.base_url.label`. Editors use the
+app locale (or its base language), then English for any missing metadata
+key, then the manifest text. These editor keys are optional in other locales; panel text keys
+remain required in every locale.
 
 To add a language, contribute `strings/<locale>.json` to the widget:
 
@@ -863,6 +850,11 @@ Settings and filesystem entries are review-only in v1. Their declarations make t
 | `settings:plugin/<other_id>` | Read another plugin's settings section (e.g. a `_core` sibling's API token). Trips the reviewer to verify the claim. | Review-only |
 | `settings:app` | Read top-level app settings (lat/lon, timezone, etc.). | Review-only |
 | `filesystem:write:<path>` | Write outside the plugin's `data_dir`. Reads of `data_dir` and the plugin folder are implicit. | Review-only |
+
+Widgets that declare `plugin:ha_core` may use the Home Assistant client
+through that delegate. Tesserae grants only the hostname in the current
+Home Assistant Core `base_url`; it does not grant access to other hosts or
+require a direct `network:` declaration on the widget.
 
 ### How the network enforcement works
 

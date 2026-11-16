@@ -302,7 +302,7 @@ def test_schedule_can_be_removed_but_cannot_gain_extra_dashboards(app, action, t
     )
     app.config["DECK_STORE"].upsert(schedule)
     response = app.test_client().post(
-        f"/pages/home/lineups/morning/{action}", json={"add_device": False}
+        f"/pages/home/lineups/morning/{action}", json={"add_device": False, "delete_lineup": True}
     )
     assert response.status_code == (404 if action == "join" else 200)
     assert app.config["DECK_STORE"].get("morning") == (schedule if action == "join" else None)
@@ -374,7 +374,12 @@ def test_lineup_leave_removes_graph_pointers_only_in_selected_deck(app):
 
 def test_leaving_last_page_removes_empty_lineup(app):
     _lineup(app, page_ids=("home",))
-    response = app.test_client().post("/pages/home/lineups/loop/leave")
+    client = app.test_client()
+    # Only when the request says the person agreed to the delete.
+    refused = client.post("/pages/home/lineups/loop/leave")
+    assert refused.status_code == 409
+    assert app.config["DECK_STORE"].get("loop") is not None
+    response = client.post("/pages/home/lineups/loop/leave", json={"delete_lineup": True})
     assert response.get_json() == {"ok": True, "lineups": [], "device_ids": []}
     assert app.config["DECK_STORE"].get("loop") is None
 
@@ -476,6 +481,13 @@ def test_lineup_routes_require_existing_records(app, path):
     assert app.test_client().post(path, json={"add_device": False}).status_code == 404
 
 
+def test_switching_editor_keeps_the_other_ui_settings(app):
+    settings = app.config["SETTINGS_STORE"]
+    settings.update_section("ui", {"dashboard_editor": "new", "other": "kept"})
+    app.test_client().post("/pages/editor-version", data={"version": "classic"})
+    assert settings.get_section("ui") == {"dashboard_editor": "classic", "other": "kept"}
+
+
 @pytest.mark.parametrize(
     "gamut", ["rgb24", "waveshare_e6", "inky_7colour", "gray_4", "gray_16", "mono"]
 )
@@ -506,3 +518,24 @@ def test_each_selected_device_gets_its_own_pixel_preview_even_at_the_same_size(a
     _, context = _editor(app)
     assert [g["device_ids"] for g in context["panel_preview_groups"]] == [["desk"], ["hall"]]
     assert len(context["preview_groups"]) == 1  # Classic layout grouping stays by shape.
+
+
+def test_classic_panel_view_names_each_groups_display(app, monkeypatch):
+    """The classic editor's Panel view asks for a group's own display, so a
+    page with mixed panels is not previewed with the first display's renderer."""
+    groups = [
+        {"w": 800, "h": 480, "label": "Colour", "devices": ["Desk"], "device_ids": ["desk"]},
+        {"w": 296, "h": 128, "label": "Tag", "devices": ["Tag"], "device_ids": ["tag 1"]},
+        {"w": 400, "h": 300, "label": "Virtual panel", "devices": []},
+    ]
+    for group, gamut in zip(groups, ("waveshare_e6", "mono", "gray_4"), strict=True):
+        group["gamut"] = gamut
+    monkeypatch.setattr("app.page_routes.preview_groups_for_page", lambda *a, **kw: groups)
+    app.config["SETTINGS_STORE"].update_section("ui", {"dashboard_editor": "classic"})
+    body = app.test_client().get("/pages/home").text
+    assert (
+        "gamut=waveshare_e6&amp;dither=floyd-steinberg&amp;w=800&amp;h=480&amp;device=desk" in body
+    )
+    assert "gamut=mono&amp;dither=floyd-steinberg&amp;w=296&amp;h=128&amp;device=tag%201" in body
+    assert "gamut=gray_4&amp;dither=floyd-steinberg&amp;w=400&amp;h=300&quot;" not in body
+    assert 'w=400&amp;h=300"' in body

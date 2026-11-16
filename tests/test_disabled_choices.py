@@ -41,16 +41,16 @@ def _app(tmp_path: Path, editor: str) -> Flask:
                     y=0,
                     w=400,
                     h=480,
-                    options={"printer": "h3c", "method": "toolpath", "size": "s"},
+                    options={"printer": "alpha", "method": "toolpath", "size": "s"},
                 ),
                 Cell(
-                    id="p1s",
+                    id="beta",
                     plugin=PLUGIN_ID,
                     x=400,
                     y=0,
                     w=400,
                     h=480,
-                    options={"printer": "p1s", "method": "toolpath", "size": "l"},
+                    options={"printer": "beta", "method": "toolpath", "size": "l"},
                 ),
             ],
         )
@@ -75,9 +75,9 @@ def test_each_cell_gets_choices_for_its_own_printer(editor: tuple[Flask, str]) -
     app, kind = editor
     html = app.test_client().get(f"/pages/{PAGE_ID}").get_data(as_text=True)
     big = _field(html, "big", kind, "method")
-    p1s = _field(html, "p1s", kind, "method")
+    beta = _field(html, "beta", kind, "method")
 
-    # Big Bertha: Toolpaths greyed with the reason, the saved value kept,
+    # Printer A: Toolpaths greyed with the reason, the saved value kept,
     # a warning under the field.
     assert 'class="pic-opt is-disabled"' in big and 'aria-disabled="true"' in big
     assert _html.escape(REASON) in big
@@ -87,9 +87,9 @@ def test_each_cell_gets_choices_for_its_own_printer(editor: tuple[Flask, str]) -
         "the saved disabled choice stays enabled, so a save submits it unchanged"
     )
     assert "Toolpaths (unavailable)" in big
-    # The P1S: every choice open, no warning.
-    assert "is-disabled" not in p1s and "data-choice-warn" not in p1s
-    assert '<option value="toolpath" selected>Toolpaths</option>' in p1s
+    # The BETA: every choice open, no warning.
+    assert "is-disabled" not in beta and "data-choice-warn" not in beta
+    assert '<option value="toolpath" selected>Toolpaths</option>' in beta
 
 
 def test_a_static_disabled_choice_is_greyed_in_the_dropdown(editor: tuple[Flask, str]) -> None:
@@ -102,11 +102,11 @@ def test_a_static_disabled_choice_is_greyed_in_the_dropdown(editor: tuple[Flask,
     ) in big
     assert "data-choice-warn" not in big
     # A cell that holds it keeps it, with the warning, and the select points at it.
-    p1s = _field(html, "p1s", kind, "size")
-    assert '<option value="l" selected data-choice-disabled' in p1s
-    assert "Large (unavailable)" in p1s
-    assert re.search(r'aria-describedby="[^"]+-opt-size-warn"', p1s)
-    assert "Too big for this display.</span></p>" in p1s
+    beta = _field(html, "beta", kind, "size")
+    assert '<option value="l" selected data-choice-disabled' in beta
+    assert "Large (unavailable)" in beta
+    assert re.search(r'aria-describedby="[^"]+-opt-size-warn"', beta)
+    assert "Too big for this display.</span></p>" in beta
 
 
 def test_choices_use_each_cells_saved_options(tmp_path: Path) -> None:
@@ -118,10 +118,10 @@ def test_choices_use_each_cells_saved_options(tmp_path: Path) -> None:
     with app.test_request_context("/"):
         shared = _materialize_cell_options([plugin])
         per_cell = _materialize_cell_choices(page, [plugin], shared)
-    assert set(per_cell) == {"big", "p1s"}
+    assert set(per_cell) == {"big", "beta"}
     method = {c: next(o for o in v if o["name"] == "method") for c, v in per_cell.items()}
     assert method["big"]["choices"][0]["disabled"] is True
-    assert "disabled" not in method["p1s"]["choices"][0]
+    assert "disabled" not in method["beta"]["choices"][0]
 
 
 def test_a_picture_pickers_text_choice_can_be_disabled_too(tmp_path: Path) -> None:

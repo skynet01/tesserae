@@ -558,7 +558,7 @@ class PushManager:
         palette_profile_store: PaletteProfileStore | None = None,
         plugin_registry_fn: Callable[[], Any] | None = None,
         atlas_warm_fn: Callable[[list[tuple[Any, ...]]], None] | None = None,
-        automation_eligible_fn: Callable[[str | None, str, bool], bool] | None = None,
+        automation_eligible_fn: Callable[[str | None, str], bool] | None = None,
     ) -> None:
         self._registry = registry
         # Called with the overlay atlases a fresh render will be asked for
@@ -1102,13 +1102,21 @@ class PushManager:
         threading.Thread(target=_repaint, name=f"repaint-{device_id}", daemon=True).start()
         return True
 
-    def _automation_eligible(self, page_id: str | None, device_id: str, live: bool = False) -> bool:
+    def _automation_eligible(self, page_id: str | None, device_id: str) -> bool:
+        """Whether speculative work for ``device_id`` could be seen: it is
+        not in quiet hours or paused and, given a page, some automation
+        would show that page there now. ``None`` skips the page check."""
         return not self.device_in_quiet_hours(device_id) and (
-            self._automation_eligible_fn is None
-            or self._automation_eligible_fn(page_id, device_id, live)
+            self._automation_eligible_fn is None or self._automation_eligible_fn(page_id, device_id)
         )
 
-    def warm_page(self, page_id: str, *, respect_eligibility: bool = True) -> tuple[int, int]:
+    def warm_page(
+        self,
+        page_id: str,
+        *,
+        respect_eligibility: bool = True,
+        check_conditions: bool = True,
+    ) -> tuple[int, int]:
         """Run the page's widgets as a push would (panel context, no
         screenshot, nothing sent) and return ``(refresh hint, pending)`` as
         the composed page carries them: how long a widget on it asked to
@@ -1119,12 +1127,18 @@ class PushManager:
         if page is None:
             return 0, 0
         groups = panel_groups_for_push(page, self._devices, self._settings)
+        # A warm nobody can see is wasted (and may cost money). A group with
+        # no displays of its own (a page reached only through a lineup) can't
+        # be judged here, so it runs as before. ``check_conditions`` is off
+        # for the settle ahead of a real send: that send is going out, so
+        # only a pause or quiet hours make the run pointless.
+        gate_page = page_id if check_conditions else None
         groups = [
             (panel, dids)
             for panel, dids in groups
             if not respect_eligibility
-            or any(self._automation_eligible(page_id, did) for did in dids)
-            or (not dids and self._automation_eligible_fn is None)
+            or not dids
+            or any(self._automation_eligible(gate_page, did) for did in dids)
         ]
         if not groups:
             return 0, 0
@@ -1894,8 +1908,6 @@ class PushManager:
         Returns True when a composition was captured or was already
         cached unexpired."""
         try:
-            if not self._automation_eligible(page_id, device_id):
-                return False
             page = self._page_store.get(page_id)
             if page is None:
                 return False
@@ -2135,7 +2147,11 @@ class PushManager:
                     "push", f"settle:{page_id}", title, detail="running the page", label="Send"
                 )
                 try:
-                    hint, pending = self.warm_page(page_id, respect_eligibility=respect_quiet_hours)
+                    hint, pending = self.warm_page(
+                        page_id,
+                        respect_eligibility=respect_quiet_hours,
+                        check_conditions=False,
+                    )
                 except Exception as err:
                     logger.warning(
                         "settle: %s could not be run ahead of the send (%s)", page_id, err
@@ -2177,7 +2193,7 @@ class PushManager:
         wait_s: int,
         followup: int,
         *,
-        respect_quiet_hours: bool = False,
+        automated: bool = False,
     ) -> None:
         """Send ``page_id`` again in ``wait_s`` seconds (within the window),
         because a widget on it said it was still working. One timer per
@@ -2190,14 +2206,15 @@ class PushManager:
             )
             return
         delay = float(min(FOLLOWUP_MAX_S, max(FOLLOWUP_MIN_S, wait_s)))
-        automated = respect_quiet_hours
         targets = self._page_push_targets(page_id, device_ids)
         original = {did: (self._latest_renders.get(did) or {}).get("timestamp") for did in targets}
 
         def _still_current(device_id: str) -> bool:
-            return self._latest_renders.get(device_id, {}).get("timestamp") == original[
+            # Superseded only when another frame has landed on the display
+            # since the one this follow-up finishes.
+            return (self._latest_renders.get(device_id) or {}).get("timestamp") == original[
                 device_id
-            ] and self._automation_eligible(page_id, device_id, live=True)
+            ]
 
         def fire() -> None:
             with self._followup_lock:
@@ -2214,12 +2231,15 @@ class PushManager:
                     )
                     if automated and not current:
                         return
+                    # The first push already passed quiet hours (or was a
+                    # Send, which ignores them); a follow-up only finishes
+                    # that page. It stays automated for the ones after it.
                     result = self._push_page_locked(
                         page_id,
                         device_ids=current,
                         source="follow-up",
-                        respect_quiet_hours=automated,
                         followup=followup + 1,
+                        automated_followup=automated,
                     )
                 self._notify(result)
             except Exception:
@@ -2768,6 +2788,7 @@ class PushManager:
         followup: int = 0,
         waited: tuple[float, int] = (0.0, 0),
         exclude_device_ids: set[str] | None = None,
+        automated_followup: bool = False,
     ) -> PushResult:
         started = time.monotonic()
         refresh_wanted = 0
@@ -2964,7 +2985,7 @@ class PushManager:
                 {d for _panel, dids in groups for d in dids} or device_ids,
                 refresh_wanted,
                 followup,
-                respect_quiet_hours=respect_quiet_hours,
+                automated=respect_quiet_hours or automated_followup,
             )
         if not group_results:
             status: PushStatus = "failed"

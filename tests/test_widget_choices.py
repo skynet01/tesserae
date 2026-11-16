@@ -44,8 +44,8 @@ def test_a_provider_that_takes_options_gets_the_cells_values() -> None:
         return [{"value": "a", "label": "A", "disabled": True, "reason": "Not here."}]
 
     spec = {"name": "method", "type": "select", "choices_from": "method"}
-    rows = choice_rows(_plugin(choices), spec, {"printer": "p1s"})
-    assert seen == [("method", {"printer": "p1s"})]
+    rows = choice_rows(_plugin(choices), spec, {"printer": "beta"})
+    assert seen == [("method", {"printer": "beta"})]
     assert rows == [{"value": "a", "label": "A", "disabled": True, "reason": "Not here."}], (
         "disabled and reason reach the editor"
     )

@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from flask import (
     Blueprint,
@@ -352,10 +352,78 @@ def _frame_origin(
     src = _frame_source(device_id, page_id, nav_rec=nav_rec, lineup_names=lineup_names)
     if src is None:
         return None
-    phrase, record_id = src
-    if record_id is not None and record_id == own_id:
+    if src.lineup_id is not None and src.lineup_id == own_id:
         return "an earlier step"
-    return phrase
+    return src.phrase
+
+
+class _FrameSource(NamedTuple):
+    """Where a frame came from. ``phrase`` is the newest push in words.
+    ``lineup_id`` is the lineup (deck) that put the page on the glass, when one
+    did. ``known`` says whether that answer can be trusted: ``known`` with no
+    ``lineup_id`` means something other than a lineup put it up (a manual push,
+    a tap), while not ``known`` means the log cannot say (only auto updates of
+    the page are left in it, or the row naming the lineup is gone), so the
+    caller works it out from what the glass shows."""
+
+    phrase: str
+    lineup_id: str | None
+    known: bool
+
+
+#: How far back (in engine rows) the row that links to a push is looked for.
+_ENGINE_ROW_PAGE = 50
+_ENGINE_ROW_PAGES = 20
+
+
+def _engine_row(events: Any, source: str, push_id: int) -> Any | None:
+    """The rotation / scheduler row that caused push ``push_id``. It is written
+    right after its push, so its id is higher: page back through the rows of
+    that kind until they are older than the push. Busy rotations elsewhere only
+    mean more pages, not a miss."""
+    before: int | None = None
+    for _ in range(_ENGINE_ROW_PAGES):
+        try:
+            rows = events.list(type=source, before_id=before, limit=_ENGINE_ROW_PAGE)
+        except Exception:
+            return None
+        for row in rows:
+            if row.extra.get("push_event_id") == push_id:
+                return row
+        if len(rows) < _ENGINE_ROW_PAGE or rows[-1].id < push_id:
+            return None
+        before = rows[-1].id
+    return None
+
+
+def _push_source(push: Any, events: Any) -> _FrameSource | None:
+    """One push row as a :class:`_FrameSource`."""
+    source = push.source
+    if source in _MANUAL_PUSH_SOURCES:
+        return _FrameSource("a manual push", None, True)
+    if source == "button":
+        return _FrameSource("a tap", None, True)
+    if source == "home_assistant":
+        return _FrameSource("Home Assistant", None, True)
+    if source == "webhook":
+        return _FrameSource("a webhook", None, True)
+    if source in ("deck", "deck_init"):
+        return _FrameSource("another lineup", None, True)
+    if source in ("rotation", "scheduler"):
+        # The engine row that caused this push names the record.
+        row = _engine_row(events, source, push.id)
+        fallback = "a schedule" if source == "scheduler" else "another rotation"
+        if row is None:
+            # The link is gone (pruned, or too far back): which lineup it was
+            # is not known, which is not the same as "none of them".
+            return _FrameSource(fallback, None, False)
+        target = str(row.target) if row.target else None
+        if source == "scheduler":
+            name = row.extra.get("schedule_name")
+            return _FrameSource(f"the {name} schedule" if name else "a schedule", target, True)
+        name = row.extra.get("rotation_name")
+        return _FrameSource(str(name) if name else fallback, target, True)
+    return None
 
 
 def _frame_source(
@@ -364,13 +432,16 @@ def _frame_source(
     *,
     nav_rec: dict[str, Any] | None,
     lineup_names: dict[str, str],
-) -> tuple[str, str | None] | None:
-    """:func:`_frame_origin` as ``(phrase, lineup id)``: the lineup (deck) that
-    put the frame up when one did, else ``None`` beside the phrase (a manual
-    push, a tap). ``None`` overall when the source is unknown."""
+) -> _FrameSource | None:
+    """:func:`_frame_origin` with the lineup behind it (see
+    :class:`_FrameSource`). ``None`` overall when the source is unknown.
+
+    An auto update only repaints a page something else put up, so the lineup
+    comes from the push before it: the newest one for this page on this display
+    that is not an auto update."""
     if nav_rec and nav_rec.get("page_id") == page_id and nav_rec.get("deck_id"):
         deck_id = str(nav_rec["deck_id"])
-        return lineup_names.get(deck_id) or "another lineup", deck_id
+        return _FrameSource(lineup_names.get(deck_id) or "another lineup", deck_id, True)
     events = current_app.config.get("EVENT_LOG")
     if events is None:
         return None
@@ -378,42 +449,17 @@ def _frame_source(
         rows = events.list(type="push", target=page_id, statuses=("sent",), limit=25)
     except Exception:
         return None
-    push = next(
-        (ev for ev in rows if device_id in (ev.extra.get("device_ids") or [])),
-        None,
-    )
-    if push is None:
+    mine = [ev for ev in rows if device_id in (ev.extra.get("device_ids") or [])]
+    if not mine:
         return None
-    source = push.source
-    if source in _MANUAL_PUSH_SOURCES:
-        return "a manual push", None
-    if source == "button":
-        return "a tap", None
-    if source == "home_assistant":
-        return "Home Assistant", None
-    if source == "webhook":
-        return "a webhook", None
-    if source == "page_refresh":
-        return "an auto update", None
-    if source in ("deck", "deck_init"):
-        return "another lineup", None
-    if source in ("rotation", "scheduler"):
-        # The engine row that caused this push names the record.
-        try:
-            engine_rows = events.list(type=source, limit=50)
-        except Exception:
-            engine_rows = []
-        for row in engine_rows:
-            if row.extra.get("push_event_id") != push.id:
-                continue
-            target = str(row.target) if row.target else None
-            if source == "scheduler":
-                name = row.extra.get("schedule_name")
-                return (f"the {name} schedule" if name else "a schedule"), target
-            name = row.extra.get("rotation_name")
-            return (str(name) if name else "another rotation"), target
-        return ("a schedule" if source == "scheduler" else "another rotation"), None
-    return None
+    if mine[0].source != "page_refresh":
+        return _push_source(mine[0], events)
+    phrase = "an auto update"
+    first = next((ev for ev in mine if ev.source != "page_refresh"), None)
+    under = _push_source(first, events) if first is not None else None
+    if under is None:
+        return _FrameSource(phrase, None, False)
+    return _FrameSource(phrase, under.lineup_id, under.known)
 
 
 #: How the header names a frame no dashboard explains, by push source.
@@ -1241,6 +1287,7 @@ def _lineup_input(
     playing: bool = False,
     with_urls: bool = True,
     last_fired: float | None = None,
+    last_held: bool | None = None,
     gate: tuple[bool, str, str] = (True, "", ""),
 ) -> LineupInput:
     """A deck as the view-model's lineup: its window, days and steps in the
@@ -1311,6 +1358,7 @@ def _lineup_input(
         urls=urls,
         priority=deck.advance_priority,
         last_fired=last_fired,
+        last_held=last_held,
         explicit_display=bool(deck.device_ids),
         end_hint=deck.advance_end_at if kind == "daily" else None,
         ready=gate[0],
@@ -1321,7 +1369,7 @@ def _lineup_input(
 
 
 def _entity_name(entity_id: str) -> str:
-    """``sensor.p1s_print_status`` -> ``P1s print status``: an entity's id read
+    """``sensor.printer_status`` -> ``Printer status``: an entity's id read
     as words, for when Home Assistant gives no friendly name."""
     words = entity_id.split(".", 1)[-1].replace("_", " ").strip()
     return words[:1].upper() + words[1:] if words else entity_id
@@ -1341,7 +1389,7 @@ def _entity_names(conditions: Any, evaluator: Any) -> dict[str, str]:
 
 
 def _condition_words(cond: Any, evaluator: Any) -> str:
-    """One condition as what it waits for: "P1S Print status is running",
+    """One condition as what it waits for: "Printer status is running",
     "the time is 07:00–09:00", "it is after sunset". Mirrored by condWords in
     static/lineups_render.js (the lineup editor's unsaved conditions)."""
     op = cond.operator
@@ -1377,7 +1425,7 @@ def _condition_words(cond: Any, evaluator: Any) -> str:
 
 
 def _condition_chip(conditions: Any, evaluator: Any) -> tuple[str, str]:
-    """``(chip, title)`` for a step's conditions: "Only while P1S Print status
+    """``(chip, title)`` for a step's conditions: "Only while Printer status
     is running" (and "+1 more" past the first), and every one for the title."""
     words = [_condition_words(c, evaluator) for c in conditions]
     if not words:
@@ -1616,12 +1664,13 @@ def _build_lineups_view(
     known = {d.id for d in devices}
     scheduler = current_app.config.get("SCHEDULER")
     last_fired_map: dict[str, Any] = {}
+    last_status_map: dict[str, Any] = {}
     status_fn = getattr(scheduler, "status", None)
     if callable(status_fn):
         try:
-            last_fired_map = {
-                k: v.get("last_fired") for k, v in status_fn().items() if isinstance(v, dict)
-            }
+            statuses = {k: v for k, v in status_fn().items() if isinstance(v, dict)}
+            last_fired_map = {k: v.get("last_fired") for k, v in statuses.items()}
+            last_status_map = {k: v.get("last_status") for k, v in statuses.items()}
         except Exception:
             current_app.logger.exception("lineups: scheduler status unreadable")
 
@@ -1675,6 +1724,9 @@ def _build_lineups_view(
             continue
         fired = last_fired_map.get(deck.id)
         last_fired = float(fired) if isinstance(fired, (int, float)) else None
+        # How the last fire went, when the scheduler remembers one.
+        status = last_status_map.get(deck.id)
+        last_held = (status == "held") if isinstance(status, str) else None
         cur = current.get(deck.id) or {}
         gate = _lineup_gate(deck, scheduler, now) if deck.enabled else (True, "", "")
         runtime = None
@@ -1690,22 +1742,33 @@ def _build_lineups_view(
         if not targets:
             if not display_id:
                 unassigned.append(
-                    _lineup_input(deck, runtime=runtime, last_fired=last_fired, gate=gate)
+                    _lineup_input(
+                        deck,
+                        runtime=runtime,
+                        last_fired=last_fired,
+                        last_held=last_held,
+                        gate=gate,
+                    )
                 )
             continue
         for did in targets:
             playing = in_control.get(did) == deck.id
             by_display[did].append(
                 _lineup_input(
-                    deck, runtime=runtime, playing=playing, last_fired=last_fired, gate=gate
+                    deck,
+                    runtime=runtime,
+                    playing=playing,
+                    last_fired=last_fired,
+                    last_held=last_held,
+                    gate=gate,
                 )
             )
 
     nav = _nav_store()
     lineup_names = {deck.id: deck.name for deck in decks}
-    origins: dict[tuple[str, str], tuple[str, str | None] | None] = {}
+    origins: dict[tuple[str, str], _FrameSource | None] = {}
 
-    def _origin_of(device_id: str, page_id: str) -> tuple[str, str | None] | None:
+    def _origin_of(device_id: str, page_id: str) -> _FrameSource | None:
         key = (device_id, page_id)
         if key not in origins:
             try:
@@ -1748,8 +1811,8 @@ def _build_lineups_view(
                 dashboard_id=on_pid,
                 since=state.get("at"),
                 verb=str(state.get("verb") or "sent"),
-                lineup_id=src[1] if src is not None else None,
-                origin_known=src is not None,
+                lineup_id=src.lineup_id if src is not None else None,
+                origin_known=src is not None and src.known,
             )
         frame, nothing_sent = _frame_state(d) if not on_pid else (None, False)
         last_seen, heard = _heard_from(d)
@@ -3106,7 +3169,6 @@ def create_lineup() -> Response:
         )
         deck = _merged_deck(
             deck,
-            advance_mode=form.get("advance_mode") or "scheduled",
             pages=[
                 {
                     **p.model_dump(),
@@ -3134,7 +3196,12 @@ def create_lineup() -> Response:
     except (ValidationError, ValueError) as exc:
         msg = _first_error(exc) if isinstance(exc, ValidationError) else str(exc)
         return _json_error(f"Invalid lineup: {msg}")
-    if _sleeps(deck.device_ids[0] if deck.device_ids else None):
+    if "advance_smart_sync" in form:
+        # A create that says which it wants ("on" after a hidden "0", as
+        # on an edit) gets that; the default is only for one that doesn't.
+        smart = any(v in ("on", "true", "1") for v in form.getlist("advance_smart_sync"))
+        deck = _merged_deck(deck, advance_smart_sync=smart)
+    elif _sleeps(deck.device_ids[0] if deck.device_ids else None):
         # A display that sleeps only shows the last send before each wake,
         # so a new lineup on one sends just before it wakes (smart sync).
         deck = _merged_deck(deck, advance_smart_sync=True)
@@ -3857,11 +3924,7 @@ def editor_save() -> Response:
     deck_id = (form.get("deck_id") or "").strip()
     ordered = _ordered_ids_from_form(form)
     existing = _store().get(deck_id) if deck_id else None
-    back = (
-        url_for("decks.editor", deck_id=deck_id)
-        if existing
-        else (request.referrer or url_for("decks.index"))
-    )
+    back = url_for("decks.editor", deck_id=deck_id) if existing else url_for("decks.index")
     if deck_id and existing is None:
         # New lineups are made through /decks/new/lineup; an id that isn't
         # stored is one deleted since the page loaded (or never was).

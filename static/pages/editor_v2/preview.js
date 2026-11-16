@@ -800,9 +800,10 @@
   }
 
   function setTab(key) {
-    let i = typeof key === "number"
-      ? key
-      : data.groups.findIndex((g) => g.key === String(key) || `${g.w}x${g.h}` === String(key));
+    let i =
+      typeof key === "number"
+        ? key
+        : data.groups.findIndex((g) => g.key === String(key) || `${g.w}x${g.h}` === String(key));
     if (!(i >= 0 && i < data.groups.length)) i = 0;
     if (state.drag) return;
     state.group = i;

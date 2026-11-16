@@ -21,7 +21,7 @@
   };
   // A wake interval: "60 min" reads better than "1 h" up to an hour and a half.
   const wakeMins = (n) => (n <= 90 ? `${Math.round(n)} min` : mins(n));
-  // "The Door Frame", but not "The The hall frame".
+  // "The Sample Display", but not "The The hall frame".
   const theName = (name) => (/^the\s/i.test(name || "") ? name : `The ${name || "display"}`);
 
   // How many sends every `every` minutes go unseen by a display that wakes

@@ -159,7 +159,7 @@ class StepInput:
     dashboard_id: str
     dwell_minutes: int = 0
     conditional: bool = False
-    #: its conditions in plain words: the chip ("Only while P1S Print status is
+    #: its conditions in plain words: the chip ("Only while Printer B Print status is
     #: running") and the full sentence for its title; whether they pass right now
     #: (``None``: not known)
     cond_label: str = ""
@@ -215,6 +215,9 @@ class LineupInput:
     urls: LineupUrls = field(default_factory=LineupUrls)
     priority: int = 0  # wins a tie with another lineup due at the same moment
     last_fired: float | None = None  # epoch of an interval lineup's last fire
+    #: whether the scheduler held that last fire back (conditions not met, every
+    #: display paused) instead of sending it; ``None`` when it does not remember
+    last_held: bool | None = None
     #: the lineup names its display(s), so a step bound elsewhere cannot show
     explicit_display: bool = False
     #: a daily push's stored ``advance_end_at`` (the scheduler ignores it): what
@@ -224,7 +227,7 @@ class LineupInput:
     #: conditions, or at least one step's conditions pass). False holds it back.
     ready: bool = True
     #: when not ready: the first condition that fails, in plain words
-    #: ("P1S print status is running"), and every failing one for the tooltip
+    #: ("Printer B print status is running"), and every failing one for the tooltip
     waits_for: str = ""
     waits_title: str = ""
     #: a rotation in priority mode: the first step whose conditions pass is shown,
@@ -804,7 +807,7 @@ class LineupView(_Dict):
     # Set on the rows drawn grey (status not_today / off): the reason, as a tag.
     off_why: OffWhyView | None = None
     #: queued / waiting: why, in a few words ("lands ~1:25 PM", "behind Night",
-    #: "until P1S print status is running"); ``status_title`` is the full sentence
+    #: "until Printer B print status is running"); ``status_title`` is the full sentence
     status_reason: str = ""
     status_title: str = ""
     #: see ``LineupInput.priority_mode``
@@ -1337,11 +1340,17 @@ def _next_fire(model: _Model, after: int) -> tuple[int, _Block, _Point] | None:
 
 
 def _last_push(model: _Model, now_abs: int) -> tuple[int, _Block] | None:
-    """The most recent daily push at or before now (``(week minute, block)``,
-    the minute possibly last week); on a tie the scheduler's winner."""
+    """The most recent daily push at or before now that went out (``(week
+    minute, block)``, the minute possibly last week); on a tie the scheduler's
+    winner."""
     found: list[tuple[int, _Block]] = []
     for b in model.blocks:
-        if b.push and b.lineup.ready:
+        # A push already behind us went out or not as the conditions stood
+        # then, which the scheduler's record of its last fire says. The gate as
+        # it reads now only stands in when there is no such record.
+        lu = b.lineup
+        went = (not lu.last_held) if lu.last_held is not None else lu.ready
+        if b.push and went:
             t = b.s if b.s <= now_abs else b.s - WEEK_MIN
             found.append((t, b))
     if not found:
@@ -2575,8 +2584,8 @@ def _ordinal(n: int) -> str:
 
 
 def short_name(name: str, display_name: str) -> str:
-    """A lineup's name in a reason: "Printing now: H3C (Door Frame)" reads
-    "Printing now: H3C" under the Door Frame, which already says where."""
+    """A lineup's name in a reason: "Printing now: Printer A (Test Display)" reads
+    "Printing now: Printer A" under the Test Display, which already says where."""
     tail = f" ({display_name})"
     if display_name and name.endswith(tail) and len(name) > len(tail):
         return name[: -len(tail)]

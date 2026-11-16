@@ -144,7 +144,6 @@
     choice: {},
     picker: false,
     adding: null,
-    modePicked: false,
     elsewhere: false,
     step: S.isNew ? (S.display ? 2 : 1) : 0, // the new flow's open step
     saving: false,
@@ -160,9 +159,7 @@
   const stepHadConditions = new Set(
     S.steps.filter((s) => s.conditions && s.conditions.length).map((s) => s.id)
   );
-  // Conditions are a per-dashboard rule. A step that has some shows its
-  // editor; one that has none offers "Add a condition", which opens it. Only
-  // a step whose editor is showing posts its conditions.
+  // Keep the condition editor open after its last condition is removed.
   const hasConditions = (s) => stepHadConditions.has(s.id) || !!(s.conditions || "").trim();
   const showConditions = (s) => hasConditions(s) || ui.condOpen.has(s.id);
   let saved = snapshot();
@@ -1109,7 +1106,7 @@
     try {
       const v = JSON.parse(s.conditions || "[]");
       return Array.isArray(v) ? v : [];
-    } catch (_) {
+    } catch {
       return [];
     }
   }
@@ -1515,7 +1512,6 @@
           <div class="condition-picker" data-condition-picker data-empty-message="No conditions: this dashboard can show whenever the lineup runs."><textarea id="dxe-add-conditions" data-cond="__adding__" rows="2" aria-label="Conditions for new dashboard" spellcheck="false">${esc(a.conditions)}</textarea></div>
           <p class="dxe-soft">Leave empty to show it without conditions. Skipped while conditions fail; if none pass, the display keeps its last image.</p>
         </div>
-        ${st.when.mode === "between" ? `<label class="dxe-add-mode">Picks <select class="dxe-in dxe-select" data-add-mode aria-label="How to pick dashboards"><option value="scheduled"${a.mode === "scheduled" ? " selected" : ""}>Each in turn</option><option value="priority"${a.mode === "priority" ? " selected" : ""}>First whose conditions pass</option></select><span class="dxe-soft">First whose conditions pass uses list order instead of dashboard times.</span></label>` : ""}
         <div class="dxe-add-actions"><button type="button" class="dxe-link quiet" data-add-cancel>Cancel</button><button type="button" class="lu-btn-primary" data-add-confirm>Add dashboard</button></div></div>`;
     }
     const { here, other } = candidates();
@@ -1611,12 +1607,8 @@
   };
   const showSmart = () => sleeps() && (kind() === "cycle" || kind() === "interval");
   const showKeepReady = () => takesInput() && kind() !== "daily";
-  const showMode = () =>
-    kind() === "cycle" &&
-    (ui.modePicked ||
-      S.mode === "priority" ||
-      st.mode === "priority" ||
-      st.steps.some(hasConditions));
+  // "First whose conditions pass" is a legacy mode: offered only where set.
+  const showMode = () => S.mode === "priority" && kind() === "cycle";
   // Min hold only gates a rotation, and only matters when something can cut
   // a dashboard short: a press, a rule, or another lineup.
   function interrupters() {
@@ -1853,13 +1845,14 @@
     // timer stays only as a floor that is longer than the wake interval.
     if (k === "interval" && atWake) {
       rows.push(field("Sent", freshHtml(w)));
-      if (w.min && st.interval > w.min)
+      // ...or as what it runs on until the wake times are learned.
+      const floor = w.min && st.interval > w.min;
+      if (floor || !w.learned) {
+        const label = floor ? "At most every" : "Until then, every";
         rows.push(
-          field(
-            "At most every",
-            selectHtml("interval", "data-interval", SHOW_FOR, st.interval, "At most every", mins)
-          )
+          field(label, selectHtml("interval", "data-interval", SHOW_FOR, st.interval, label, mins))
         );
+      }
     } else if (k === "cycle" || k === "interval") {
       const label = k === "interval" ? "Sent again every" : "Each dashboard shows for";
       // Every dashboard has its own time: the default is unused (it is what
@@ -2221,8 +2214,6 @@
         refresh: pageOf(id).refresh || 0,
         pin: undefined,
       });
-      st.mode = ui.adding.mode;
-      if (st.mode === "priority") ui.modePicked = true;
       if (ui.adding.conditions.trim()) stepHadConditions.add(id);
       ui.adding = null;
       if (!st.home) st.home = "";
@@ -2723,7 +2714,6 @@
       fd.append("page_ids", s.id);
       if (hasConditions(s)) fd.append(`conditions[${s.id}]`, s.conditions || "");
     });
-    if (showMode()) fd.append("advance_mode", st.mode);
     fd.append("interval_minutes", String(st.interval));
     consentFields(fd);
     const sent = snapshot();
@@ -2826,10 +2816,11 @@
       const w = wakeOf();
       if (!w || !w.min) return;
       change(() => {
-        st.interval = w.min;
+        // Only ever up to a wake: a default already longer stays as it is.
+        st.interval = Math.max(st.interval, w.min);
         st.steps.forEach((s) => s.dwell && s.dwell < w.min && (s.dwell = null));
       });
-      live(`Each dashboard shows for ${mins(w.min)}.`);
+      live(`Each dashboard shows for ${mins(st.interval)}.`);
       root.querySelector("[data-interval]")?.focus();
       return;
     }
@@ -2933,7 +2924,6 @@
         id: d.add,
         elsewhere: d.elsewhere !== undefined,
         conditions: "",
-        mode: st.mode,
       };
       draw();
       queueMicrotask(() => root.querySelector("#dxe-picker .cp-actions button")?.focus());
@@ -3144,12 +3134,7 @@
     if (d.taps !== undefined) return change(() => (st.taps = t.checked));
     if (d.timeout !== undefined) return change(() => (st.timeout = Number(t.value) || 0));
     if (d.cadence !== undefined) return change(() => (st.cadence = Number(t.value) || 0));
-    if (d.modeSel !== undefined)
-      return change(() => {
-        st.mode = t.value;
-        ui.modePicked = true;
-      });
-    if (d.addMode !== undefined && ui.adding) ui.adding.mode = t.value;
+    if (d.modeSel !== undefined) return change(() => (st.mode = t.value));
     // Nothing else is drawn from these: the footer alone, so tabbing on
     // keeps the next field in place.
     if (d.lead !== undefined || d.priority !== undefined || d.hold !== undefined)

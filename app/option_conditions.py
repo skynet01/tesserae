@@ -227,10 +227,25 @@ PAIR_SWITCH_CHARS_NO_HELP = 11
 _CHAR_PX = {
     ch: px
     for px, chars in (
-        (3.0, " 'ijl`"), (3.5, "I|"), (4.0, "!,./:;[\\]ft"), (4.5, "-r"), (5.0, "\"(){}"),
-        (5.5, "*"), (7.0, "$_ksvxyz"), (7.5, "17Lace"), (8.0, "02345689#?Jbdghnopqu"),
-        (8.5, "FT"), (9.0, "+<=>VYZ^~"), (9.5, "&AEKPSX"), (10.0, "BCRUw"), (10.5, "DHN"),
-        (11.0, "GOQ"), (12.0, "Mm"), (13.0, "W"), (13.5, "%"), (14.0, "@"),
+        (3.0, " 'ijl`"),
+        (3.5, "I|"),
+        (4.0, "!,./:;[\\]ft"),
+        (4.5, "-r"),
+        (5.0, '"(){}'),
+        (5.5, "*"),
+        (7.0, "$_ksvxyz"),
+        (7.5, "17Lace"),
+        (8.0, "02345689#?Jbdghnopqu"),
+        (8.5, "FT"),
+        (9.0, "+<=>VYZ^~"),
+        (9.5, "&AEKPSX"),
+        (10.0, "BCRUw"),
+        (10.5, "DHN"),
+        (11.0, "GOQ"),
+        (12.0, "Mm"),
+        (13.0, "W"),
+        (13.5, "%"),
+        (14.0, "@"),
     )
     for ch in chars
 }
@@ -250,6 +265,8 @@ def _label_fits(spec: Mapping[str, Any]) -> bool:
     label = str(spec.get("label") or spec.get("name") or "")
     room = SHORT_LABEL_PX - (_INFO_BUTTON_PX if spec.get("help") else 0)
     return len(label) <= SHORT_LABEL_CHARS and text_px(label) * _LABEL_SCALE <= room
+
+
 # How many full-width items a short one may be lifted over to pair with the
 # short one before it. More than this and it is too far from where the
 # manifest put it.

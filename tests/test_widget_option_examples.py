@@ -16,16 +16,6 @@ from app.state.page_store import Cell, Page
 FREE_TEXT_TYPES = {"string", "text", "number", "textarea", "variables_textarea", "time"}
 EXCEPTIONS = {
     ("ha_core", "settings", "token"): "User-supplied access token; never suggest a credential.",
-    **{
-        ("news_illustrated", "settings", name): "Provider credential; never suggest an API key."
-        for name in (
-            "groq_api_key",
-            "kie_api_key",
-            "gemini_api_key",
-            "pollinations_api_key",
-            "huggingface_api_key",
-        )
-    },
 }
 
 
@@ -105,13 +95,21 @@ def test_dashboard_examples_in_both_editors(app, version):
         Page(
             id="examples",
             name="Examples",
-            cells=[Cell(id="ha", plugin="ha_dashboard", x=0, y=0, w=800, h=480)],
+            cells=[
+                Cell(id="ha", plugin="ha_dashboard", x=0, y=0, w=400, h=480),
+                Cell(id="weather", plugin="weather_now", x=400, y=0, w=400, h=480),
+            ],
         )
     )
     response = app.test_client().get("/pages/examples")
     assert response.status_code == 200
     fields = Inputs(response.text).fields
-    assert fields["opt_path"]["placeholder"] == "dashboard-kitchen/overview"
+    for name, example in {
+        "path": "dashboard-kitchen/overview",
+        "label": "Home",
+    }.items():
+        assert fields[f"opt_{name}"]["placeholder"] == example
+    assert fields["opt_label"]["value"] == ""
 
 
 @pytest.mark.parametrize(
@@ -152,6 +150,7 @@ def test_placeholder_translations_and_english_fallback(app):
     plugin = app.config["PLUGIN_REGISTRY"].plugins["ha_dashboard"]
     manifest = deepcopy(plugin.manifest)
     plugin.strings["fr"]["cell_options.path.placeholder"] = "dashboard-cuisine/apercu"
+    plugin.strings["en"]["cell_options.path.help"] = "English path help"
     app.config["SETTINGS_STORE"].update_section("app", {"locale": "fr-CA"})
     app.config["PAGE_STORE"].save(
         Page(
@@ -160,12 +159,10 @@ def test_placeholder_translations_and_english_fallback(app):
             cells=[Cell(id="ha", plugin="ha_dashboard", x=0, y=0, w=800, h=480)],
         )
     )
-    fields = Inputs(app.test_client().get("/pages/examples").text).fields
+    body = app.test_client().get("/pages/examples").text
+    fields = Inputs(body).fields
     assert fields["opt_path"]["placeholder"] == "dashboard-cuisine/apercu"
-    del plugin.strings["fr"]["cell_options.path.placeholder"]
-    plugin.strings["en"]["cell_options.path.placeholder"] = "English path example"
-    fields = Inputs(app.test_client().get("/pages/examples").text).fields
-    assert fields["opt_path"]["placeholder"] == "English path example"
+    assert "English path help" in body
     assert plugin.manifest == manifest
 
 

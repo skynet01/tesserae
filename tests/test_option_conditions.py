@@ -374,14 +374,25 @@ def test_layout_sizes() -> None:
 
     assert option_size({"type": "number", "label": "How many"}) == "short"
     assert option_size({"type": "slider", "label": "Size"}) == "long"
-    assert option_size({"type": "select", "label": "Units", "choices": ["Metric", "Imperial"]}) == "short"
+    assert (
+        option_size({"type": "select", "label": "Units", "choices": ["Metric", "Imperial"]})
+        == "short"
+    )
     long_choice = {"value": "w", "label": "Current calendar week (fixed start day)"}
     assert option_size({"type": "select", "label": "Window", "choices": [long_choice]}) == "long"
-    note = {"type": "select", "label": "List", "choices": [{"value": "", "label": "x"}], "choices_note": "Set up HA"}
+    note = {
+        "type": "select",
+        "label": "List",
+        "choices": [{"value": "", "label": "x"}],
+        "choices_note": "Set up HA",
+    }
     assert option_size(note) == "long"
     assert option_size({"type": "string", "label": "Place name", "placeholder": "Home"}) == "short"
     assert option_size({"type": "string", "label": "URL", "placeholder": "https://a.b"}) == "long"
-    assert option_size({"type": "string", "label": "Key", "placeholder": "abc", "secret": True}) == "long"
+    assert (
+        option_size({"type": "string", "label": "Key", "placeholder": "abc", "secret": True})
+        == "long"
+    )
     assert option_size({"type": "number", "label": "A label far too long for half a row"}) == "long"
 
 
@@ -398,7 +409,9 @@ def test_short_fields_fit_by_width_not_just_by_count() -> None:
     assert option_size({"type": "number", "label": "Avoid repeats (days)"}) == "short"
     assert option_size({"type": "number", "label": "Avoid repeats (days)", "help": "x"}) == "long"
     assert option_size({"type": "string", "label": "Name", "placeholder": "Mmmmmmmmmmm"}) == "long"
-    assert option_size({"type": "string", "label": "Name", "placeholder": "illustration"}) == "short"
+    assert (
+        option_size({"type": "string", "label": "Name", "placeholder": "illustration"}) == "short"
+    )
 
 
 def test_a_marked_blank_row_is_a_guidance_note() -> None:
@@ -425,8 +438,13 @@ def test_layout_does_not_lift_over_what_a_field_depends_on() -> None:
     specs = [
         {"name": "title", "type": "string", "label": "Title", "placeholder": "Kitchen"},
         {"name": "time", "type": "boolean", "label": "Time"},
-        {"name": "fmt", "type": "select", "label": "Time format", "choices": ["12 hour", "24 hour"],
-         "show_if": {"time": True}},
+        {
+            "name": "fmt",
+            "type": "select",
+            "label": "Time format",
+            "choices": ["12 hour", "24 hour"],
+            "show_if": {"time": True},
+        },
     ]
     assert _layout(specs) == [("short", "title"), ("switches", ["time"]), ("short", "fmt")]
 
@@ -447,7 +465,13 @@ def test_layout_lifts_over_at_most_two_full_width_fields() -> None:
 
 def test_layout_ignores_hidden_fields_when_pairing() -> None:
     specs = [
-        {"name": "mode", "type": "select", "label": "Mode", "choices": ["Year", "Life"], "default": "Year"},
+        {
+            "name": "mode",
+            "type": "select",
+            "label": "Mode",
+            "choices": ["Year", "Life"],
+            "default": "Year",
+        },
         {"name": "born", "type": "number", "label": "Birth year", "show_if": {"mode": "Life"}},
         {"name": "url", "type": "textarea", "label": "Notes"},
         {"name": "n", "type": "number", "label": "How many"},
@@ -498,6 +522,12 @@ def test_a_hidden_switch_keeps_its_own_row() -> None:
 def test_short_text_examples() -> None:
     from app.option_conditions import option_size
 
-    assert option_size({"type": "string", "label": "Title", "placeholder": "Evening routines"}) == "short"
-    assert option_size({"type": "string", "label": "Theme", "placeholder": "Google Dark Theme"}) == "long"
+    assert (
+        option_size({"type": "string", "label": "Title", "placeholder": "Evening routines"})
+        == "short"
+    )
+    assert (
+        option_size({"type": "string", "label": "Theme", "placeholder": "Google Dark Theme"})
+        == "long"
+    )
     assert option_size({"type": "string", "label": "Language", "placeholder": "pt-BR"}) == "short"
