@@ -24,6 +24,16 @@ After installing, [set up the device](devices.md).
 See [Screens & compatibility](../compatibility.md) for which renderer feeds each
 client and what's been tested on real hardware.
 
+## Netgear Meural
+
+Open **Settings → Devices → Add device → Netgear Meural**, enter a device id and display name, then click **Add Netgear Meural**. On its page, open **Connection** and choose **Sign in to Netgear**. Complete any verification challenge and choose the frame from your account. Use HTTPS or a trusted local connection when signing in. Tesserae stores the access and refresh tokens with SecretBox; your password and verification code go directly from your browser to Netgear.
+
+Cloud delivery uploads each changed dashboard once and shows one image at a time. It pauses Meural gallery rotation and scheduling while Tesserae manages the frame. **Resume Meural gallery** restores the saved gallery and rotation settings. Sign-out, frame changes and device deletion also attempt restoration; if it fails, the saved session stays available for a retry.
+
+For **Local preview (backup)**, enter the frame's LAN address and keep the renewal interval shorter than its preview duration. Local previews expire, so Tesserae must keep running. A LAN address also enables quiet-hours sleep control with cloud delivery. Keep the frame's unauthenticated local API on a trusted network.
+
+Both delivery paths have automated tests with fake transports. Local network mode is untested on a physical frame; cloud sign-in and playback restoration also need a hardware check.
+
 ## tesserae-device-firmware
 
 [:material-github: dmellok/tesserae-device-firmware](https://github.com/dmellok/tesserae-device-firmware)

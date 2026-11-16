@@ -40,6 +40,16 @@ KOReader's `trmnl-display` plugin needs a short token instead:
 2. Type the token into the KOReader plugin config. It calls `/api/setup` to exchange it for a permanent device id and token. It then checks `/api/display` at your configured interval.
 3. Set the orientation and dashboard as above. The device appears in Devices as soon as setup finishes.
 
+## Add a Netgear Meural
+
+1. Open **Settings → Devices → Add device → Netgear Meural**.
+2. Enter a device id and display name, then click **Add Netgear Meural**.
+3. On the new device's page, open **Connection** and click **Sign in to Netgear**.
+4. Complete sign-in and any verification challenge, then choose a frame from your account.
+
+The panel starts at 1080×1920 in portrait. Change its orientation if the frame hangs sideways.
+See [Meural setup](clients.md#netgear-meural) for cloud delivery, local preview backup and quiet hours.
+
 ## Per-device settings
 
 Each device has its own dashboard width and height, orientation, saturation, and contrast.
