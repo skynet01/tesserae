@@ -30,6 +30,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
+- Reuse each scheduler tick's pause snapshot when advancing a lineup.
+
 - Keep the lineup wizard's progress and Create controls alongside the dashboard picker.
 
 - Keep the Meural address form on the local delivery path.

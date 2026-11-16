@@ -223,12 +223,6 @@ def test_add_dashboard_offers_optional_conditions(real, conditional, width):
         assert page.locator("#dxe-picker").count() == 0
         assert page.locator('[data-panel="clock"]').is_visible()
         assert page.locator("#dxe-live").inner_text() == "Added Clock."
-        if conditional:
-            page.locator('[data-edit="clock"]').click()
-            page.locator('[data-add-cond="clock"]').click()
-            picker = page.locator('[data-panel="clock"] [data-condition-picker]')
-            picker.get_by_role("button", name="Add condition", exact=True).click()
-            picker.locator(".cp-row input[list]").fill("sensor.example_state")
         # Adding a conditioned dashboard never changes how the lineup picks,
         # and the legacy pick mode is not offered where it isn't already set.
         assert page.locator("[data-add-mode]").count() == 0

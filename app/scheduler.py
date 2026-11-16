@@ -1110,11 +1110,21 @@ class Scheduler:
         return not named
 
     def automatic_delivery_eligible(
-        self, page_id: str, device_id: str, source: str, *, now: datetime | None = None
+        self,
+        page_id: str,
+        device_id: str,
+        source: str,
+        *,
+        now: datetime | None = None,
+        paused: set[str] | None = None,
     ) -> bool:
-        """Recheck after settle/render so stale automatic work cannot win."""
+        """Recheck after settle/render so stale automatic work cannot win.
+
+        The lineup's preflight may reuse the tick's pause snapshot. The push
+        worker omits it so its post-render check reads the current pauses.
+        """
         now = now or datetime.now(UTC)
-        if self.pause_hold_for_device(device_id, now)[0]:
+        if self.is_paused() or device_id in self._paused_or_read(now, paused):
             return False
         if device_id in self._quiet_device_ids({device_id}):
             return False
@@ -2314,7 +2324,7 @@ class Scheduler:
                 # display's navigation lock, so a button press or Home
                 # Assistant's Next / Previous can't land in between.
                 if self._advance_device(
-                    deck, target, state, now, device_id, key, failed, fresh=fresh
+                    deck, target, state, now, device_id, key, failed, fresh=fresh, paused=paused
                 ):
                     fired_any = True
         return fired_any
@@ -2330,6 +2340,7 @@ class Scheduler:
         failed: set[str] | None = None,
         *,
         fresh: bool = False,
+        paused: set[str] | None = None,
     ) -> bool:
         """Deliver one lineup advance to one display and record it (see
         :meth:`_fire_deck_advance`); the caller holds its navigation
@@ -2341,7 +2352,7 @@ class Scheduler:
             self._log_deck_skip(device_id, deck.id, target, "quiet hours")
             self._note_quiet_skip({device_id}, now)
             return False
-        if not self.automatic_delivery_eligible(target, device_id, "deck", now=now):
+        if not self.automatic_delivery_eligible(target, device_id, "deck", now=now, paused=paused):
             self._log_deck_skip(device_id, deck.id, target, "selection changed")
             return False
         promoter = getattr(pusher, "promote_deck_page", None)
