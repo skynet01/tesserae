@@ -641,6 +641,16 @@
   display: none;
 }
 @media (max-width: 640px), (pointer: coarse) {
+  .ev2pv-tabs button {
+    min-width: 44px;
+    min-height: 44px;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    text-align: left;
+  }
+  .ev2pv-tab-dims {
+    white-space: nowrap;
+  }
   .ev2pv-done {
     min-height: 44px;
   }
