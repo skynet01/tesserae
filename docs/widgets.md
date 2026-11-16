@@ -326,7 +326,7 @@ Your widget still has to cope with that value at render time.
 Static `choices` can carry `disabled` and `reason` too.
 Older servers ignore both keys and show the choice as usual.
 
-#### Choices that depend on another option, `choices_depends_on`
+#### Choices that read the cell's options
 
 A provider can read the cell's other options. Take an `options` keyword in `choices`, and the host passes the cell's current option values:
 
@@ -341,17 +341,7 @@ def choices(name: str, options: dict | None = None) -> list[dict]:
 `options` is `{}` when there is no cell to ask about, such as when an agent lists the widget's choices.
 Older servers call `choices(name)`, so give `options` a default.
 
-List the options the rows depend on in the field's manifest entry, and the editor asks for fresh rows when one of them changes, before anything is saved:
-
-```jsonc
-{
-  "name": "method",
-  "type": "select",
-  "label": "Picture",
-  "choices_from": "method",
-  "choices_depends_on": ["printer"]
-}
-```
+Choices reflect the saved options when the editor renders the fields. Changing another option does not refresh them live. Tell users when availability depends on another option, for example: "Availability depends on the printer. Save and reopen to refresh."
 
 Choices load every time the editor opens, so keep `choices` fast: cache what it reads, and give up quickly when a service is slow.
 

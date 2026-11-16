@@ -1,6 +1,6 @@
 """A choice that can't work for this setup: listed greyed with its reason,
-never picked, kept with a warning when a cell already holds it, and redrawn
-when the option it depends on changes (docs/widgets.md)."""
+never picked, kept with a warning when a cell already holds it, refreshed
+when the editor renders the saved options (docs/widgets.md)."""
 
 from __future__ import annotations
 
@@ -66,12 +66,8 @@ def editor(request: pytest.FixtureRequest, tmp_path: Path) -> tuple[Flask, str]:
 def _field(html: str, cell: str, editor: str, name: str) -> str:
     """The markup of one option's field in one cell's form."""
     fid = f"{'cell' if editor == 'classic' else 'ev2'}-{cell}-opt-{name}"
-    start = (
-        html.index(f'data-choices-field-id="{fid}"')
-        if name == "method"
-        else html.index(f'id="{fid}"')
-    )
-    start = html.rfind("<div", 0, start)
+    start = html.index(f'<label for="{fid}"')
+    start = html.rfind('<div class="field', 0, start)
     return html[start : html.index("</select>", start) + 600]
 
 
@@ -91,12 +87,6 @@ def test_each_cell_gets_choices_for_its_own_printer(editor: tuple[Flask, str]) -
         "the saved disabled choice stays enabled, so a save submits it unchanged"
     )
     assert "Toolpaths (unavailable)" in big
-    # the field asks again when the printer changes
-    assert 'data-choices-depends="[&#34;printer&#34;]"' in big or (
-        'data-choices-depends="[&quot;printer&quot;]"' in big
-    )
-    assert f'data-choices-plugin="{PLUGIN_ID}"' in big
-
     # The P1S: every choice open, no warning.
     assert "is-disabled" not in p1s and "data-choice-warn" not in p1s
     assert '<option value="toolpath" selected>Toolpaths</option>' in p1s
@@ -119,52 +109,7 @@ def test_a_static_disabled_choice_is_greyed_in_the_dropdown(editor: tuple[Flask,
     assert "Too big for this display.</span></p>" in p1s
 
 
-def test_the_option_field_route_redraws_for_the_unsaved_printer(tmp_path: Path) -> None:
-    app = _app(tmp_path, "classic")
-    client = app.test_client()
-    url = f"/pages/option-field?plugin={PLUGIN_ID}&option=method&field_id=cell-big-opt-method"
-    form = {"plugin": PLUGIN_ID, "opt_printer": "p1s", "opt_method": "toolpath", "opt_size": "s"}
-    resp = client.post(url, data=form)
-    assert resp.status_code == 200
-    out = resp.get_data(as_text=True)
-    assert out.strip().startswith('<div class="opt-choices" data-choices-refresh')
-    assert 'id="cell-big-opt-method"' in out
-    assert "is-disabled" not in out and '<option value="toolpath" selected>' in out
-
-    out = client.post(url, data={**form, "opt_printer": "h3c"}).get_data(as_text=True)
-    assert "pic-opt is-disabled" in out and "data-choice-warn" in out
-    # the provider saw the form's values, typed as a save reads them
-    calls = app.config["PLUGIN_REGISTRY"].get(PLUGIN_ID).server_module.CALLS
-    assert ("method", {"printer": "h3c", "method": "toolpath", "size": "s"}) in calls
-
-
-@pytest.mark.parametrize(
-    "query",
-    [
-        "plugin=nope&option=method&field_id=f",
-        f"plugin={PLUGIN_ID}&option=nope&field_id=f",
-        f"plugin={PLUGIN_ID}&option=method&field_id=%22%3E%3Cscript%3E",
-        f"plugin={PLUGIN_ID}&option=method",
-    ],
-)
-def test_the_option_field_route_refuses_what_it_cant_draw(tmp_path: Path, query: str) -> None:
-    app = _app(tmp_path, "classic")
-    assert app.test_client().post(f"/pages/option-field?{query}").status_code == 404
-
-
-def test_option_field_does_not_shadow_a_page_save(tmp_path: Path) -> None:
-    """``/pages/option-field`` is its own route; a dashboard save still
-    reaches ``/pages/<page_id>``."""
-    app = _app(tmp_path, "classic")
-    rules = {r.rule: r.endpoint for r in app.url_map.iter_rules()}
-    assert rules["/pages/option-field"] == "pages.option_field"
-    adapter = app.url_map.bind("localhost")
-    assert adapter.match("/pages/option-field", method="POST")[0] == "pages.option_field"
-    assert adapter.match(f"/pages/{PAGE_ID}", method="POST")[0] != "pages.option_field"
-
-
-def test_widgets_without_options_share_one_list(tmp_path: Path) -> None:
-    """Only a provider that reads options is asked once per cell."""
+def test_choices_use_each_cells_saved_options(tmp_path: Path) -> None:
     from app.page_routes import _materialize_cell_choices, _materialize_cell_options
 
     app = _app(tmp_path, "classic")
@@ -177,8 +122,6 @@ def test_widgets_without_options_share_one_list(tmp_path: Path) -> None:
     method = {c: next(o for o in v if o["name"] == "method") for c, v in per_cell.items()}
     assert method["big"]["choices"][0]["disabled"] is True
     assert "disabled" not in method["p1s"]["choices"][0]
-    assert method["big"]["choices_plugin"] == PLUGIN_ID
-    assert "choices_plugin" not in next(o for o in shared[PLUGIN_ID] if o["name"] == "printer")
 
 
 def test_a_picture_pickers_text_choice_can_be_disabled_too(tmp_path: Path) -> None:

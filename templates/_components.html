@@ -737,11 +737,6 @@ macro here instead.
    the controlling options change. Hidden, not disabled: the inputs are
    still submitted, so the saved value survives a round trip. -#}
 {%- macro auto_field(field_id, name, spec, value, help=None, form=None, readonly=False, visible=True) -%}
-  {#- ``choices_plugin`` (set by the page editor for a ``choices_from`` field
-     with ``choices_depends_on``): attachChoicesRefresh (static/components.js)
-     asks the server for this field again when one of those options changes. -#}
-  {% set refresh = spec.get('choices_plugin') %}
-  {% if refresh %}<div class="opt-choices" data-choices-refresh data-choices-url="{{ url_for('pages.option_field') }}" data-choices-plugin="{{ refresh }}" data-choices-option="{{ spec.get('name') }}" data-choices-field-id="{{ field_id }}" data-choices-depends="{{ (spec.get('choices_depends_on') if spec.get('choices_depends_on') is not string else [spec.get('choices_depends_on')])|tojson|forceescape }}">{% endif %}
   {% set show_if = spec.get('show_if') %}
   {% if show_if %}<div class="opt-cond" data-show-if="{{ show_if|tojson|forceescape }}"{% if not visible %} hidden{% endif %}>{% endif %}
   {% set ftype = spec.get('type', 'string') %}
@@ -833,7 +828,6 @@ macro here instead.
                   help=help_text, form=form, readonly=readonly) }}
   {% endif %}
   {% if show_if %}</div>{% endif %}
-  {% if refresh %}</div>{% endif %}
 {%- endmacro -%}
 
 

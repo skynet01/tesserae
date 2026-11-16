@@ -2,8 +2,8 @@
 
 A cell on Big Bertha (no sliced files) shows Toolpaths greyed with its reason,
 can't pick it, and warns that the saved value won't work. Switching the cell's
-printer to the P1S redraws the Picture field without a save: Toolpaths opens
-up and the warning goes. Screenshots land in $DISABLED_CHOICES_SHOTS when set.
+printer to the P1S keeps the current choices until save and reload.
+Screenshots land in $DISABLED_CHOICES_SHOTS when set.
 """
 
 from __future__ import annotations
@@ -149,7 +149,7 @@ STATE_JS = """
 
 @pytest.mark.parametrize("editor", ["classic", "v2"])
 @pytest.mark.parametrize("width", [1280, 500])
-def test_a_disabled_choice_is_greyed_explained_and_follows_the_printer(
+def test_a_disabled_choice_is_greyed_and_refreshes_after_save(
     pw: Any, server: Any, editor: str, width: int
 ) -> None:
     base, app = server
@@ -185,18 +185,25 @@ def test_a_disabled_choice_is_greyed_explained_and_follows_the_printer(
             fid,
         )
 
-        # The P1S has sliced files: the field is redrawn for it, unsaved.
+        # Changing the printer leaves the Picture field alone until a save
+        # and reload. The user's new Picture selection must survive.
         page.select_option(f"#{fid}-printer", "p1s")
-        page.wait_for_function(
-            """(fid) => {
-              const t = document.querySelector(`#${fid}-method`)?.closest('.field')
-                ?.querySelector('.pic-opt[data-pic-value="toolpath"]');
-              return t && t.getAttribute('aria-disabled') !== 'true';
-            }""",
-            arg=fid,
-        )
+        page.wait_for_load_state("networkidle")
         state = page.evaluate(STATE_JS, fid)
-        assert state["value"] == "preview", "the redraw keeps the form's value"
+        assert state["disabled"], "availability refreshes only when fields render again"
+        assert state["value"] == "preview"
+        assert "Availability depends on the printer. Save and reopen to refresh." in field.text_content()
+        if editor == "v2":
+            page.evaluate("() => EV2.flush()")
+        else:
+            with page.expect_response(f"{base}/pages/{PAGE_ID}/cells/big"):
+                page.locator(f"#{fid}-printer").evaluate("el => el.form.requestSubmit()")
+        assert errors == []
+        browser.close()
+        browser, page, errors, fid = _open(pw, base, editor, width)
+        state = page.evaluate(STATE_JS, fid)
+        assert state["value"] == "preview"
+        assert not state["disabled"]
         assert state["why"] is None and state["note"] is None and state["warn"] is None
         field = page.locator(f"#{fid}-method").locator(
             "xpath=ancestor::div[contains(@class,'field')][1]"
@@ -208,13 +215,10 @@ def test_a_disabled_choice_is_greyed_explained_and_follows_the_printer(
             field.locator("[data-pic-trigger]").click()
             field.screenshot(path=f"{_SHOTS}/{editor}-{width}-p1s.png")
 
-        # Back to Big Bertha with Toolpaths chosen: the warning comes back.
+        # Back to Big Bertha: the open choices and current value stay put.
         page.select_option(f"#{fid}-printer", "h3c")
-        page.wait_for_function(
-            """(fid) => !!document.querySelector(`#${fid}-method`)?.closest('.field')
-              ?.querySelector('[data-choice-warn]:not([hidden])')""",
-            arg=fid,
-        )
+        page.wait_for_load_state("networkidle")
+        assert not page.evaluate(STATE_JS, fid)["disabled"]
         assert page.evaluate(STATE_JS, fid)["value"] == "toolpath"
         assert errors == []
     finally:

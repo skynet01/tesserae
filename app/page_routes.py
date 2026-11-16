@@ -44,7 +44,6 @@ from flask import (
     jsonify,
     redirect,
     render_template,
-    render_template_string,
     request,
     url_for,
 )
@@ -519,16 +518,6 @@ def _apply_layout_to_cells(layout_slug: str, page: Page) -> list[Cell]:
     return out
 
 
-def _choices_depends_on(spec: Mapping[str, Any]) -> list[str]:
-    """The option names a ``choices_from`` field's rows depend on."""
-    names = spec.get("choices_depends_on")
-    if isinstance(names, str):
-        names = [names]
-    if not isinstance(names, list):
-        return []
-    return [n for n in names if isinstance(n, str) and n]
-
-
 def _materialize_cell_choices(
     page: Any, plugins: list[Any], shared: dict[str, list[dict[str, Any]]]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -554,9 +543,7 @@ def _materialize_cell_options(
     ``options`` is one cell's option values, handed to a provider whose
     ``choices`` takes an ``options`` keyword (``choices(name, options=...)``),
     so its rows can depend on the cell (a choice that can't work for the
-    printer picked above it, say). A field whose manifest lists
-    ``choices_depends_on`` also gets ``choices_plugin``, so the editor can
-    ask for fresh rows when one of those options changes.
+    printer picked above it, say). Choices are computed when fields render.
 
     Plugins that don't expose ``choices`` (or that raise) get an empty
     list, the editor will render an empty dropdown rather than break.
@@ -612,8 +599,6 @@ def _materialize_cell_options(
             note = guidance_note(spec.get("choices")) if source else None
             if note:
                 spec["choices_note"] = note
-            if source and _choices_depends_on(spec):
-                spec["choices_plugin"] = plugin.id
             materialized.append(spec)
         out[plugin.id] = materialized
     return out
@@ -2271,43 +2256,6 @@ def preview(page_id: str) -> Response:
     if request.headers.get("X-Requested-With") == "fetch":
         return jsonify({"ok": True, "groups": hydrated_groups})
     return _flash_save(True, "preview-ready")
-
-
-_OPTION_FIELD = """{% from '_components.html' import auto_field %}
-{%- if opt.choices_note is defined %}{% set opt = dict(opt, choices=[{'value': '', 'label': 'Nothing to pick yet, see above'}]) %}{% endif -%}
-{{ auto_field(field_id, 'opt_' ~ opt.name, opt, value, readonly=readonly, visible=option_visible(opt, values, opts)) }}"""
-
-
-@bp.post("/option-field")
-def option_field() -> Response:
-    """One widget option's field, drawn again for the cell's current values.
-
-    The editor asks for this when an option that a field's choices depend on
-    (``choices_depends_on``) changes, so the rows (which choices are disabled,
-    and why) follow the unsaved form. Query: ``plugin``, ``option``,
-    ``field_id``. Body: the cell's form, read as a save would read it."""
-    plugin = _plugins().get(request.args.get("plugin") or "")
-    name = request.args.get("option") or ""
-    field_id = request.args.get("field_id") or ""
-    if plugin is None or not name or not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", field_id):
-        abort(404)
-    values = _cell_options_from_form(plugin, request.form)
-    opts = _materialize_cell_options([plugin], values).get(plugin.id, [])
-    opt = next((o for o in opts if o.get("name") == name), None)
-    if opt is None:
-        abort(404)
-    fill = opt.get("fill_from") if isinstance(opt.get("fill_from"), dict) else None
-    filled = (fill.get("map") or {}).get(values.get(fill.get("option"))) if fill else None
-    html = render_template_string(
-        _OPTION_FIELD,
-        opt=opt,
-        opts=opts,
-        values=values,
-        field_id=field_id,
-        value=filled if filled is not None else values.get(name, opt.get("default", "")),
-        readonly=filled is not None,
-    )
-    return current_app.response_class(html, mimetype="text/html")
 
 
 @bp.post("/<page_id>/cells/<cell_id>")

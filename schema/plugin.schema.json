@@ -135,11 +135,6 @@
             }
           },
           "choices_from": { "type": "string" },
-          "choices_depends_on": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "For a choices_from field: the options its rows depend on. The widget's choices(name, options=...) gets the cell's option values, and the editor asks for this field's rows again when one of these options changes. See docs/widgets.md."
-          },
           "presets": {
             "type": "array",
             "description": "For a textarea: an Examples dropdown above it; picking one fills the textarea with the preset's value, to be edited from there.",

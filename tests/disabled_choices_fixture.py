@@ -7,15 +7,16 @@ import json
 from pathlib import Path
 
 PLUGIN_ID = "pics"
-REASON = "Not available for Big Bertha: Home Assistant gets no sliced files from it."
+REASON = (
+    "Not available for Big Bertha: Home Assistant gets no sliced files from it. "
+    "Availability depends on the printer. Save and reopen to refresh."
+)
 
 SERVER_PY = f"""
 REASON = {REASON!r}
-CALLS = []
 
 
 def choices(name, options=None):
-    CALLS.append((name, dict(options or {{}})))
     if name == "printer":
         return [{{"value": "h3c", "label": "Big Bertha"}}, {{"value": "p1s", "label": "P1S"}}]
     if name == "method":
@@ -62,7 +63,7 @@ def write_plugin(plugins_dir: Path) -> None:
                 "label": "Picture",
                 "default": "toolpath",
                 "choices_from": "method",
-                "choices_depends_on": ["printer"],
+                "help": "Availability depends on the printer. Save and reopen to refresh.",
             },
             {
                 "name": "size",
