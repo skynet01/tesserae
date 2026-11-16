@@ -100,6 +100,47 @@ def _hourly_schedule(
 # -- schedule conditions -----------------------------------------------
 
 
+def test_event_snapshot_stays_authoritative_until_disconnect():
+    from app.state.conditions import Condition
+
+    cond = Condition(
+        source_kind="ha_entity",
+        source_id="sensor.printer",
+        operator="==",
+        value="running",
+        if_unknown="fail",
+    )
+    evaluator = ConditionEvaluator(
+        ha_get_states=lambda: [{"entity_id": "sensor.printer", "state": "idle"}]
+    )
+    evaluator.receive_ha_snapshot([{"entity_id": "sensor.printer", "state": "idle"}])
+    evaluator.receive_ha_state(
+        "sensor.printer", {"entity_id": "sensor.printer", "state": "running"}
+    )
+    evaluator.refresh_ha_states()
+    assert evaluator.all_pass([cond])
+    evaluator.ha_stream_disconnected()
+    assert not evaluator.all_pass([cond])
+    evaluator.refresh_ha_states()
+    assert not evaluator.all_pass([cond])
+    evaluator.receive_ha_snapshot([{"entity_id": "sensor.printer", "state": "running"}])
+    assert evaluator.all_pass([cond])
+    evaluator.receive_ha_state("sensor.printer", None)
+    assert not evaluator.all_pass([cond])
+
+
+def test_inflight_rest_snapshot_cannot_overwrite_new_event_snapshot():
+    evaluator = ConditionEvaluator()
+
+    def rest():
+        evaluator.receive_ha_snapshot([{"entity_id": "sensor.printer", "state": "running"}])
+        return [{"entity_id": "sensor.printer", "state": "idle"}]
+
+    evaluator._ha_get_states = rest
+    evaluator.refresh_ha_states()
+    assert evaluator.ha_state("sensor.printer")["state"] == "running"
+
+
 def test_schedule_with_passing_conditions_fires(tmp_path: Path) -> None:
     s = _hourly_schedule(
         "morning",
@@ -490,12 +531,12 @@ def test_rotation_priority_mode_holds_when_nothing_matches(tmp_path: Path) -> No
 
 
 def test_min_hold_gate_blocks_repeat_within_window(tmp_path: Path) -> None:
-    """After a successful fire, the gate prevents another transition
+    """After a scheduled-mode fire, the gate prevents another transition
     until ``min_hold_minutes`` have elapsed - even if conditions now
     point at a different step."""
     rotation = _rotation(
         "lounge",
-        mode="priority",
+        mode="scheduled",
         min_hold_minutes=5,
         steps=[
             RotationStep(

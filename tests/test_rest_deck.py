@@ -257,6 +257,57 @@ def test_frame_query_deck_page_report_updates_nav_position(app: Flask) -> None:
     assert (nav["deck_id"], nav["page_id"]) == (deck.id, "weather")
 
 
+def test_frame_wake_serves_matching_priority_step_before_the_next_tick(app: Flask):
+    from app.state.conditions import Condition
+    from app.state.page_store import Page
+
+    app.config["SCHEDULER"].stop()
+    client = app.test_client()
+    token = _register_esp32(app, client, "frame01")
+    for pid in ("print", "photos"):
+        app.config["PAGE_STORE"].save(Page(id=pid, name=pid, device_ids=["frame01"]))
+    app.config["DECK_STORE"].upsert(
+        Deck(
+            id="printer",
+            name="Printer",
+            device_ids=["frame01"],
+            advance="timer",
+            advance_mode="priority",
+            advance_min_hold_minutes=30,
+            advance_smart_sync=True,
+            pages=[
+                DeckPage(
+                    page_id="print",
+                    conditions=[
+                        Condition(
+                            source_kind="ha_entity",
+                            source_id="sensor.printer",
+                            operator="==",
+                            value="running",
+                            if_unknown="fail",
+                        )
+                    ],
+                ),
+                DeckPage(page_id="photos"),
+            ],
+        )
+    )
+    _warm(app, "frame01", "photos", b"photos")
+    print_digest = _warm(app, "frame01", "print", b"print")
+    manager = app.config["PUSH_MANAGER"]
+    assert manager.promote_deck_page("frame01", "photos")
+    app.config["DECK_NAV_STORE"].set("frame01", "printer", "photos")
+    app.config["CONDITION_EVALUATOR"].receive_ha_snapshot(
+        [
+            {"entity_id": "sensor.printer", "state": "running"},
+        ]
+    )
+    response = client.get("/api/v1/device/frame01/frame", headers=_auth(token))
+    assert response.status_code == 200
+    assert response.get_json()["render_id"] == print_digest
+    assert app.config["DECK_NAV_STORE"].current_page("frame01", "printer") == "print"
+
+
 # -- local-nav reconciliation (touch/poll against deck-painted frames) --------
 
 
