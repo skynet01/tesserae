@@ -1,9 +1,9 @@
 {
   "tesserae_compat": "1.x",
   "name": "Netgear Meural",
-  "icon": "frame-corners",
+  "icon": "device-tablet",
   "version": "0.1.0",
-  "description": "Sign in to Netgear and choose a frame. Tesserae displays one image at a time and creates no Meural galleries. Cloud delivery pauses Meural's gallery rotation and scheduler; Resume Meural gallery restores your previous playback. Local previews are available as a backup. An optional LAN address enables quiet-hours sleep control.",
+  "description": "Sign in to Netgear and choose a frame. Tesserae displays one image at a time and creates no Meural galleries. Cloud delivery pauses gallery rotation and keeps the frame's sleep scheduler active. Resume Meural gallery restores your previous playback. Local previews are available as a backup. An optional LAN address enables quiet-hours sleep control.",
   "renderers": ["pi_png"],
   "transport": "push",
   "panel": {
@@ -46,5 +46,10 @@
       "help": "Seconds between local uploads of the current page. This must be shorter than the frame's preview duration, which is often 30 seconds. New pages are sent immediately.",
       "show_if": {"delivery_method": "local"}
     }
-  }
+  },
+  "calibration": false,
+  "wake_schedule": false,
+  "firmware_updates": false,
+  "device_logs": false,
+  "heartbeat": false
 }

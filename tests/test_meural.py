@@ -63,16 +63,16 @@ def setup(app):
         devices=app.config["DEVICE_REGISTRY"],
         renderers=app.config["RENDERER_REGISTRY"],
         data_root=app.config["DATA_ROOT"],
-        instance_id="lounge",
+        instance_id="test_frame",
         kind_id="meural",
-        name="Lounge",
+        name="Example frame",
     )
     assert result.ok, result.error
     settings = app.config["SETTINGS_STORE"]
-    cfg = dict((settings.get_section("devices") or {}).get("lounge") or {})
+    cfg = dict((settings.get_section("devices") or {}).get("test_frame") or {})
     cfg["host"] = "192.0.2.10"
     cfg["delivery_method"] = "local"
-    settings.patch_section("devices", {"lounge": cfg})
+    settings.patch_section("devices", {"test_frame": cfg})
     frame = Frame()
     clock = [100.0]
     quiet = [False]
@@ -101,7 +101,7 @@ def setup(app):
         latest=latest,
         publisher=publisher,
         settings=settings,
-        device=app.config["DEVICE_REGISTRY"].devices["lounge"],
+        device=app.config["DEVICE_REGISTRY"].devices["test_frame"],
     )
 
 
@@ -169,16 +169,16 @@ def test_cloud_is_default_and_unchanged_images_are_not_uploaded_again(setup, mon
             self.loads.append((target, item))
 
     cloud = Cloud()
-    cfg = dict(setup.settings.get_section("devices")["lounge"])
+    cfg = dict(setup.settings.get_section("devices")["test_frame"])
     cfg.pop("delivery_method")
-    cfg["cloud_device_id"] = "16036"
-    setup.settings.patch_section("devices", {"lounge": cfg})
+    cfg["cloud_device_id"] = "101"
+    setup.settings.patch_section("devices", {"test_frame": cfg})
     monkeypatch.setattr("app.meural_cloud.get_cloud_client", lambda *a: cloud)
     for moment in (100, 115, 200):
         setup.clock[0] = moment
         setup.publisher().poll_once()
     assert len(cloud.uploads) == 1
-    assert cloud.loads == [("16036", "100")]
+    assert cloud.loads == [("101", "100")]
     assert setup.frame.uploads == []
     with setup.app.app_context():
         from app.settings.index_routes import _transport_badge
@@ -187,18 +187,18 @@ def test_cloud_is_default_and_unchanged_images_are_not_uploaded_again(setup, mon
 
 
 def test_released_frame_is_not_sent_new_previews(setup):
-    setup.settings.update_item("devices", "lounge", {"meural_management_paused": True})
+    setup.settings.update_item("devices", "test_frame", {"meural_management_paused": True})
     setup.publisher().poll_once()
     assert setup.frame.uploads == []
-    setup.settings.update_item("devices", "lounge", {"meural_management_paused": False})
+    setup.settings.update_item("devices", "test_frame", {"meural_management_paused": False})
     setup.publisher().poll_once()
     assert len(setup.frame.uploads) == 1
 
 
 def test_cloud_error_does_not_silently_enable_local_previews(setup, monkeypatch):
-    cfg = dict(setup.settings.get_section("devices")["lounge"])
-    cfg.update(delivery_method="cloud", cloud_device_id="16036")
-    setup.settings.patch_section("devices", {"lounge": cfg})
+    cfg = dict(setup.settings.get_section("devices")["test_frame"])
+    cfg.update(delivery_method="cloud", cloud_device_id="101")
+    setup.settings.patch_section("devices", {"test_frame": cfg})
 
     def unavailable(*args):
         raise MeuralError("cloud unavailable")
@@ -234,7 +234,7 @@ def test_unexpected_device_failure_does_not_kill_renewal(setup, monkeypatch):
 def test_unreachable_frame_does_not_report_a_fresh_checkin(setup, monkeypatch):
     pub = setup.publisher()
     pub.poll_once()
-    before = setup.app.config["DEVICE_STATUS"]["lounge"]["received_at"]
+    before = setup.app.config["DEVICE_STATUS"]["test_frame"]["received_at"]
 
     def unavailable():
         raise MeuralError("frame unavailable")
@@ -242,7 +242,7 @@ def test_unreachable_frame_does_not_report_a_fresh_checkin(setup, monkeypatch):
     monkeypatch.setattr(setup.frame, "is_sleeping", unavailable)
     setup.clock[0] += 60
     pub.poll_once()
-    assert setup.app.config["DEVICE_STATUS"]["lounge"]["received_at"] == before
+    assert setup.app.config["DEVICE_STATUS"]["test_frame"]["received_at"] == before
 
 
 def test_status_storage_failure_does_not_prevent_upload(setup, monkeypatch):
@@ -258,9 +258,9 @@ def test_frame_at_new_address_does_not_inherit_quiet_sleep(setup):
     setup.quiet[0] = True
     pub = setup.publisher()
     pub.poll_once()
-    cfg = dict(setup.settings.get_section("devices")["lounge"])
+    cfg = dict(setup.settings.get_section("devices")["test_frame"])
     cfg["host"] = "192.0.2.11"
-    setup.settings.patch_section("devices", {"lounge": cfg})
+    setup.settings.patch_section("devices", {"test_frame": cfg})
     setup.quiet[0] = False
     setup.publisher().poll_once()
     assert setup.frame.power == [True]
@@ -292,21 +292,21 @@ def test_own_quiet_sleep_is_resumed_after_restart(setup):
 def test_address_change_invalidates_delivery_and_sleep_ownership(setup):
     pub = setup.publisher()
     pub.poll_once()
-    cfg = dict(setup.settings.get_section("devices")["lounge"])
+    cfg = dict(setup.settings.get_section("devices")["test_frame"])
     cfg["host"] = "192.0.2.11"
-    setup.settings.patch_section("devices", {"lounge": cfg})
+    setup.settings.patch_section("devices", {"test_frame": cfg})
     pub.poll_once()
     assert len(setup.frame.uploads) == 2
 
 
 def test_missing_address_or_artifact_does_not_send(setup):
-    cfg = dict(setup.settings.get_section("devices")["lounge"])
+    cfg = dict(setup.settings.get_section("devices")["test_frame"])
     cfg["host"] = ""
-    setup.settings.patch_section("devices", {"lounge": cfg})
+    setup.settings.patch_section("devices", {"test_frame": cfg})
     setup.publisher().poll_once()
     assert setup.frame.uploads == []
     cfg["host"] = "192.0.2.10"
-    setup.settings.patch_section("devices", {"lounge": cfg})
+    setup.settings.patch_section("devices", {"test_frame": cfg})
     setup.latest["composition_digest"] = "missing"
     setup.publisher().poll_once()
     assert setup.frame.uploads == []
@@ -322,7 +322,7 @@ def test_stop_prevents_stale_publisher_uploads(setup):
 
 def test_removed_device_is_not_changed_after_an_inflight_read(setup, monkeypatch):
     def removed():
-        setup.app.config["DEVICE_REGISTRY"].devices.pop("lounge")
+        setup.app.config["DEVICE_REGISTRY"].devices.pop("test_frame")
         return False
 
     setup.quiet[0] = True
@@ -450,7 +450,7 @@ def test_client_sends_multipart_photo_with_jpeg_type(monkeypatch):
         requests.append(request)
         return response({"status": "pass", "response": "Postcard is ready."})
 
-    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("app.meural.open_request", urlopen)
     MeuralClient("192.0.2.10").upload(b"jpeg-data")
     request = requests[0]
     assert request.full_url == "http://192.0.2.10/remote/postcard/"
@@ -469,14 +469,14 @@ def test_client_sends_multipart_photo_with_jpeg_type(monkeypatch):
     ],
 )
 def test_client_rejects_unsuccessful_protocol_reply(monkeypatch, payload):
-    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **kw: response(payload))
+    monkeypatch.setattr("app.meural.open_request", lambda *a, **kw: response(payload))
     with pytest.raises(MeuralError):
         MeuralClient("192.0.2.10").upload(b"jpeg-data")
 
 
 def test_client_filters_system_status(monkeypatch):
     monkeypatch.setattr(
-        "urllib.request.urlopen",
+        "app.meural.open_request",
         lambda *a, **kw: response(
             {
                 "status": "pass",
@@ -495,3 +495,114 @@ def test_client_filters_system_status(monkeypatch):
     assert status["fw_version"] == "2.0.9"
     assert status["rssi"] == -64
     assert "private" not in json.dumps(status)
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise AssertionError("Meural tests must replace the HTTP boundary")
+
+    monkeypatch.setattr("app.meural.open_request", blocked)
+
+
+def test_client_closes_http_error_response_without_exposing_payload(monkeypatch):
+    import urllib.error
+
+    handle = io.BytesIO(b'{"password":"example-private-value"}')
+
+    def fail(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 503, "failed", {}, handle)
+
+    monkeypatch.setattr("app.meural.open_request", fail)
+    with pytest.raises(MeuralError) as caught:
+        MeuralClient("192.0.2.10").upload(b"jpeg")
+    assert "example-private-value" not in str(caught.value)
+    assert handle.closed
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "127.1",
+        "169.254.1.2",
+        "0.0.0.0",
+        "localhost",
+        "LOCALHOST",
+        "frame.localhost",
+        "::1",
+    ],
+)
+def test_rejects_non_lan_addresses(host):
+    from app.meural import valid_host
+
+    assert not valid_host(host)
+
+
+@pytest.mark.parametrize("host", ["192.0.2.10", "10.0.0.2", "192.168.1.2", "meural.local"])
+def test_accepts_lan_addresses(host):
+    from app.meural import valid_host
+
+    assert valid_host(host)
+
+
+def test_lan_reply_has_a_size_limit(monkeypatch):
+    monkeypatch.setattr(
+        "app.meural.open_request",
+        lambda *a, **kw: io.BytesIO(
+            b'{"status":"pass","response":true,"padding":"' + b" " * (1024 * 1024) + b'"}'
+        ),
+    )
+    with pytest.raises(MeuralError):
+        MeuralClient("192.0.2.10").is_sleeping()
+
+
+def test_redirects_do_not_forward_authorization():
+    from urllib.request import Request
+
+    from app.meural_http import NoRedirect
+
+    request = Request("https://example.com", headers={"Authorization": "Token example"})
+    assert (
+        NoRedirect().redirect_request(request, None, 302, "Found", {}, "https://other.example")
+        is None
+    )
+
+
+def test_cloud_sleep_ownership_survives_frame_ip_change(setup):
+    setup.app.config["SETTINGS_STORE"].update_item(
+        "devices", "test_frame", {"cloud_device_id": "101", "meural_account_id": "17"}
+    )
+    setup.quiet[0] = True
+    setup.publisher().poll_once()
+    assert setup.frame.sleeping
+    setup.app.config["SETTINGS_STORE"].update_item("devices", "test_frame", {"host": "192.0.2.11"})
+    setup.quiet[0] = False
+    setup.publisher().poll_once()
+    assert not setup.frame.sleeping
+
+
+def test_native_schedule_keeps_status_checks_and_does_not_wake_the_frame(setup):
+    import time
+
+    setup.app.config["SETTINGS_STORE"].update_item(
+        "devices",
+        "test_frame",
+        {
+            "cloud_device_id": "101",
+            "meural_account_id": "17",
+            "meural_refresh_token_secret": "example-refresh",
+            "meural_sleep_schedule": {
+                "scope": "17:101",
+                "available": True,
+                "checked_at": time.time(),
+            },
+        },
+    )
+    publisher = setup.publisher()
+    publisher._save_sleep(setup.device, "192.0.2.10")
+    setup.frame.sleeping = True
+    publisher.poll_once()
+    assert setup.frame.sleeping
+    assert setup.frame.power == []
+    assert "test_frame" in publisher._telemetry

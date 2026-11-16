@@ -87,6 +87,7 @@ def test_meural_tab_adds_a_frame_and_opens_its_setup_page(
         assert not page.locator("[data-segmented-help-rest]").is_visible()
         branch.get_by_label("Device id").fill(f"meural_test_{width}")
         branch.get_by_label("Display name", exact=True).fill("Example frame")
+        branch.get_by_label("Frame address").fill("192.0.2.10")
         # Switching tabs preserves typed values and hides the inactive help.
         page.get_by_role("tab", name="MQTT broker", exact=True).click()
         assert not page.locator("[data-segmented-help-meural]").is_visible()

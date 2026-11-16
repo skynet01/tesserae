@@ -90,7 +90,7 @@
                 data-segmented-btn="meural"
                 role="tab"
                 aria-selected="false">
-          <i class="ph ph-frame-corners" aria-hidden="true"></i><span>Netgear Meural</span>
+          <i class="ph ph-device-tablet" aria-hidden="true"></i><span>Netgear Meural</span>
         </button>
       </div>
       <p class="dx-segmented-help" data-segmented-help-rest{% if default_transport != 'rest' %} hidden{% endif %}>
@@ -484,6 +484,8 @@
         {{ text_input('add-meural-id', 'id', 'Device id', value='', placeholder='meural_frame', required=True,
                       help='Lowercase, no spaces.') }}
         {{ text_input('add-meural-name', 'name', 'Display name', value='', placeholder='Meural frame') }}
+        {{ text_input('add-meural-host', 'host', 'Frame address', value='', placeholder='meural.local', required=True,
+                      help='The frame address on your local network.') }}
         <div class="dx-actions-right">
           <button type="submit" class="dx-btn-primary"><i class="ph ph-plus" aria-hidden="true"></i><span>Add Netgear Meural</span></button>
         </div>

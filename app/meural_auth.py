@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
+from app.meural_http import open_request, read_response
+
+# Public app ids from Netgear's own app, not client secrets.
 COGNITO_CLIENT_ID = "487bd4kvb1fnop6mbgk8gu5ibf"
 COGNITO_URL = "https://cognito-idp.eu-west-1.amazonaws.com/"
 MEURAL_OAUTH_CLIENT_ID = "3ui6nklcaqoij8inrkm06gfk4s"
@@ -65,7 +68,13 @@ class HttpError(Exception):
     def __init__(self, status: int, body: Any) -> None:
         super().__init__(f"Meural request failed (HTTP {status})")
         self.status = status
-        self.body = body
+        # Providers sometimes echo request credentials. Keep only classification,
+        # never their raw reply on an exception that a caller might log.
+        text = json.dumps(body).lower()
+        blocked = any(word in text for word in WAF_ERROR_KEYWORDS) or (
+            status == 403 and any(word in text for word in WAF_BLOCK_PAGE_KEYWORDS)
+        )
+        self.body = {"message": "waf"} if blocked else {}
 
 
 def request_json(
@@ -83,8 +92,8 @@ def request_json(
         request_headers.setdefault("Content-Type", "application/json")
     request = urllib.request.Request(url, data=body, headers=request_headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
+        with open_request(request, timeout=timeout) as response:
+            raw = read_response(response)
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as exc:
         with exc:
@@ -94,8 +103,8 @@ def request_json(
         except (ValueError, UnicodeDecodeError):
             payload = {"message": raw.decode("utf-8", "replace")}
         raise HttpError(exc.code, payload) from None
-    except (OSError, ValueError, urllib.error.URLError) as exc:
-        raise CannotConnect("Could not connect to Meural or Netgear Accounts") from exc
+    except (OSError, ValueError, urllib.error.URLError):
+        raise CannotConnect("Could not connect to Meural or Netgear Accounts") from None
 
 
 class NetgearAuthenticator:
@@ -146,10 +155,10 @@ class NetgearAuthenticator:
         ):
             raise AuthenticationBlocked(
                 "Netgear blocked the request. Try signing in from a phone on mobile data."
-            ) from error
+            ) from None
         if error.status == 429 or error.status >= 500:
-            raise CannotConnect("Netgear Accounts is temporarily unavailable") from error
-        raise InvalidAuth("The Meural session has expired. Sign in again.") from error
+            raise CannotConnect("Netgear Accounts is temporarily unavailable") from None
+        raise InvalidAuth("The Meural session has expired. Sign in again.") from None
 
     @staticmethod
     def _unwrap(response: Any) -> dict[str, Any]:

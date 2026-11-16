@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
+import logging
 import re
 import threading
 import time
@@ -15,8 +15,11 @@ from typing import Any
 from flask import Flask
 
 from app.device_loader import Device
+from app.meural import valid_host
 from app.meural_auth import (
+    AuthenticationBlocked,
     AuthResult,
+    CannotConnect,
     HttpError,
     InvalidAuth,
     MeuralAuthError,
@@ -25,6 +28,8 @@ from app.meural_auth import (
 )
 from app.state.settings_store import SettingsStore
 
+logger = logging.getLogger(__name__)
+
 API = "https://api.meural.com/v1/"
 SESSION_FIELDS: list[dict[str, Any]] = [
     {"name": "meural_access_token", "secret": True},
@@ -32,6 +37,10 @@ SESSION_FIELDS: list[dict[str, Any]] = [
 ] + [
     {"name": name}
     for name in (
+        "meural_auth_failed",
+        "meural_auth_retry_at",
+        "meural_auth_failures",
+        "meural_auth_blocked",
         "meural_expires_at",
         "meural_trust_id",
         "meural_email",
@@ -48,6 +57,31 @@ def resource_id(value: Any) -> str:
     return text
 
 
+def ensure_frame_available(settings: SettingsStore, device_id: str, target: str) -> None:
+    if not target:
+        return
+    for other_id, config in (settings.get_section("devices") or {}).items():
+        if (
+            other_id != device_id
+            and isinstance(config, dict)
+            and str(config.get("cloud_device_id") or "") == target
+        ):
+            raise ValueError("This Meural frame is already selected by another Tesserae display.")
+
+
+def frame_inventory(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    inventory = []
+    for device in devices:
+        frame = {
+            "id": resource_id(device.get("id")),
+            "name": str(device.get("alias") or device.get("name") or device["id"])[:100],
+        }
+        host = device.get("localIp", device.get("host"))
+        frame["host"] = str(host) if valid_host(host) else ""
+        inventory.append(frame)
+    return inventory
+
+
 def save_session(
     settings: SettingsStore,
     device_id: str,
@@ -56,23 +90,23 @@ def save_session(
     email: str,
     account_id: str,
     devices: list[dict[str, Any]],
+    selected_id: str | None = None,
 ) -> None:
     current = (settings.get_section("devices") or {}).get(device_id) or {}
     account_id = resource_id(account_id)
-    inventory = []
-    for device in devices:
-        frame = {
-            "id": resource_id(device.get("id")),
-            "name": str(device.get("alias") or device.get("name") or device["id"])[:100],
-        }
-        try:
-            frame["host"] = str(ipaddress.IPv4Address(device.get("localIp")))
-        except (ValueError, TypeError):
-            frame["host"] = ""
-        inventory.append(frame)
-    chosen = next((d for d in inventory if d["id"] == str(current.get("cloud_device_id"))), None)
+    inventory = frame_inventory(devices)
+    chosen = next(
+        (
+            d
+            for d in inventory
+            if d["id"]
+            == str(selected_id if selected_id is not None else current.get("cloud_device_id"))
+        ),
+        None,
+    )
     if chosen is None and len(inventory) == 1:
         chosen = inventory[0]
+    ensure_frame_available(settings, device_id, chosen["id"] if chosen else "")
     selection: dict[str, Any] = {
         "cloud_device_id": chosen["id"] if chosen else "",
         "meural_management_paused": False,
@@ -87,6 +121,10 @@ def save_session(
         "devices",
         device_id,
         {
+            "meural_auth_failed": False,
+            "meural_auth_retry_at": 0,
+            "meural_auth_failures": 0,
+            "meural_auth_blocked": False,
             "meural_access_token": result.access_token,
             "meural_refresh_token": result.refresh_token,
             "meural_expires_at": result.expires_at,
@@ -106,7 +144,9 @@ def save_session(
 
 
 def clear_session(settings: SettingsStore, device_id: str) -> None:
-    keys = [f["name"] + ("_secret" if f.get("secret") else "") for f in SESSION_FIELDS]
+    keys = ["meural_sleep_schedule"] + [
+        f["name"] + ("_secret" if f.get("secret") else "") for f in SESSION_FIELDS
+    ]
     settings.update_item("devices", device_id, {}, remove=keys)
 
 
@@ -115,6 +155,10 @@ def save_tokens(settings: SettingsStore, device_id: str, result: AuthResult) -> 
         "devices",
         device_id,
         {
+            "meural_auth_failed": False,
+            "meural_auth_retry_at": 0,
+            "meural_auth_failures": 0,
+            "meural_auth_blocked": False,
             "meural_access_token": result.access_token,
             "meural_refresh_token": result.refresh_token,
             "meural_expires_at": result.expires_at,
@@ -129,8 +173,6 @@ class MeuralCloudClient:
         self._settings = settings
         self._device_id = device_id
         self.lock = threading.RLock()
-        self._retry_auth_at = 0.0
-        self._failed_refresh = ""
 
     def config(self) -> dict[str, Any]:
         return (self._settings.get_section("devices") or {}).get(self._device_id) or {}
@@ -140,12 +182,27 @@ class MeuralCloudClient:
         return str(self.config().get("meural_account_id") or "")
 
     def reset_auth(self) -> None:
-        self._retry_auth_at = 0
-        self._failed_refresh = ""
+        self._settings.update_item(
+            "devices",
+            self._device_id,
+            {
+                "meural_auth_failed": False,
+                "meural_auth_retry_at": 0,
+                "meural_auth_failures": 0,
+                "meural_auth_blocked": False,
+            },
+        )
 
     def _token(self, *, rejected: str | None = None) -> str:
         with self.lock:
             cfg = self.config()
+            if cfg.get("meural_auth_failed"):
+                raise InvalidAuth("Session expired, sign in again")
+            if time.time() < float(cfg.get("meural_auth_retry_at") or 0):
+                error = AuthenticationBlocked if cfg.get("meural_auth_blocked") else CannotConnect
+                raise error(
+                    "Meural requests are paused after a connection failure. Try again later."
+                )
             token = str(cfg.get("meural_access_token_secret") or "")
             refresh = str(cfg.get("meural_refresh_token_secret") or "")
             expires = float(cfg.get("meural_expires_at") or 0)
@@ -153,17 +210,31 @@ class MeuralCloudClient:
                 return token
             if not refresh:
                 raise InvalidAuth("Sign in to Meural in this display's settings")
-            if refresh == self._failed_refresh and time.monotonic() < self._retry_auth_at:
-                raise InvalidAuth("Meural authentication failed. Wait a minute or sign in again.")
             try:
                 result = NetgearAuthenticator(cfg.get("meural_trust_id")).refresh(refresh)
-            except MeuralAuthError:
-                self._failed_refresh = refresh
-                self._retry_auth_at = time.monotonic() + 60
+            except InvalidAuth:
+                self._settings.update_item("devices", self._device_id, {"meural_auth_failed": True})
+                raise
+            except (CannotConnect, AuthenticationBlocked) as exc:
+                self._backoff(blocked=isinstance(exc, AuthenticationBlocked))
                 raise
             save_tokens(self._settings, self._device_id, result)
             self.reset_auth()
             return result.access_token
+
+    def _backoff(self, *, blocked: bool = False) -> None:
+        with self.lock:
+            attempts = min(int(self.config().get("meural_auth_failures") or 0) + 1, 5)
+            delay = min((1800 if blocked else 300) * 2 ** (attempts - 1), 3600)
+            self._settings.update_item(
+                "devices",
+                self._device_id,
+                {
+                    "meural_auth_failures": attempts,
+                    "meural_auth_retry_at": time.time() + delay,
+                    "meural_auth_blocked": blocked,
+                },
+            )
 
     def request(self, method: str, path: str, **kwargs: Any) -> Any:
         token = self._token()
@@ -177,11 +248,32 @@ class MeuralCloudClient:
             }
             try:
                 result = request_json(method, API + path, **{**kwargs, "headers": headers})
+                if self.config().get("meural_auth_failures"):
+                    self._settings.update_item(
+                        "devices",
+                        self._device_id,
+                        {
+                            "meural_auth_retry_at": 0,
+                            "meural_auth_failures": 0,
+                            "meural_auth_blocked": False,
+                        },
+                    )
                 return result
+            except (CannotConnect, AuthenticationBlocked) as exc:
+                self._backoff(blocked=isinstance(exc, AuthenticationBlocked))
+                raise
             except HttpError as exc:
+                if exc.status in (403, 429) or exc.status >= 500:
+                    self._backoff(blocked=exc.status == 403)
+                    raise CannotConnect(
+                        "Meural is temporarily unavailable. Try again later."
+                    ) from None
                 if exc.status != 401:
                     raise
                 if attempt:
+                    self._settings.update_item(
+                        "devices", self._device_id, {"meural_auth_failed": True}
+                    )
                     raise InvalidAuth(
                         "Meural rejected the renewed session. Sign in again."
                     ) from exc
@@ -191,10 +283,6 @@ class MeuralCloudClient:
     @staticmethod
     def _data(payload: Any) -> Any:
         return payload.get("data", payload) if isinstance(payload, dict) else payload
-
-    def inspect_account(self) -> tuple[str, list[dict[str, Any]]]:
-        user = self._data(self.request("GET", "user"))
-        return resource_id(user["id"]), list(self.walk("user/devices"))
 
     def walk(self, path: str) -> Iterator[dict[str, Any]]:
         page = 1
@@ -251,40 +339,59 @@ class MeuralCloudClient:
         data = self._data(self.request("GET", f"devices/{resource_id(target)}"))
         if not isinstance(data, dict) or not isinstance(data.get("frameStatus"), dict):
             raise ValueError("Meural did not return the frame's current playback")
-        flags = {k: data.get(k) for k in ("galleryRotation", "schedulerEnabled")}
+        # Defensive defaults for empty frames; not yet checked on real hardware.
+        # Unknown rotation flags are re-enabled on release instead of blocking setup.
+        flags = {
+            k: True if data.get(k) is None else data[k]
+            for k in ("galleryRotation", "schedulerEnabled")
+        }
         if not all(isinstance(value, bool) for value in flags.values()):
             raise ValueError("Meural did not return the frame's rotation settings")
         return {
-            "gallery_id": resource_id(data["frameStatus"].get("currentGallery")),
-            "item_id": resource_id(data["frameStatus"].get("currentItem")),
+            "gallery_id": resource_id(data["frameStatus"]["currentGallery"])
+            if data["frameStatus"].get("currentGallery") is not None
+            else None,
+            "item_id": resource_id(data["frameStatus"]["currentItem"])
+            if data["frameStatus"].get("currentItem") is not None
+            else None,
             "settings": flags,
+            "scheduler_owned": False,
         }
 
     def pause_rotation(self, target: str) -> None:
         self.request(
             "PUT",
             f"devices/{resource_id(target)}",
-            json_data={"galleryRotation": False, "schedulerEnabled": False},
+            json_data={"galleryRotation": False},
             timeout=60,
         )
 
     def restore_playback(self, target: str, original: dict[str, Any]) -> None:
         target = resource_id(target)
-        flags = {k: original["settings"][k] for k in ("galleryRotation", "schedulerEnabled")}
+        # Older journals paused the scheduler too. New takeovers leave it alone,
+        # so release must preserve any sleep changes made in the Meural app.
+        keys = ["galleryRotation"]
+        if original.get("scheduler_owned", True):
+            keys.append("schedulerEnabled")
+        flags = {key: original["settings"][key] for key in keys}
         if not all(isinstance(value, bool) for value in flags.values()):
             raise ValueError("Invalid saved Meural rotation settings")
+        if original.get("gallery_id") is not None:
+            try:
+                self.request(
+                    "POST",
+                    f"devices/{target}/galleries/{resource_id(original['gallery_id'])}",
+                    timeout=60,
+                )
+            except HttpError as exc:
+                if exc.status != 404:
+                    raise
         try:
-            self.request(
-                "POST",
-                f"devices/{target}/galleries/{resource_id(original['gallery_id'])}",
-                timeout=60,
-            )
+            self.request("PUT", f"devices/{target}", json_data=flags, timeout=60)
+            self.request("POST", f"devices/{target}/sync", timeout=60)
         except HttpError as exc:
             if exc.status != 404:
                 raise
-        finally:
-            self.request("PUT", f"devices/{target}", json_data=flags, timeout=60)
-            self.request("POST", f"devices/{target}/sync", timeout=60)
 
 
 def get_cloud_client(app: Flask, device_id: str) -> MeuralCloudClient:
@@ -333,16 +440,37 @@ class CloudDelivery:
         except ValueError:
             return True
 
-    def release(self, target: str) -> bool:
+    def release(self, target: str, *, abandon: bool = False) -> bool:
         target = resource_id(target)
         state = self._state(target)
-        if not state.get("original"):
-            return False
-        self.client.restore_playback(target, state["original"])
-        state.pop("original")
-        state.update(paused=False, last_key=None)
+        held = bool(state.get("original"))
+        if held:
+            try:
+                self.client.restore_playback(target, state["original"])
+            except (MeuralAuthError, HttpError, OSError, ValueError):
+                if not abandon:
+                    raise
+            state.pop("original")
+        state.update(
+            paused=False,
+            last_key=None,
+            current_item=None,
+            current_key=None,
+            pending_item=None,
+            pending_key=None,
+            upload_started=False,
+        )
         self._save(state)
-        return True
+        # A cleanup outage must not prevent release after playback was restored.
+        for item in list(state.get("owned", [])):
+            try:
+                self.client.delete_item(item)
+            except (MeuralAuthError, HttpError, OSError, ValueError):
+                logger.warning("Meural upload cleanup failed; an image may remain in the library")
+                continue
+            state["owned"].remove(item)
+            self._save(state)
+        return held
 
     def deliver(self, jpeg: bytes, key: str, target: str) -> bool:
         target = resource_id(target)

@@ -6,10 +6,19 @@ const config = JSON.parse(fs.readFileSync(0, "utf8"));
 const scenario = process.argv[3];
 const elements = new Map();
 function element(id) {
-  if (!elements.has(id)) elements.set(id, {
-    value: "", textContent: "", style: {}, hidden: false, disabled: false,
-    listeners: {}, focus() {}, addEventListener(name, callback) { this.listeners[name] = callback; }
-  });
+  if (!elements.has(id))
+    elements.set(id, {
+      value: "",
+      textContent: "",
+      style: {},
+      hidden: false,
+      disabled: false,
+      listeners: {},
+      focus() {},
+      addEventListener(name, callback) {
+        this.listeners[name] = callback;
+      },
+    });
   return elements.get(id);
 }
 element("meural-auth-config").textContent = JSON.stringify(config);
@@ -31,30 +40,43 @@ async function fetch(url, options) {
         assert.equal(body.AuthParameters.PASSWORD, "private-password");
         return reply({ AuthenticationResult: { AccessToken: token } });
       }
-      return reply({ ChallengeName: scenario === "otp-first" ? "EMAIL_OTP" : "CUSTOM_CHALLENGE",
-        Session: "session-1", ChallengeParameters: {} });
+      return reply({
+        ChallengeName: scenario === "otp-first" ? "EMAIL_OTP" : "CUSTOM_CHALLENGE",
+        Session: "session-1",
+        ChallengeParameters: {},
+      });
     }
     if (body.ChallengeName === "CUSTOM_CHALLENGE") {
       assert.equal(body.ChallengeResponses.ANSWER, "private-password");
       return reply({ ChallengeName: "EMAIL_MFA", Session: "session-2", ChallengeParameters: {} });
     }
-    const code = body.ChallengeResponses[scenario === "otp-first" ? "EMAIL_OTP_CODE" : "EMAIL_MFA_CODE"];
+    const code =
+      body.ChallengeResponses[scenario === "otp-first" ? "EMAIL_OTP_CODE" : "EMAIL_MFA_CODE"];
     if (code !== "123456") return reply({ message: "Wrong verification code" }, false);
     return reply({ AuthenticationResult: { AccessToken: token } });
   }
-  assert.equal(url, "/settings/devices/lounge/meural/login");
+  assert.equal(url, "/settings/devices/test_frame/meural/login");
   assert.equal(options.credentials, "same-origin");
-  assert.deepEqual(Object.keys(body).sort(), ["cognito_access_token", "email", "state", "trust_id"]);
+  assert.deepEqual(Object.keys(body).sort(), [
+    "cognito_access_token",
+    "email",
+    "state",
+    "trust_id",
+  ]);
   assert.equal(body.state, config.state);
   assert.equal(body.trust_id, config.trust_id);
   assert.equal(body.cognito_access_token, token);
   callbacks.push(body);
-  return reply({ return_url: "/settings/devices/lounge#connection" });
+  return reply({ return_url: "/settings/devices/test_frame#connection" });
 }
 const context = {
   document: { getElementById: element },
-  window: { location: { pathname: "/settings/devices/lounge/meural/login", search: "" }, addEventListener() {} },
-  AbortSignal, fetch,
+  window: {
+    location: { pathname: "/settings/devices/test_frame/meural/login", search: "" },
+    addEventListener() {},
+  },
+  AbortSignal,
+  fetch,
 };
 vm.runInNewContext(fs.readFileSync(process.argv[2], "utf8"), context);
 (async () => {
@@ -78,4 +100,7 @@ vm.runInNewContext(fs.readFileSync(process.argv[2], "utf8"), context);
   assert.equal(element("code").value, "");
   if (scenario === "otp-first") assert.equal(provider.length, 3);
   process.stdout.write(JSON.stringify({ signed_in: true, callbacks: callbacks.length }));
-})().catch(error => { console.error(error); process.exitCode = 1; });
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

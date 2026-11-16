@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from flask import Response as FlaskResponse
-from flask import current_app, flash, redirect, request, session, url_for
+from flask import abort, current_app, flash, jsonify, redirect, request, session, url_for
 from werkzeug.wrappers import Response
 
 from app import (
@@ -219,11 +219,15 @@ def _undo_add(
 
 
 @bp.post("/settings/devices/add")
-def devices_add() -> Response:
+def devices_add() -> Response | tuple[Response, int]:
     """Create a new device instance from the Devices-tab form. No restart
     needed, the new device shows up immediately in the page editor's
     Target-device dropdown."""
     form = request.form
+    if (form.get("kind") or "").strip() == "meural" and form.get("delivery_method") != "local":
+        from .meural_routes import add_pending_device
+
+        return add_pending_device()
     target_id = form.get("id") or ""
     # Check the config values the form supplies before anything is created
     # (or an orphan's state wiped). They used to be validated after the
@@ -2086,6 +2090,12 @@ def devices_delete(instance_id: str) -> Response:
     if not result.ok or result.device is None:
         flash(result.error or "Delete failed.", "error")
         return redirect(url_for("auth.settings_area", area="devices"))
+    if result.device.kind_of == "meural":
+        from app.meural_cloud import clear_session
+
+        clear_session(settings_store(), instance_id)
+        current_app.config.get("MEURAL_LOGIN_SESSIONS", {}).pop(instance_id, None)
+        current_app.config.get("MEURAL_CLOUD_CLIENTS", {}).pop(instance_id, None)
     if wipe_orphan:
         wiped = device_cleanup.wipe_orphan_state(
             device_id=instance_id,
@@ -2159,7 +2169,25 @@ def devices_delete(instance_id: str) -> Response:
         status_cache.pop(instance_id, None)
     rebuild_transport_fn()()
     flash(f"Deleted device {result.device.name!r}.", "ok")
+    if result.device.kind_of == "meural" and request.accept_mimetypes.best == "application/json":
+        return jsonify(status="ok", return_url=url_for("auth.settings_area", area="devices"))
     return redirect(url_for("auth.settings_area", area="devices"))
+
+
+@bp.before_request
+def _guard_device_capabilities() -> None:
+    from app.device_loader import supports_capability
+
+    if request.endpoint not in {
+        "auth.devices_calibrate",
+        "auth.devices_calibrate_apply",
+        "auth.devices_send_test_pattern",
+        "auth.devices_test_pattern_preview",
+    }:
+        return
+    device = devices().get((request.view_args or {}).get("instance_id", ""))
+    if device is not None and not supports_capability(device, "calibration"):
+        abort(400, description="This display does not support calibration.")
 
 
 @bp.post("/settings/devices/<instance_id>/calibrate")

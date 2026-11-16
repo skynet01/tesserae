@@ -26,13 +26,15 @@ client and what's been tested on real hardware.
 
 ## Netgear Meural
 
-Open **Settings → Devices → Add device → Netgear Meural**, enter a device id and display name, then click **Add Netgear Meural**. On its page, open **Connection** and choose **Sign in to Netgear**. Complete any verification challenge and choose the frame from your account. Use HTTPS or a trusted local connection when signing in. Tesserae stores the access and refresh tokens with SecretBox; your password and verification code go directly from your browser to Netgear.
+Open **Settings → Devices → Add device → Netgear Meural**. Enter a device id and display name, sign in to Netgear, choose a frame, then add the device. Sign-in expires after 15 minutes if you do not finish adding it. Use HTTPS or a trusted local connection. Tesserae stores encrypted tokens; your password and verification code go directly from your browser to Netgear.
 
-Cloud delivery uploads each changed dashboard once and shows one image at a time. It pauses Meural gallery rotation and scheduling while Tesserae manages the frame. **Resume Meural gallery** restores the saved gallery and rotation settings. Sign-out, frame changes and device deletion also attempt restoration; if it fails, the saved session stays available for a retry.
+Cloud delivery uploads each changed dashboard once and shows one image at a time. It pauses gallery rotation and leaves the frame's scheduler active for native sleep and wake events. **Resume Meural gallery** restores the saved playback settings and removes Tesserae uploads when possible. Sign-out, frame changes and device deletion also attempt restoration. If restoration fails, retry or choose **Remove anyway**. The frame may stay paused; re-enable rotation in the Meural app.
 
-For **Local preview (backup)**, enter the frame's LAN address and keep the renewal interval shorter than its preview duration. Local previews expire, so Tesserae must keep running. A LAN address also enables quiet-hours sleep control with cloud delivery. Keep the frame's unauthenticated local API on a trusted network.
+The frame sleep section reads Netgear's weekly schedule and time zone. **Refresh** reads it again. Edits replace only sleep and wake events, preserve artwork events, and re-read the saved schedule. When it cannot be read, the page labels the fallback as **Tesserae quiet hours**. The LAN API reference exposes current sleep status but no schedule.
 
-Both delivery paths have automated tests with fake transports. Local network mode is untested on a physical frame; cloud sign-in and playback restoration also need a hardware check.
+For **Local preview (backup)**, enter the frame's LAN address and keep the renewal interval shorter than its preview duration. Tesserae must keep running. A LAN address also lets it check whether the frame is sleeping. Without a cloud account, Tesserae uses its own quiet hours and wakes only a frame it put to sleep. Reserve its address in your router; if it changes while asleep in LAN-only mode, wake it in the Meural app.
+
+These paths have automated tests with fake transports. Sign-in, sleep schedules, playback restoration and local delivery still need checks on a physical Meural.
 
 ## tesserae-device-firmware
 
