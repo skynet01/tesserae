@@ -7,7 +7,7 @@
   <h1><i class="ph ph-sparkle" aria-hidden="true"></i> Generative AI</h1>
   <p class="lede">
     The fal.ai, OpenAI, Gemini and kie.ai accounts every widget that paints shares, a ceiling over all of them together,
-    and what the paintings cost. A widget may still carry a key and a budget of its own;
+    and the spending reserved for paintings. A widget may still carry a key and a budget of its own;
     its budget applies inside the ceiling.
   </p>
 </header>
@@ -38,7 +38,7 @@
         <button type="submit" class="btn" formaction="{{ url_for('auth.genai_check_kie') }}">Check credits</button>
         <button type="submit" class="btn btn-primary">Save</button>
       </div>
-      <p class="help">{% if checked_kie %}{{ checked_kie }}{% elif form.has_kie_key %}Key set.{% else %}Add a key from <a href="https://kie.ai/api-key" target="_blank" rel="noopener">kie.ai</a>.{% endif %} Nano Banana costs about US$0.02 per picture, Pro about US$0.09. Paid tasks are collected on retry after a timeout.</p>
+      <p class="help">{% if checked_kie %}{{ checked_kie }}{% elif form.has_kie_key %}Key set.{% else %}Add a key from <a href="https://kie.ai/api-key" target="_blank" rel="noopener">kie.ai</a>.{% endif %} Nano Banana costs about US$0.02 per picture, Pro about US$0.09. Retries collect saved tasks. If a submission has no task ID, automatic retry stays blocked. Check your kie.ai account, then use Repaint after six hours to allow a new paid request.</p>
     </div>
     <div class="field">
       <label for="genai-key">fal.ai API key</label>
@@ -113,7 +113,7 @@
 <section id="genai-spending" data-collapsible class="card">
   {{ card_head('Spending', icon_name='coins', collapse='genai-spending') }}
   <div id="genai-spending-body" data-collapsible-body>
-  <p class="lede">Charged at the models' listed prices as each picture is asked for. Pictures are kept, so a subject in a style costs once.</p>
+  <p class="lede">Limits reserve a model's listed price before each request. Failed and uncertain requests keep their reservation. Collecting a saved task adds no charge.</p>
 
   <div class="dx-stat-tiles dx-genai-tiles">
     <div class="dx-stat-tile">

@@ -233,7 +233,8 @@ def repaint(plugin_id: str, name: str, key: str) -> WerkzeugResponse:
         flash("Painting it again; the current one is kept as an earlier version.", "ok")
     else:
         flash(
-            "It cannot be painted again from here: nothing is known about how it was made, or it is already painting.",
+            c.why_failed(key, data_dir)
+            or "It cannot be painted again from here: nothing is known about how it was made, or it is already painting.",
             "warn",
         )
     return _back(plugin_id, name)

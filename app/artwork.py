@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -87,7 +88,10 @@ class ArtworkError(Exception):
 def _write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_bytes(data)
+    with tmp.open("wb") as out:
+        out.write(data)
+        out.flush()
+        os.fsync(out.fileno())
     os.replace(tmp, path)
 
 
@@ -123,19 +127,22 @@ def host_configure(
 _CHARGE_LOCK = threading.RLock()
 
 
-def ceiling_spent() -> str:
+def ceiling_spent(cents: int = 0) -> str:
     """Why nothing more may be painted server-wide, or empty."""
     ledger, ceilings = _HOST.get("ledger"), _HOST.get("ceilings")
     if ledger is None or ceilings is None:
         return ""
     try:
         daily, monthly = ceilings()
-        if daily < UNLIMITED and ledger.today_cents() >= daily:
+        today = ledger.today_cents()
+        month = ledger.month_cents()
+        if daily < UNLIMITED and (today >= daily or today + cents > daily):
             return "the server's daily ceiling for paintings is reached"
-        if monthly < UNLIMITED and ledger.month_cents() >= monthly:
+        if monthly < UNLIMITED and (month >= monthly or month + cents > monthly):
             return "the server's monthly ceiling for paintings is reached"
     except Exception:
         logger.exception("artwork: the ceiling could not be read")
+        return "the server's painting ceiling could not be read; payment is blocked"
     return ""
 
 
@@ -152,38 +159,19 @@ def charge(
     ``debit`` checks and updates the widget's own daily allowance.
     """
     with _CHARGE_LOCK:
-        why = ceiling_spent()
-        if why:
-            raise ArtworkError(why)
-        debit()
-        _ledger_line(plugin_id, collection, model, int(cents))
-
-
-def refund(
-    plugin_id: str,
-    collection: str,
-    cents: int,
-    model: str,
-    credit: Callable[[], None],
-) -> None:
-    """Hand back a charge for a request the provider definitely refused, so
-    it does not count against the ceilings or the widget's day. ``credit``
-    undoes the widget's own debit. The ledger keeps both lines."""
-    with _CHARGE_LOCK:
-        credit()
-        _ledger_line(plugin_id, collection, model, -int(cents))
-
-
-def _ledger_line(plugin_id: str, collection: str, model: str, cents: int) -> None:
-    # The budget is already debited by now, so a ledger that can't be
-    # written must not abort the painting it was counting.
-    ledger = _HOST.get("ledger")
-    if ledger is None:
-        return
-    try:
-        ledger.append(plugin_id, collection, model, cents)
-    except Exception:
-        logger.exception("artwork: the ledger could not be written")
+        ledger = _HOST.get("ledger")
+        # Serialize ceiling checks and reservations across server processes too.
+        with contextlib.ExitStack() as stack:
+            if ledger is not None:
+                ledger.folder.mkdir(parents=True, exist_ok=True)
+                lock = stack.enter_context((ledger.folder / "charge.lock").open("a"))
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            why = ceiling_spent(cents)
+            if why:
+                raise ArtworkError(why)
+            debit()
+            if ledger is not None:
+                ledger.append(plugin_id, collection, model, int(cents))
 
 
 def cell_id_of(plugin_id: str, options: dict[str, Any]) -> str:
@@ -697,11 +685,6 @@ class Collection:
                         if sub == "archive" and p.suffix in (".jpg", ".png"):
                             out["versions"] += 1
                         p.unlink()
-        # Saved kie.ai tasks go too, or a picture purged while its task was
-        # stuck could never be painted again.
-        import shutil
-
-        shutil.rmtree(f / "kie_tasks", ignore_errors=True)
         self.unhold(data_dir)
         for child in self.children:
             child.purge(data_dir)
@@ -839,29 +822,17 @@ class Collection:
     def _fal_for(self, data_dir: Path, key: str, stop: threading.Event, cap: int) -> fal.FalClient:
         def pay(cents: int, model: str = "") -> None:
             def debit() -> None:
-                if cap < UNLIMITED and self.budget_used(data_dir) >= cap:
+                if cap < UNLIMITED and self.budget_used(data_dir) + cents > cap:
                     raise ArtworkError("the day's budget is spent")
-                self._budget_add(data_dir, cents)
+                with self._q.lock:
+                    _write(
+                        self.folder(data_dir) / "budget.json",
+                        json.dumps({_today(): self.budget_used(data_dir) + cents}).encode(),
+                    )
 
             charge(self.plugin_id, self.name, cents, model, debit)
 
-        def unpay(cents: int, model: str = "") -> None:
-            refund(
-                self.plugin_id,
-                self.name,
-                cents,
-                model,
-                lambda: self._budget_add(data_dir, -cents),
-            )
-
-        return fal.FalClient(key, charge=pay, refund=unpay, stop=stop)
-
-    def _budget_add(self, data_dir: Path, cents: int) -> None:
-        with self._q.lock:
-            _write(
-                self.folder(data_dir) / "budget.json",
-                json.dumps({_today(): max(0, self.budget_used(data_dir) + int(cents))}).encode(),
-            )
+        return fal.FalClient(key, charge=pay, stop=stop)
 
     def start(self, job: Job, cap: int) -> bool:
         """Queue a job; False when its key is already queued or under way."""
@@ -960,17 +931,17 @@ class Collection:
             raw, meta = result["ok"]
             full = {"title": job.title, "payload": job.payload, **meta}
             self.keep(job.key, job.data_dir, raw, full)
-            # Only discard intermediate paid-task results after the whole job is kept.
-            import shutil
-
-            shutil.rmtree(job.fal.task_dir, ignore_errors=True)
+            # Keep paid results until explicit Repaint. Another process may
+            # already be waiting on the same task's lock.
         else:
             self._note_error(job, result.get("why") or "failed")
 
     def _note_error(self, job: Job, why: str) -> None:
         _write(
             self.folder(job.data_dir) / f"{job.key}.err",
-            json.dumps({"why": why, "at": int(time.time()), "title": job.title}).encode(),
+            json.dumps(
+                {"why": why, "at": int(time.time()), "title": job.title, "payload": job.payload}
+            ).encode(),
         )
 
     def stop(self, key: str, data_dir: Path) -> bool:
@@ -1093,9 +1064,6 @@ class Collection:
                 continue
             if self.path(str(r["key"]), data_dir) is not None:
                 continue
-            # A job that was under way has already been charged. It is only
-            # worth starting again when a saved task can be collected for
-            # free; otherwise the restart would buy the picture a second time.
             if r.get("running") and not self.has_paid_task(str(r["key"]), data_dir):
                 continue
             job = self.job(
@@ -1337,14 +1305,24 @@ class Collection:
             held = self.held(data_dir).get(key)
             payload = held.get("payload") if isinstance(held, dict) else None
         if not isinstance(payload, dict) or not payload:
+            error = _read_json(self.folder(data_dir) / f"{key}.err", {})
+            payload = error.get("payload")
+        if not isinstance(payload, dict) or not payload:
+            for dashboard in self.dashboards(data_dir):
+                payload = ((dashboard.get("jobs") or {}).get(key) or {}).get("payload")
+                if isinstance(payload, dict) and payload:
+                    break
+        if not isinstance(payload, dict) or not payload:
             return False
-        self.clear_error(key, data_dir)
-        # Asking again by hand gives up on a submission with nothing to
-        # collect; a task kie.ai is still working on is kept and collected.
+        job = self.job(key, dict(payload), str(meta.get("title") or key), data_dir, fal_key)
         from app import kie_images
 
-        kie_images.clear_unfinished(self.folder(data_dir) / "kie_tasks" / key)
-        job = self.job(key, dict(payload), str(meta.get("title") or key), data_dir, fal_key)
+        try:
+            kie_images.retry(self.folder(data_dir) / "kie_tasks" / key)
+        except kie_images.KieError as err:
+            self._note_error(job, str(err))
+            return False
+        self.clear_error(key, data_dir)
         return self.start(job, self.cap(settings))
 
     # -- an older install's pictures -----------------------------------------

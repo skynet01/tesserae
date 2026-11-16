@@ -1,6 +1,6 @@
 """Paid kie tasks survive a local timeout without submitting or charging twice."""
 
-import hashlib
+import contextlib
 import io
 import json
 import threading
@@ -88,156 +88,15 @@ def test_timeout_then_new_client_collects_once(tmp_path, api):
     assert len(charges) == 1
 
 
-def test_failed_task_leaves_nothing_behind_and_a_retry_starts_a_new_task(tmp_path, api):
-    """kie.ai finished the task without a picture, so there is nothing to
-    collect. The saved task goes, and asking again submits a new one."""
-    calls, state, png = api
+def test_failed_task_is_reported_without_paying_again(tmp_path, api):
+    calls, state, _ = api
     state["status"] = "fail"
     charges = []
-    with pytest.raises(fal.FalError, match="Content declined"):
-        client(tmp_path, charges).generate("nano_banana_t2i", "bird")
-    assert not list(tmp_path.glob("*.json"))
-    state["status"] = "success"
-    assert client(tmp_path, charges).generate("nano_banana_t2i", "bird") == png
-    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 2
-
-
-def test_refused_submission_is_refunded_and_can_be_retried(tmp_path, api, monkeypatch):
-    """A 429 (or any definite refusal) bought nothing: the charge is handed
-    back, no saved task is left, and the next attempt submits again."""
-    _calls, _state, png = api
-    original = kie_images._json
-    refuse = {"on": True}
-
-    def request(url, *args, **kw):
-        if url.endswith("createTask") and refuse["on"]:
-            raise kie_images.KieRefused("kie.ai answered HTTP 429")
-        return original(url, *args, **kw)
-
-    monkeypatch.setattr(kie_images, "_json", request)
-    c = artwork.Collection("kie_refused", "paintings", make=lambda j: (b"", {}), label="Kie")
-    ledger = genai.Ledger(tmp_path / "ledger")
-    artwork.host_configure(ledger=ledger, ceilings=lambda: (100, 100))
-    try:
-
-        def paint():
-            f = c._fal_for(tmp_path, "key", threading.Event(), 100)
-            f.image_service, f.kie_key, f.task_dir = "kie", "key", tmp_path / "tasks"
-            return f.generate("nano_banana_t2i", "bird")
-
-        for _ in range(2):
-            with pytest.raises(fal.FalError, match="429"):
-                paint()
-        assert c.budget_used(tmp_path) == 0
-        assert ledger.today_cents() == 0
-        assert not list((tmp_path / "tasks").glob("*.json"))
-        refuse["on"] = False
-        assert paint() == png
-        assert c.budget_used(tmp_path) == 2
-        assert ledger.today_cents() == 2
-    finally:
-        artwork.host_configure()
-
-
-def test_http_answers_are_refusals_and_silence_is_not(monkeypatch):
-    import urllib.error
-
-    def raising(err):
-        def urlopen(req, timeout=0):
-            raise err
-
-        return urlopen
-
-    def http(code):
-        return urllib.error.HTTPError("https://api.kie.ai", code, "x", {}, None)
-
-    for err, refused in (
-        (http(429), True),
-        (http(402), True),
-        (http(500), False),
-        (http(408), False),
-        (urllib.error.URLError(ConnectionRefusedError()), True),
-        (urllib.error.URLError(TimeoutError()), False),
-    ):
-        monkeypatch.setattr(kie_images.urllib.request, "urlopen", raising(err))
-        with pytest.raises(kie_images.KieError) as got:
-            kie_images._json("https://api.kie.ai/api/v1/jobs/createTask", {}, "key")
-        assert isinstance(got.value, kie_images.KieRefused) is refused, err
-
-
-def test_a_changed_prompt_starts_afresh(tmp_path, api):
-    """A saved task for another prompt would never be collected, so it must
-    not block the picture now being asked for."""
-    calls, state, png = api
-    state["status"] = "timeout"
-    charges = []
-    with pytest.raises(fal.FalError, match="saved"):
-        client(tmp_path, charges, timeout=0.01).generate("nano_banana_t2i", "bird")
-    state["status"] = "success"
-    assert client(tmp_path, charges).generate("nano_banana_t2i", "another bird") == png
-    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 2
-
-
-def test_an_unknown_submission_is_given_up_on_after_an_hour(tmp_path, api):
-    import os
-    import time
-
-    _calls, _state, png = api
-    identity = hashlib.sha256(json.dumps(["bird", "1:1", False, False]).encode()).hexdigest()
-    record = tmp_path / "0.json"
-    record.write_text(json.dumps({"identity": identity, "state": "submitting"}))
-    charges = []
-    with pytest.raises(fal.FalError, match=r"submission.*unknown"):
-        client(tmp_path, charges).generate("nano_banana_t2i", "bird", aspect="1:1")
-    assert not charges
-    old = time.time() - kie_images.UNKNOWN_MAX_AGE_S - 5
-    os.utime(record, (old, old))
-    assert client(tmp_path, charges).generate("nano_banana_t2i", "bird", aspect="1:1") == png
+    for _ in range(2):
+        with pytest.raises(fal.FalError, match="Content declined"):
+            client(tmp_path, charges).generate("nano_banana_t2i", "bird")
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 1
     assert len(charges) == 1
-
-
-def test_repaint_forgets_what_cannot_be_collected_and_purge_forgets_all(tmp_path):
-    c = artwork.Collection("kie_clear", "paintings", make=lambda j: (b"", {}), label="Kie")
-    tasks = c.folder(tmp_path) / "kie_tasks" / "robin"
-    tasks.mkdir(parents=True)
-    (tasks / "0.json").write_text(json.dumps({"identity": "x", "state": "submitting"}))
-    (tasks / "1.json").write_text(json.dumps({"identity": "y", "task_id": "t", "state": "pending"}))
-    assert kie_images.clear_unfinished(tasks) == 1
-    assert [p.name for p in tasks.glob("*.json")] == ["1.json"]
-    assert c.has_paid_task("robin", tmp_path)
-    c.purge(tmp_path)
-    assert not c.has_paid_task("robin", tmp_path)
-
-
-def test_a_charge_that_crosses_the_cap_is_allowed_as_before(tmp_path):
-    """The cap stops the next picture once it is reached. A dearer picture
-    that starts under the cap still paints, as it did before kie.ai."""
-    c = artwork.Collection("kie_cap", "paintings", make=lambda j: (b"", {}), label="Kie")
-    ledger = genai.Ledger(tmp_path / "ledger")
-    artwork.host_configure(ledger=ledger, ceilings=lambda: (12, 12))
-    try:
-        f = c._fal_for(tmp_path, "key", threading.Event(), 12)
-        f._charge(15, "nano_banana_pro")
-        assert c.budget_used(tmp_path) == 15
-        with pytest.raises(artwork.ArtworkError, match=r"budget|ceiling"):
-            f._charge(15, "nano_banana_pro")
-    finally:
-        artwork.host_configure()
-
-
-def test_restart_does_not_buy_an_interrupted_picture_again(tmp_path, monkeypatch):
-    """A job under way at the restart was already charged. Without a saved
-    kie.ai task to collect, starting it again would pay a second time."""
-    made = []
-    c = artwork.Collection(
-        "kie_norequeue", "birds", make=lambda j: made.append(j.key) or (b"", {}), label="Birds"
-    )
-    folder = c.folder(tmp_path)
-    folder.mkdir(parents=True, exist_ok=True)
-    row = {"key": "robin", "payload": {"bird": "robin"}, "title": "Robin", "running": True}
-    (folder / "queue.json").write_text(json.dumps([row]))
-    assert c.resume(tmp_path, fal.DIRECT_ONLY) == 0
-    assert not made
 
 
 def test_uncertain_submission_is_never_repeated(tmp_path, api, monkeypatch):
@@ -413,3 +272,314 @@ def test_render_now_collects_paid_task_when_daily_budget_is_spent(tmp_path, api,
         time.sleep(0.01)
     assert c.picture("robin", tmp_path)[0] == png
     assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 1
+
+
+def test_explicit_retry_archives_terminal_failure_only(tmp_path, api):
+    calls, state, png = api
+    state["status"] = "fail"
+    charges = []
+    with pytest.raises(fal.FalError):
+        client(tmp_path, charges).generate("nano_banana_t2i", "bird")
+    kie_images.retry(tmp_path)
+    state["status"] = "success"
+    assert client(tmp_path, charges).generate("nano_banana_t2i", "bird") == png
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 2
+    assert len(list((tmp_path / "archive").glob("*.json"))) == 1
+
+
+def test_ambiguous_retry_requires_expiry_and_explicit_action(tmp_path, api, monkeypatch):
+    calls, _, _ = api
+    original = kie_images._json
+
+    def request(url, *args, **kwargs):
+        if url.endswith("createTask"):
+            calls.append((url, None, "fake"))
+            raise TimeoutError()
+        return original(url, *args, **kwargs)
+
+    monkeypatch.setattr(kie_images, "_json", request)
+    charges = []
+    with pytest.raises(fal.FalError):
+        client(tmp_path, charges).generate("nano_banana_t2i", "bird")
+    with pytest.raises(kie_images.KieError, match="Repaint"):
+        kie_images.retry(tmp_path)
+    monkeypatch.setattr(kie_images.time, "time", lambda: 10**12)
+    with pytest.raises(fal.FalError, match="Repaint"):
+        client(tmp_path, charges).generate("nano_banana_t2i", "bird")
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 1
+    kie_images.retry(tmp_path)
+    with pytest.raises(fal.FalError):
+        client(tmp_path, charges).generate("nano_banana_t2i", "bird")
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 2
+
+
+def test_download_failure_and_concurrent_collectors_submit_once(tmp_path, api, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    calls, _, png = api
+    charges = []
+
+    def failed_download(url):
+        raise kie_images.KieError("temporary download failure")
+
+    monkeypatch.setattr(kie_images, "_download", failed_download)
+    with pytest.raises(fal.FalError, match="paid task"):
+        client(tmp_path, charges, timeout=0.01).generate("nano_banana_t2i", "bird")
+    monkeypatch.setattr(kie_images, "_download", lambda url: png)
+    with ThreadPoolExecutor(2) as pool:
+        list(
+            pool.map(
+                lambda _: client(tmp_path, charges).generate("nano_banana_t2i", "bird"), range(2)
+            )
+        )
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 1
+    assert len(charges) == 1
+
+
+def test_unusable_download_is_not_paid_for_twice(tmp_path, api, monkeypatch):
+    calls, _, _ = api
+    charges = []
+    monkeypatch.setattr(kie_images, "_download", lambda url: b"not an image")
+    for _ in range(2):
+        raw = client(tmp_path, charges).generate("nano_banana_t2i", "bird")
+        with pytest.raises(OSError):
+            Image.open(io.BytesIO(raw))
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 1
+    assert len(charges) == 1
+
+
+def test_unreadable_ceiling_blocks_payment(tmp_path, api):
+    calls, _, _ = api
+
+    def broken():
+        raise OSError("disk unavailable")
+
+    ledger = genai.Ledger(tmp_path / "ledger")
+    artwork.host_configure(ledger=ledger, ceilings=broken)
+    try:
+        c = artwork.Collection("closed", "images", make=lambda j: (b"", {}), label="Test")
+        f = c._fal_for(tmp_path, "key", threading.Event(), 100)
+        f.image_service, f.kie_key, f.task_dir = "kie", "key", tmp_path / "tasks"
+        with pytest.raises(artwork.ArtworkError, match="ceiling"):
+            f.generate("nano_banana_t2i", "bird")
+        assert not [u for u, _, _ in calls if u.endswith("createTask")]
+        assert ledger.today_cents() == 0
+    finally:
+        artwork.host_configure()
+
+
+def test_ledger_failure_blocks_payment(tmp_path, api, monkeypatch):
+    calls, _, _ = api
+    ledger = genai.Ledger(tmp_path / "ledger")
+    ledger.folder.mkdir()
+    ledger.path.mkdir()  # A ledger that cannot be appended must fail closed.
+    artwork.host_configure(ledger=ledger, ceilings=lambda: (100, 100))
+    try:
+        c = artwork.Collection("disk", "images", make=lambda j: (b"", {}), label="Test")
+        f = c._fal_for(tmp_path, "key", threading.Event(), 100)
+        f.image_service, f.kie_key, f.task_dir = "kie", "key", tmp_path / "tasks"
+        with pytest.raises((OSError, artwork.ArtworkError)):
+            f.generate("nano_banana_t2i", "bird")
+        assert not [u for u, _, _ in calls if u.endswith("createTask")]
+    finally:
+        artwork.host_configure()
+
+
+def test_two_processes_collect_same_task_once(tmp_path, api, monkeypatch):
+    import multiprocessing
+
+    _, _, png = api
+    create_log = tmp_path / "paid.log"
+    original = kie_images._json
+
+    def request(url, *args, **kwargs):
+        if url.endswith("createTask"):
+            with create_log.open("a") as out:
+                out.write("paid\n")
+        return original(url, *args, **kwargs)
+
+    monkeypatch.setattr(kie_images, "_json", request)
+    ctx = multiprocessing.get_context("fork")
+    start = ctx.Event()
+
+    def run():
+        start.wait(3)
+        assert client(tmp_path, []).generate("nano_banana_t2i", "bird") == png
+
+    workers = [ctx.Process(target=run) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    start.set()
+    for worker in workers:
+        worker.join(5)
+        assert worker.exitcode == 0
+        worker.close()
+    assert create_log.read_text() == "paid\n"
+
+
+@pytest.mark.parametrize("pro,cost", [(False, 2), (True, 9)])
+def test_price_matches_budget_and_ledger(tmp_path, api, pro, cost):
+    ledger = genai.Ledger(tmp_path / "ledger")
+    artwork.host_configure(ledger=ledger, ceilings=lambda: (cost, cost))
+    try:
+        c = artwork.Collection("prices", "images", make=lambda j: (b"", {}), label="Test")
+        f = c._fal_for(tmp_path, "key", threading.Event(), cost)
+        f.image_service, f.kie_key, f.task_dir = "kie", "key", tmp_path / "tasks"
+        f.generate("nano_banana_pro" if pro else "nano_banana_t2i", "bird")
+        assert c.budget_used(tmp_path) == ledger.today_cents() == ledger.month_cents() == cost
+        assert len(ledger.rows()) == 1
+    finally:
+        artwork.host_configure()
+
+
+def test_corrupt_ledger_blocks_new_submission(tmp_path, api):
+    calls, _, _ = api
+    ledger = genai.Ledger(tmp_path / "ledger")
+    ledger.folder.mkdir()
+    ledger.path.write_text("partial paid record")
+    artwork.host_configure(ledger=ledger, ceilings=lambda: (100, 100))
+    try:
+        with pytest.raises(artwork.ArtworkError, match="ceiling"):
+            artwork.charge("test", "images", 2, "nano_banana_kie", lambda: None)
+        assert not [u for u, _, _ in calls if u.endswith("createTask")]
+    finally:
+        artwork.host_configure()
+
+
+def test_repaint_failed_first_picture_recovers_its_payload(tmp_path, api, monkeypatch):
+    import time
+
+    calls, state, png = api
+    monkeypatch.setattr(kie_images, "configuration", lambda: ("kie", "key"))
+
+    def make(job):
+        assert job.payload == {"bird": "robin"}
+        return job.fal.generate("nano_banana_t2i", "robin"), {}
+
+    c = artwork.Collection("first_failure", "birds", make=make, label="Birds")
+    state["status"] = "fail"
+    c._run_one(c.job("robin", {"bird": "robin"}, "Robin", tmp_path, fal.DIRECT_ONLY), 100)
+    assert c.path("robin", tmp_path) is None
+    state["status"] = "success"
+    assert c.repaint("robin", tmp_path, fal.DIRECT_ONLY, {})
+    end = time.monotonic() + 3
+    while c.path("robin", tmp_path) is None and time.monotonic() < end:
+        time.sleep(0.01)
+    assert c.picture("robin", tmp_path)[0] == png
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 2
+
+
+@pytest.mark.parametrize("stage", ["create", "poll"])
+def test_malformed_paid_reply_cannot_trigger_widget_fallback(tmp_path, api, monkeypatch, stage):
+    calls, _, _ = api
+    original = kie_images._json
+
+    def request(url, *args, **kwargs):
+        answer = original(url, *args, **kwargs)
+        if (stage == "create" and url.endswith("createTask")) or (
+            stage == "poll" and "recordInfo" in url
+        ):
+            return {"data": ["invalid provider reply"]}
+        return answer
+
+    monkeypatch.setattr(kie_images, "_json", request)
+    charges = []
+    c = client(tmp_path, charges, timeout=0.01)
+    for prompt in ("bird", "widget fallback"):
+        with pytest.raises(fal.FalError):
+            c.generate("nano_banana_t2i", prompt, retries=5)
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 1
+    assert len(charges) == 1
+
+
+def test_crash_between_create_and_task_save_stays_closed(tmp_path, api, monkeypatch):
+    calls, _, _ = api
+    original = kie_images._write
+
+    def disk_failure(path, raw):
+        if path.suffix == ".json" and json.loads(raw).get("task_id"):
+            raise OSError("crash before task id reaches disk")
+        original(path, raw)
+
+    monkeypatch.setattr(kie_images, "_write", disk_failure)
+    charges = []
+    for _ in range(2):
+        with pytest.raises(fal.FalError, match="unknown"):
+            client(tmp_path, charges).generate("nano_banana_t2i", "bird")
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 1
+    assert len(charges) == 1
+
+
+def test_two_processes_cannot_race_past_shared_ceiling(tmp_path, api, monkeypatch):
+    import multiprocessing
+    import time
+
+    original = kie_images._json
+    paid = tmp_path / "paid.log"
+
+    def request(url, *args, **kwargs):
+        if url.endswith("createTask"):
+            with paid.open("a") as out:
+                out.write("paid\n")
+        return original(url, *args, **kwargs)
+
+    monkeypatch.setattr(kie_images, "_json", request)
+    ctx = multiprocessing.get_context("fork")
+    start = ctx.Event()
+
+    def run(number):
+        ledger = genai.Ledger(tmp_path / "ledger")
+        today = ledger.today_cents
+
+        def slow_read():
+            value = today()
+            time.sleep(0.05)  # Both callers could otherwise check the old total.
+            return value
+
+        ledger.today_cents = slow_read
+        artwork.host_configure(ledger=ledger, ceilings=lambda: (2, 2))
+        c = artwork.Collection("race", "images", make=lambda j: (b"", {}), label="Test")
+        f = c._fal_for(tmp_path, "key", threading.Event(), 100)
+        f.image_service, f.kie_key, f.task_dir = "kie", "key", tmp_path / str(number)
+        start.wait(3)
+        with contextlib.suppress(artwork.ArtworkError):
+            f.generate("nano_banana_t2i", "bird")
+
+    workers = [ctx.Process(target=run, args=(n,)) for n in range(2)]
+    for worker in workers:
+        worker.start()
+    start.set()
+    for worker in workers:
+        worker.join(5)
+        assert worker.exitcode == 0
+        worker.close()
+    assert paid.read_text() == "paid\n"
+    ledger = genai.Ledger(tmp_path / "ledger")
+    assert ledger.today_cents() == ledger.month_cents() == 2
+
+
+def test_changed_prompt_keeps_pending_task_protected(tmp_path, api):
+    calls, state, _ = api
+    state["status"] = "timeout"
+    charges = []
+    with pytest.raises(fal.FalError):
+        client(tmp_path, charges, timeout=0.01).generate("nano_banana_t2i", "bird")
+    state["status"] = "success"
+    with pytest.raises(fal.FalError, match="different prompt"):
+        client(tmp_path, charges).generate("nano_banana_t2i", "another bird")
+    assert len([u for u, _, _ in calls if u.endswith("createTask")]) == 1
+
+
+def test_restart_does_not_buy_an_interrupted_picture_again(tmp_path, monkeypatch):
+    """A job under way at the restart was already charged. Without a saved
+    kie.ai task to collect, starting it again would pay a second time."""
+    made = []
+    c = artwork.Collection(
+        "kie_norequeue", "birds", make=lambda j: made.append(j.key) or (b"", {}), label="Birds"
+    )
+    folder = c.folder(tmp_path)
+    folder.mkdir(parents=True, exist_ok=True)
+    row = {"key": "robin", "payload": {"bird": "robin"}, "title": "Robin", "running": True}
+    (folder / "queue.json").write_text(json.dumps([row]))
+    assert c.resume(tmp_path, fal.DIRECT_ONLY) == 0
+    assert not made
