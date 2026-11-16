@@ -685,8 +685,6 @@
               <p class="dx-help">Tesserae displays one image at a time and creates no Meural galleries. Cloud delivery pauses Meural rotation and scheduling. Resume Meural gallery restores your previous gallery and rotation settings.</p>
               {% if account.paused %}
               <p class="dx-help">{{ 'Restoration is pending. Retry Resume Meural gallery.' if account.held else 'Tesserae delivery is paused.' }}</p>
-              {% elif account.cloud %}
-              <p class="dx-help">The last image stays on the frame if Tesserae stops. Resume Meural gallery before shutting Tesserae down to restore native playback.</p>
               {% endif %}
             </div>
             <div class="dx-band-actions">

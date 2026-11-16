@@ -2379,7 +2379,6 @@ def _meural_account_view(device: Device) -> dict[str, Any] | None:
         "frame_url": url_for("auth.meural_select_frame", instance_id=device.id),
         "manage_url": url_for("auth.meural_manage", instance_id=device.id),
         "paused": bool(cfg.get("meural_management_paused")),
-        "cloud": cfg.get("delivery_method") != "local",
         "held": bool(delivery and delivery[0].held(delivery[1]))
         or (Path(device.data_dir) / "meural_sleep.json").is_file(),
     }
