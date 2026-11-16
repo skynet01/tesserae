@@ -9,18 +9,17 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import logging
 import os
-import socket
-import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
+
+from app.file_lock import locked
 
 BASE = "https://api.kie.ai/api/v1"
 UPLOAD_URLS = (
@@ -28,12 +27,11 @@ UPLOAD_URLS = (
     "https://api.kie.ai/api/file-base64-upload",
 )
 POLL_S = 4.0
-# A submission whose outcome is unknown has no task id to collect, so after
-# this long it is given up on and the picture may be asked for again.
-UNKNOWN_MAX_AGE_S = 3600
-# A task kie.ai has not finished by now never will.
-PENDING_MAX_AGE_S = 24 * 3600
-logger = logging.getLogger(__name__)
+SUBMISSION_HOLD_S = 6 * 3600
+UNKNOWN = (
+    "kie.ai submission status is unknown. Automatic retry is blocked. "
+    "Check the kie.ai account; after 6 hours, Repaint explicitly allows a new paid request."
+)
 FIELDS = [
     {"name": "kie_api_key", "secret": True},
     {"name": "image_service", "type": "string", "default": "auto"},
@@ -45,11 +43,6 @@ _TASK_ROOT: Path | None = None
 
 class KieError(Exception):
     """A provider error suitable for the picture's error card."""
-
-
-class KieRefused(KieError):
-    """kie.ai definitely did not take the request: it answered with a
-    refusal, or the request never left. Nothing was bought."""
 
 
 def bind_store(store: Any, task_root: Path | None = None) -> None:
@@ -65,11 +58,12 @@ def configuration() -> tuple[str, str]:
         store = current_app.config.get("SETTINGS_STORE") or store
     vals: dict[str, Any] = {}
     if store is not None:
-        # A key that can't be decrypted must not take the artwork pages down.
         try:
             vals = store.get_for_runtime("app", "images", FIELDS)
         except Exception:
-            logger.exception("kie.ai: the image settings could not be read")
+            raise KieError(
+                "Image service settings could not be read; paid calls are blocked"
+            ) from None
     service = str(vals.get("image_service") or "auto")
     key = str(vals.get("kie_api_key") or os.environ.get("KIE_API_KEY") or "").strip()
     return service if service in SERVICES else "auto", key
@@ -100,23 +94,14 @@ def _json(
         with contextlib.suppress(Exception):
             err.close()
         if err.code in (401, 403):
-            raise KieRefused("kie.ai refused the key") from err
-        # A 4xx is an answer: the request was turned down (429 included).
-        # A 5xx or a 408 says nothing about whether it was acted on.
-        if 400 <= err.code < 500 and err.code != 408:
-            raise KieRefused(f"kie.ai answered HTTP {err.code}") from err
+            raise KieError("kie.ai refused the key") from err
         raise KieError(f"kie.ai answered HTTP {err.code}") from err
-    except urllib.error.URLError as err:
-        # No address, or nothing listening: the request never left.
-        if isinstance(err.reason, (socket.gaierror, ConnectionRefusedError)):
-            raise KieRefused(f"kie.ai could not be reached ({type(err.reason).__name__})") from err
-        raise KieError(f"kie.ai could not be reached ({type(err).__name__})") from err
     except (OSError, ValueError) as err:
         raise KieError(f"kie.ai could not be reached ({type(err).__name__})") from err
     if not isinstance(answer, dict):
         raise KieError("kie.ai sent an invalid answer")
     if answer.get("code", 200) != 200:
-        raise KieRefused(
+        raise KieError(
             "kie.ai: " + str(answer.get("msg") or answer.get("message") or "request refused")[:200]
         )
     return answer
@@ -185,37 +170,40 @@ def _write(path: Path, raw: bytes) -> None:
     tmp.replace(path)
 
 
-@contextlib.contextmanager
-def _locked(folder: Path) -> Iterator[None]:
-    """Hold the folder's lock, so one caller at a time submits or collects.
-    ``fcntl`` does not exist on Windows, and importing it there stopped the
-    whole server from starting, so Windows locks a byte of the file instead.
+def retry(folder: Path) -> None:
+    """An explicit Repaint can retire completed, failed or expired unknown tasks.
+
+    Pending tasks always stay collectible. Expiry never authorizes an automatic
+    submission. Keep the records for account inspection; never refund a reserve
+    locally without proof that the provider returned it.
     """
-    with (folder / ".lock").open("ab") as lock:
-        if sys.platform == "win32":
-            import errno
-            import msvcrt
-
-            fd = lock.fileno()
-            while True:
-                os.lseek(fd, 0, os.SEEK_SET)
-                try:
-                    # Gives up after about ten seconds; a picture takes longer.
-                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                    break
-                except OSError as err:
-                    if err.errno not in (errno.EACCES, errno.EDEADLK):
-                        raise
+    folder.mkdir(parents=True, exist_ok=True)
+    with locked(folder / ".lock"):
+        paths = list(folder.glob("*.json"))
+        for path in paths:
             try:
-                yield
-            finally:
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            yield
+                record = json.loads(path.read_text())
+                if not isinstance(record, dict):
+                    raise ValueError("invalid saved task")
+            except (ValueError, OSError) as err:
+                raise KieError(
+                    "kie.ai saved task could not be read; check the account before retrying"
+                ) from err
+            if record.get("error") or path.with_suffix(".png").exists():
+                continue
+            if record.get("task_id"):
+                return  # Repaint collects the existing task; never retires it.
+            at = float(record.get("at") or path.stat().st_mtime)
+            if time.time() - at < SUBMISSION_HOLD_S:
+                raise KieError(UNKNOWN)
+        archive = folder / "archive"
+        archive.mkdir(exist_ok=True)
+        for path in paths:
+            stem = f"{time.time_ns()}-{path.stem}"
+            path.replace(archive / f"{stem}.json")
+            picture = path.with_suffix(".png")
+            if picture.exists():
+                picture.replace(archive / f"{stem}.png")
 
 
 def generate(
@@ -230,18 +218,15 @@ def generate(
     charge: Callable[[int, str], None],
     timeout: float,
     stop: threading.Event | None = None,
-    refund: Callable[[int, str], None] | None = None,
 ) -> bytes:
-    """Resume a saved task, or submit exactly once. A submission whose outcome
-    is unknown is not repeated until it is :data:`UNKNOWN_MAX_AGE_S` old; one
-    kie.ai definitely refused is forgotten and its charge handed back through
-    ``refund``. Keep completed bytes until the caller has saved its whole
-    artwork job.
+    """Resume a saved task, or submit exactly once. An ambiguous submission is
+    left for account inspection, never automatically paid for a second time.
+    Keep completed bytes until the caller has saved its whole artwork job.
     """
     if not key:
         raise KieError("no kie.ai key")
     folder.mkdir(parents=True, exist_ok=True)
-    with _locked(folder):
+    with locked(folder / ".lock"):
         return _generate(
             key,
             prompt,
@@ -253,71 +238,7 @@ def generate(
             charge=charge,
             timeout=timeout,
             stop=stop,
-            refund=refund,
         )
-
-
-def _forget(path: Path, picture: Path) -> None:
-    for f in (path, picture):
-        with contextlib.suppress(OSError):
-            f.unlink()
-
-
-def clear_unfinished(folder: Path) -> int:
-    """Forget saved tasks that have nothing to collect (no task id): an
-    explicit Repaint is the owner saying to start again. Tasks kie.ai is
-    still working on are kept. How many were forgotten."""
-    n = 0
-    with contextlib.suppress(OSError):
-        for path in folder.glob("*.json"):
-            try:
-                record = json.loads(path.read_text())
-            except (OSError, ValueError):
-                record = None
-            if not isinstance(record, dict) or not record.get("task_id"):
-                _forget(path, path.with_suffix(".png"))
-                n += 1
-    return n
-
-
-def _saved(path: Path, picture: Path, identity: str) -> dict[str, Any] | None:
-    """The saved task to carry on with, or None to start afresh. Raises
-    when a recent submission's outcome is unknown."""
-    try:
-        age = time.time() - path.stat().st_mtime
-    except OSError:
-        return None
-    try:
-        record = json.loads(path.read_text())
-    except (OSError, ValueError):
-        record = None
-    if not isinstance(record, dict):
-        # Unreadable state might describe a paid task, so it fails closed,
-        # but not for ever.
-        if age < UNKNOWN_MAX_AGE_S:
-            raise KieError("kie.ai saved task could not be read; check the account before retrying")
-        _forget(path, picture)
-        return None
-    if record.get("identity") != identity:
-        # The prompt or the model changed, so the saved task's picture is
-        # not the one being asked for and nothing would ever collect it.
-        _forget(path, picture)
-        return None
-    if picture.exists():
-        return record
-    if not record.get("task_id"):
-        if age < UNKNOWN_MAX_AGE_S:
-            raise KieError("kie.ai submission status is unknown; check the account before retrying")
-        _forget(path, picture)
-        return None
-    if age > PENDING_MAX_AGE_S:
-        _forget(path, picture)
-        return None
-    return record
-
-
-class _Failed(KieError):
-    """kie.ai finished the task without a picture."""
 
 
 def _generate(
@@ -332,22 +253,38 @@ def _generate(
     charge: Callable[[int, str], None],
     timeout: float,
     stop: threading.Event | None,
-    refund: Callable[[int, str], None] | None = None,
 ) -> bytes:
     path, picture = folder / f"{slot}.json", folder / f"{slot}.png"
     identity = hashlib.sha256(json.dumps([prompt, aspect, pro, bool(refs)]).encode()).hexdigest()
-    record = _saved(path, picture, identity) if path.exists() else None
-    if record is not None:
+    if path.exists():
+        # Corrupt state must fail closed: it might describe a paid task.
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError) as err:
+            raise KieError(
+                "kie.ai saved task could not be read; check the account before retrying"
+            ) from err
+        if not isinstance(record, dict):
+            raise KieError("kie.ai saved task is invalid; check the account before retrying")
+        if record.get("identity") != identity:
+            raise KieError(
+                "kie.ai has a saved task for a different prompt; collect it before repainting"
+            )
         if picture.exists():
             return picture.read_bytes()
+        if record.get("error"):
+            raise KieError(record["error"])
+        if not record.get("task_id"):
+            raise KieError(UNKNOWN)
     else:
         if stop is not None and stop.is_set():
             raise KieError("stopped")
-        cost, model = (
-            (9, "nano_banana_pro_kie")
-            if pro
-            else (2, "nano_banana_kie" if refs else "nano_banana_kie_t2i")
+        from app.fal import cents_of
+
+        model = (
+            "nano_banana_pro_kie" if pro else "nano_banana_kie" if refs else "nano_banana_kie_t2i"
         )
+        cost = cents_of(model)
         if credits(key) < cost * 2:
             raise KieError("kie.ai has insufficient credits")
         urls = [_upload(ref, key) for ref in refs]
@@ -364,7 +301,7 @@ def _generate(
             else "google/nano-banana",
             "input": inputs,
         }
-        record = {"identity": identity, "state": "submitting"}
+        record = {"identity": identity, "state": "submitting", "at": time.time()}
         _write(path, json.dumps(record).encode())
         try:
             charge(cost, model)
@@ -378,18 +315,8 @@ def _generate(
                 raise KieError("kie.ai returned no task id; check the account before retrying")
             record.update(task_id=tid, state="pending")
             _write(path, json.dumps(record).encode())
-        except KieRefused as err:
-            # Turned down, so nothing was bought: forget the attempt and
-            # hand the charge back, and the next attempt submits again.
-            _forget(path, picture)
-            if refund is not None:
-                with contextlib.suppress(Exception):
-                    refund(cost, model)
-            raise KieError(str(err)) from err
-        except (KieError, OSError) as err:
-            raise KieError(
-                f"kie.ai submission status is unknown ({err}); check the account before retrying"
-            ) from err
+        except Exception as err:
+            raise KieError(f"{UNKNOWN} ({err})") from err
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
@@ -405,10 +332,9 @@ def _generate(
                 or {}
             )
             if data.get("state") == "fail":
-                # Nothing to collect. The record goes, so a Repaint starts
-                # a new task; the caller's error card stops automatic retries.
-                _forget(path, picture)
-                raise _Failed("kie.ai: " + str(data.get("failMsg") or "generation failed")[:200])
+                record["error"] = "kie.ai: " + str(data.get("failMsg") or "generation failed")[:200]
+                _write(path, json.dumps(record).encode())
+                raise KieError(record["error"])
             if data.get("state") == "success":
                 result = data.get("resultJson") or {}
                 if isinstance(result, str):
@@ -419,9 +345,9 @@ def _generate(
                 raw = _download(urls[0])
                 _write(picture, raw)
                 return raw
-        except _Failed:
-            raise
-        except (KieError, ValueError, OSError) as err:
+        except (KieError, ValueError, OSError, TypeError, AttributeError) as err:
+            if record.get("error"):
+                raise
             last = str(err)
         remaining = max(0, deadline - time.monotonic())
         if stop is not None:

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -35,7 +36,6 @@ FIELDS: list[dict[str, Any]] = [
     {"name": "contact", "type": "string", "default": ""},
 ]
 UNLIMITED = 10**9
-KEEP_DAYS = 400  # ledger lines older than this are dropped on the next append
 # A request that cannot exist: a good key gets "not found", a bad one "unauthorised",
 # and nothing is painted or charged
 CHECK_URL = (
@@ -191,7 +191,6 @@ class Ledger:
         self.path = self.folder / "ledger.jsonl"
         self.reset_path = self.folder / "ledger_reset.json"
         self._lock = threading.Lock()
-        self._kept_at = 0.0
 
     def append(self, plugin_id: str, collection: str, model: str, cents: int) -> None:
         now = time.time()
@@ -204,32 +203,24 @@ class Ledger:
             "cents": int(cents),
         }
         with self._lock:
-            with contextlib.suppress(OSError):
-                self.folder.mkdir(parents=True, exist_ok=True)
-                with self.path.open("a", encoding="utf-8") as f:
-                    f.write(json.dumps(row) + "\n")
-            if now - self._kept_at > 86400:
-                self._kept_at = now
-                self._trim(now)
-
-    def _trim(self, now: float) -> None:
-        keep_after = now - KEEP_DAYS * 86400
-        rows = [r for r in self._rows_unlocked() if r["t"] >= keep_after]
-        with contextlib.suppress(OSError):
-            self.path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            self.folder.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
 
     def _rows_unlocked(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         try:
             with self.path.open(encoding="utf-8") as f:
                 for line in f:
-                    with contextlib.suppress(ValueError, TypeError):
-                        r = json.loads(line)
-                        if isinstance(r, dict) and "t" in r:
-                            r["t"] = float(r["t"])
-                            r["cents"] = int(r.get("cents") or 0)
-                            out.append(r)
-        except OSError:
+                    r = json.loads(line)
+                    if not isinstance(r, dict) or "t" not in r or "cents" not in r:
+                        raise ValueError("the painting ledger contains an invalid charge")
+                    r["t"] = float(r["t"])
+                    r["cents"] = int(r["cents"])
+                    out.append(r)
+        except FileNotFoundError:
             pass
         return out
 

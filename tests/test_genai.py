@@ -46,10 +46,11 @@ def test_ledger_counts_today_the_month_and_the_reset(tmp_path):
     )
     led.append("overhead_plate", "paintings", "nano_banana", 4)
     assert led.today_cents() == 4
-    # a broken line is skipped, not fatal
+    # A broken line might hide a reservation: never undercount the ceiling.
     with led.path.open("a") as f:
         f.write("not json\n")
-    assert led.month_cents() == 13
+    with pytest.raises(ValueError):
+        led.month_cents()
 
 
 def test_settings_round_trip_and_the_key_is_what_resolve_key_finds(app, tmp_path, monkeypatch):
