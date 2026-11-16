@@ -1208,6 +1208,28 @@ def create_app(
     )
     app.config["CONDITION_EVALUATOR"] = condition_evaluator
 
+    def _listen_ha_states(stop: Any) -> None:
+        def snapshot(states: list[dict[str, Any]]) -> None:
+            condition_evaluator.receive_ha_snapshot(states)
+            scheduler.conditions_changed()
+
+        while not stop.is_set():
+            plugin = app.config["PLUGIN_REGISTRY"].get("ha_core")
+            module = plugin.server_module if plugin else None
+            watch = getattr(module, "watch_state_changes", None)
+            try:
+                with app.app_context():
+                    if module is not None and callable(watch) and module.is_configured():
+                        watch(stop, snapshot, scheduler.on_ha_state_changed)
+            except Exception as err:
+                # Exception messages can include connection details. Never
+                # expose HA credentials in a reconnect log.
+                logger.warning("HA state events disconnected (%s); retrying", type(err).__name__)
+            finally:
+                condition_evaluator.ha_stream_disconnected()
+                scheduler.conditions_changed()
+            stop.wait(30)
+
     scheduler = Scheduler(
         store=schedule_store,
         rotation_store=rotation_store,
@@ -1223,6 +1245,7 @@ def create_app(
         device_ids_for_page=_device_ids_for_page,
         device_telemetry=app.config["DEVICE_TELEMETRY"],
         condition_evaluator=condition_evaluator,
+        ha_state_listener=_listen_ha_states,
         paused_provider=lambda: bool(settings.get_section("app").get("automation_paused")),
     )
     app.config["SCHEDULER"] = scheduler

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import threading
 import urllib.error
 
 from flask import Flask
@@ -18,6 +19,73 @@ _STATES = [
 
 def _core(app: Flask):
     return app.config["PLUGIN_REGISTRY"].get("ha_core").server_module
+
+
+def test_state_events_subscribe_and_apply_snapshot_changes_and_removal(app, monkeypatch):
+    core = _core(app)
+    stop = threading.Event()
+    sent, received = [], []
+    messages = iter(
+        [
+            {"type": "auth_required"},
+            {"type": "auth_ok"},
+            {"id": 1, "type": "result", "success": True},
+            {
+                "id": 2,
+                "type": "result",
+                "success": True,
+                "result": [{"entity_id": "sensor.printer", "state": "idle"}],
+            },
+            {
+                "id": 1,
+                "type": "event",
+                "event": {
+                    "data": {
+                        "entity_id": "sensor.printer",
+                        "new_state": {"entity_id": "sensor.printer", "state": "running"},
+                    }
+                },
+            },
+            {
+                "id": 1,
+                "type": "event",
+                "event": {"data": {"entity_id": "sensor.printer", "new_state": None}},
+            },
+        ]
+    )
+
+    class Socket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def send(self, message):
+            sent.append(json.loads(message))
+
+        def recv(self, **kwargs):
+            return json.dumps(next(messages))
+
+    def changed(entity_id, state):
+        received.append((entity_id, state))
+        if state is None:
+            stop.set()
+
+    monkeypatch.setattr("websockets.sync.client.connect", lambda *a, **kw: Socket())
+    monkeypatch.setattr(core, "is_configured", lambda: True)
+    monkeypatch.setattr(core, "base_url", lambda: "http://ha")
+    monkeypatch.setattr(core, "token", lambda: "test-token")
+    core.watch_state_changes(stop, lambda states: received.extend(states), changed)
+    assert sent[1:] == [
+        {"id": 1, "type": "subscribe_events", "event_type": "state_changed"},
+        {"id": 2, "type": "get_states"},
+    ]
+    assert received == [
+        {"entity_id": "sensor.printer", "state": "idle"},
+        ("sensor.printer", {"entity_id": "sensor.printer", "state": "running"}),
+        ("sensor.printer", None),
+    ]
 
 
 def test_unconfigured_choices_guide_the_user(app: Flask) -> None:

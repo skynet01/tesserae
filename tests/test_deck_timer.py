@@ -3,7 +3,7 @@ and the scheduler branch that walks a deck's pages on a wall-clock anchor."""
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -111,6 +111,208 @@ def test_quiet_hours_skips_advance(wiring) -> None:
     store.upsert(_deck())
     scheduler._tick_once(datetime(2026, 6, 15, 0, 0, tzinfo=UTC))
     push.push.assert_not_called()
+
+
+def test_priority_print_start_does_not_wait_for_photos_minimum_hold(wiring) -> None:
+    from app.scheduler_conditions import ConditionEvaluator
+    from app.state.conditions import Condition
+
+    scheduler, push, store, _nav = wiring
+    states = [{"entity_id": "sensor.printer", "state": "idle"}]
+    scheduler._condition_evaluator = ConditionEvaluator(ha_get_states=lambda: states)
+    store.upsert(
+        _deck(
+            advance_mode="priority",
+            advance_min_hold_minutes=30,
+            pages=[
+                DeckPage(
+                    page_id="print",
+                    conditions=[
+                        Condition(
+                            source_kind="ha_entity",
+                            source_id="sensor.printer",
+                            operator="==",
+                            value="running",
+                            if_unknown="fail",
+                        )
+                    ],
+                ),
+                DeckPage(page_id="photos", dwell_minutes=60),
+            ],
+        )
+    )
+    scheduler._tick_once(datetime(2026, 11, 16, 11, 0, 47, tzinfo=UTC))
+    assert push.push.call_args.args[0] == "photos"
+    states[0] = {"entity_id": "sensor.printer", "state": "running"}
+    scheduler._tick_once(datetime(2026, 11, 16, 11, 21, 30, tzinfo=UTC))
+    assert push.push.call_args.args[0] == "print"
+
+
+@pytest.fixture
+def priority_frame(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from app.push import PushResult
+    from app.scheduler_conditions import ConditionEvaluator
+    from app.state.conditions import Condition
+    from app.state.deck_nav_store import DeckNavStore
+    from app.state.page_store import Page, PageStore
+
+    class RetainedTransport:
+        def __init__(self):
+            self.sent = []
+            self.latest = {}
+            self.quiet = False
+
+        def push(self, page_id, *, device_ids=None, source="page", **kwargs):
+            for device_id in device_ids or {"panel"}:
+                self.sent.append((device_id, page_id, source))
+                self.latest[device_id] = {"page_id": page_id}
+            return PushResult(status="sent", page_id=page_id)
+
+        def latest_render_for(self, device_id):
+            return self.latest.get(device_id)
+
+        def device_in_quiet_hours(self, device_id):
+            return self.quiet
+
+    pages = PageStore(tmp_path / "pages.json")
+    for pid in ("print", "photos"):
+        pages.save(Page(id=pid, name=pid, device_ids=["panel"], refresh_minutes=15))
+    decks = DeckStore(tmp_path / "decks.json")
+    decks.upsert(
+        _deck(
+            advance_mode="priority",
+            advance_min_hold_minutes=30,
+            advance_smart_sync=True,
+            advance_smart_sync_lead_s=30,
+            pages=[
+                DeckPage(
+                    page_id="print",
+                    conditions=[
+                        Condition(
+                            source_kind="ha_entity",
+                            source_id="sensor.printer",
+                            operator="==",
+                            value="running",
+                            if_unknown="fail",
+                        )
+                    ],
+                ),
+                DeckPage(page_id="photos", dwell_minutes=60),
+            ],
+        )
+    )
+    states = [{"entity_id": "sensor.printer", "state": "idle"}]
+    evaluator = ConditionEvaluator(ha_get_states=lambda: states)
+    evaluator.refresh_ha_states()
+    pusher = RetainedTransport()
+    nav = DeckNavStore(tmp_path / "nav.json")
+    telemetry = SimpleNamespace(always_on=False, is_trusted=True, predicted_next_wake_at=None)
+    scheduler = Scheduler(
+        store=ScheduleStore(tmp_path / "s.json"),
+        deck_store=decks,
+        deck_nav_store=nav,
+        page_store=pages,
+        condition_evaluator=evaluator,
+        push_manager=lambda: pusher,
+        device_telemetry=SimpleNamespace(get=lambda did: telemetry),
+        timezone_provider=lambda: UTC,
+    )
+    monkeypatch.setattr(scheduler, "_maybe_warm_decks", lambda now: None)
+    monkeypatch.setattr(scheduler, "_maybe_warm_ahead", lambda now: None)
+    return scheduler, pusher, nav, states, telemetry
+
+
+def test_printer_event_selects_within_debounce_and_next_wake_gets_print(priority_frame):
+    scheduler, transport, nav, states, telemetry = priority_frame
+    wake = datetime(2026, 11, 16, 11, 0, tzinfo=UTC)
+    scheduler._tick_once(wake)
+    assert nav.current_page("panel", "d1") == "photos"
+    telemetry.predicted_next_wake_at = (wake + timedelta(hours=1)).timestamp()
+    started = wake + timedelta(minutes=21)
+    states[0] = {"entity_id": "sensor.printer", "state": "running"}
+    scheduler.on_ha_state_changed("sensor.printer", states[0], now=started)
+    scheduler._priority_pass(started + timedelta(seconds=1))
+    assert scheduler.live_step_index(scheduler._cycle_records()[0], started) == 0
+    # Smart sync avoids paid work while the frame is asleep. The old nav
+    # record must not let a photos refresh replace the selected print.
+    transport.sent.clear()
+    scheduler._maybe_refresh_pages(started + timedelta(minutes=1))
+    assert transport.sent == []
+    assert nav.current_page("panel", "d1") == "photos"
+    scheduler._priority_pass(wake + timedelta(minutes=59, seconds=30))
+    assert transport.latest_render_for("panel")["page_id"] == "print"
+    assert nav.current_page("panel", "d1") == "print"
+    scheduler.prepare_device_wake("panel", now=wake + timedelta(hours=1))
+    assert transport.latest_render_for("panel")["page_id"] == "print"
+    transport.sent.clear()
+    scheduler._maybe_refresh_pages(wake + timedelta(hours=1, minutes=1))
+    assert all(page != "photos" for _, page, _ in transport.sent)
+    transport.push("photos", device_ids={"panel"}, source="page")
+    assert transport.latest_render_for("panel")["page_id"] == "photos"
+    # An unchanged selection must not undo an explicit push at wake.
+    scheduler.prepare_device_wake("panel", now=wake + timedelta(hours=1, minutes=2))
+    assert transport.latest_render_for("panel")["page_id"] == "photos"
+
+
+def test_unpredicted_wake_rechecks_printer_before_serving_frame(priority_frame):
+    scheduler, transport, nav, states, telemetry = priority_frame
+    now = datetime(2026, 11, 16, 11, 0, tzinfo=UTC)
+    scheduler._tick_once(now)
+    telemetry.predicted_next_wake_at = (now + timedelta(hours=1)).timestamp()
+    states[0] = {"entity_id": "sensor.printer", "state": "running"}
+    scheduler.prepare_device_wake("panel", now=now + timedelta(minutes=21))
+    assert transport.latest_render_for("panel")["page_id"] == "print"
+    assert nav.current_page("panel", "d1") == "print"
+
+
+def test_printer_event_is_debounced_without_waiting_for_a_timer_tick(priority_frame):
+    scheduler, transport, nav, states, telemetry = priority_frame
+    now = datetime(2026, 11, 16, 11, 0, tzinfo=UTC)
+    scheduler._tick_once(now)
+    telemetry.always_on = True
+    started = now + timedelta(minutes=1)
+    states[0] = {"entity_id": "sensor.printer", "state": "running"}
+    scheduler.on_ha_state_changed("sensor.printer", states[0], now=started)
+    transport.sent.clear()
+    assert scheduler._priority_pass(started + timedelta(seconds=0.5)) == 0.5
+    assert transport.sent == []
+    scheduler._priority_pass(started + timedelta(seconds=1))
+    assert nav.current_page("panel", "d1") == "print"
+
+
+@pytest.mark.parametrize("gate", ["quiet", "global_pause", "device_pause", "manual_hold"])
+def test_event_and_wake_checks_preserve_automation_holds(priority_frame, tmp_path, gate):
+    from app.state.device_rotation_state_model import DeviceRotationState
+    from app.state.device_rotation_state_store import DeviceRotationStateStore
+
+    scheduler, transport, nav, states, _telemetry = priority_frame
+    now = datetime(2026, 11, 16, 11, 0, tzinfo=UTC)
+    scheduler._tick_once(now)
+    states[0] = {"entity_id": "sensor.printer", "state": "running"}
+    if gate == "quiet":
+        transport.quiet = True
+    elif gate == "global_pause":
+        scheduler._paused_provider = lambda: True
+    else:
+        store = DeviceRotationStateStore(tmp_path / "holds.json")
+        field = "automation_pause_until" if gate == "device_pause" else "override_until"
+        store.upsert(
+            DeviceRotationState(
+                device_id="panel",
+                rotation_id="d1",
+                step_index=1,
+                **{field: now + timedelta(hours=1)},
+            )
+        )
+        scheduler._rotation_state_store = store
+    transport.sent.clear()
+    scheduler.on_ha_state_changed("sensor.printer", states[0], now=now)
+    scheduler._priority_pass(now + timedelta(seconds=1))
+    scheduler.prepare_device_wake("panel", now=now + timedelta(minutes=1))
+    assert transport.sent == []
+    assert nav.current_page("panel", "d1") == "photos"
 
 
 # -- parity: windows, min-hold (Tier A + B via the rotation engine) -------

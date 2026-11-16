@@ -122,11 +122,9 @@ class Rotation(BaseModel):
     # the default so existing rotations behave exactly as before.
     mode: Literal["scheduled", "priority"] = "scheduled"
 
-    # Minimum time the currently-pushed step holds before the
-    # scheduler is allowed to re-evaluate and switch. Prevents flap
-    # when a condition input (HA sensor reading near a threshold,
-    # time-window edge, etc.) oscillates. Applies to both modes;
-    # manual "fire now" bypasses it.
+    # Minimum hold for scheduled cycles. Priority routes follow their
+    # current conditions without a dwell hold; manual "fire now" also
+    # bypasses it.
     min_hold_minutes: int = Field(default=5, ge=0, le=120)
 
     @field_validator("days_of_week")
