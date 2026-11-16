@@ -157,6 +157,11 @@ async function processResponse(response, attempt = 0) {
   clearSecrets();
   document.getElementById("login").style.display = "none";
   document.getElementById("done").style.display = "block";
+  if (typeof BroadcastChannel === "function") {
+    const channel = new BroadcastChannel("tesserae-meural");
+    channel.postMessage({ type: "signed-in", login: window.location.pathname });
+    channel.close();
+  }
 }
 
 function isWafError(error) {

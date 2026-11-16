@@ -14,6 +14,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
+- Share Meural account controls between device settings and the sign-in-before-add flow.
+
 - Add Netgear Meural cloud and LAN delivery, account sign-in and native sleep sync.
 - Duplicate a dashboard from its lineup tile, keeping its conditions and timing overrides.
 - Let Home Assistant conditions count as not met when their sensor cannot be read.
