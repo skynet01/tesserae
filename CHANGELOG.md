@@ -30,6 +30,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Lineups: only the lineup on the glass is Live. Others with an open window are Queued (with when they land, or what they wait behind) or Waiting (with the condition), and overlapping lineups get their own lane on the day bar.
 - Lineups and the lineup editor: a conditional dashboard says when it shows, and a priority lineup reads as ranked choices with a fallback instead of a loop.
 - Skip pre-renders while displays are paused or asleep and when dashboard conditions fail; discard stale automated follow-ups.
+- New dashboard editor: hiding the tab saves pending edits after earlier autosaves, so the latest edit survives.
 - Buttons: a press on a lineup starts from the dashboard the lineup is showing, not its first one. Refresh re-sends that dashboard and Next goes to the one after it. This applies to every lineup that runs on a schedule, with or without conditions. Next and Previous also skip dashboards whose conditions fail, and History says where the press landed. A button set to a fixed step still goes to that step.
 - Device page: a display's **Own hours** switch under Quiet hours can be turned off again. Saving with it off left it on, because the page sent nothing for that section. The window you set is kept for when you switch it back on. (#523)
 - Lineup editor: a dashboard switched from canvas to grid lists its items again (its leftover canvas data counted as a second widget).
