@@ -135,7 +135,7 @@
       loginForm.style.display = "none";
       codeForm.style.display = "block";
       setBusy(false);
-      setStatus("Enter the verification code sent by NETGEAR.");
+      setStatus("Enter the code Netgear sent you.");
       codeInput.focus();
       return;
     }
@@ -164,6 +164,20 @@
     clearSecrets();
     document.getElementById("login").style.display = "none";
     document.getElementById("done").style.display = "block";
+    announceSignedIn();
+  }
+
+  // Tell the settings tab that opened this page to refresh its Meural block.
+  // Same-origin only, and the message carries no account data.
+  function announceSignedIn() {
+    if (typeof BroadcastChannel !== "function") return;
+    try {
+      const channel = new BroadcastChannel("tesserae-meural");
+      channel.postMessage({ type: "signed-in", login: window.location.pathname });
+      channel.close();
+    } catch {
+      /* The settings tab can still be reloaded by hand. */
+    }
   }
 
   function isWafError(error) {
