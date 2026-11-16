@@ -1,0 +1,50 @@
+{
+  "tesserae_compat": "1.x",
+  "name": "Netgear Meural",
+  "icon": "frame-corners",
+  "version": "0.1.0",
+  "description": "Sign in to Netgear and choose a frame. Tesserae displays one image at a time and creates no Meural galleries. Cloud delivery pauses Meural's gallery rotation and scheduler; Resume Meural gallery restores your previous playback. Local previews are available as a backup. An optional LAN address enables quiet-hours sleep control.",
+  "renderers": ["pi_png"],
+  "transport": "push",
+  "panel": {
+    "w": 1080,
+    "h": 1920,
+    "orientation": "portrait",
+    "name": "Meural Canvas (1080x1920)",
+    "gamut": "rgb24"
+  },
+  "buttons": false,
+  "battery": false,
+  "renderer_settings": false,
+  "config_schema": {
+    "delivery_method": {
+      "type": "select",
+      "group": "Delivery",
+      "label": "Delivery method",
+      "default": "cloud",
+      "choices": [
+        {"value": "cloud", "label": "Cloud image"},
+        {"value": "local", "label": "Local preview (backup)"}
+      ],
+      "help": "Cloud uploads only changed pages and displays one image at a time, without creating galleries. Local previews need Tesserae running and repeat the upload before the preview expires."
+    },
+    "host": {
+      "type": "string",
+      "group": "Delivery",
+      "label": "Frame address",
+      "default": "",
+      "placeholder": "192.168.1.50",
+      "help": "Optional for cloud delivery; used for quiet-hours control. Required for local previews. Filled from your account when available. Reserve its address in your router."
+    },
+    "refresh_interval_s": {
+      "type": "int",
+      "group": "Delivery",
+      "label": "Renew preview every",
+      "default": 15,
+      "min": 5,
+      "max": 3600,
+      "help": "Seconds between local uploads of the current page. This must be shorter than the frame's preview duration, which is often 30 seconds. New pages are sent immediately.",
+      "show_if": {"delivery_method": "local"}
+    }
+  }
+}
