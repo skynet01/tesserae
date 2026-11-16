@@ -12,7 +12,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Added
 
-- Add local Netgear Meural display support with preview renewal and quiet hours.
+- Add Netgear Meural cloud sign-in, persistent artwork delivery and optional local previews.
 - Add kie.ai as a selectable image service, with saved tasks and shared spending limits.
 - Add a dashboard editor with guided steps, live preview and widget option examples. Switch back to classic from its help menu.
 

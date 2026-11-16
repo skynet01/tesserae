@@ -71,6 +71,7 @@ def setup(app):
     settings = app.config["SETTINGS_STORE"]
     cfg = dict((settings.get_section("devices") or {}).get("lounge") or {})
     cfg["host"] = "192.0.2.10"
+    cfg["delivery_method"] = "local"
     settings.patch_section("devices", {"lounge": cfg})
     frame = Frame()
     clock = [100.0]
@@ -114,7 +115,8 @@ def test_device_is_native_lan_and_preserves_portrait(setup):
         assert image.size == (108, 192)
     from app.settings.index_routes import _transport_badge
 
-    assert _transport_badge(setup.device) == "LAN"
+    with setup.app.app_context():
+        assert _transport_badge(setup.device) == "LAN"
 
 
 def test_renews_unchanged_preview_before_expiry(setup):
@@ -136,6 +138,58 @@ def test_new_composition_is_sent_without_waiting(setup):
     pub.on_push()
     assert len(setup.frame.uploads) == 2
     assert setup.frame.uploads[0] != setup.frame.uploads[1]
+
+
+def test_cloud_is_default_and_unchanged_images_are_not_uploaded_again(setup, monkeypatch):
+    class Cloud:
+        account_id = "17"
+
+        def __init__(self):
+            self.uploads = []
+            self.loads = []
+
+        def create_gallery(self, name):
+            return "300"
+
+        def upload(self, image, name):
+            self.uploads.append(image)
+            return "100"
+
+        def add_to_gallery(self, gallery, item):
+            pass
+
+        def load_gallery(self, target, gallery):
+            self.loads.append((target, gallery))
+
+    cloud = Cloud()
+    cfg = dict(setup.settings.get_section("devices")["lounge"])
+    cfg.pop("delivery_method")
+    cfg["cloud_device_id"] = "16036"
+    setup.settings.patch_section("devices", {"lounge": cfg})
+    monkeypatch.setattr("app.meural_cloud.get_cloud_client", lambda *a: cloud)
+    for moment in (100, 115, 200):
+        setup.clock[0] = moment
+        setup.publisher().poll_once()
+    assert len(cloud.uploads) == 1
+    assert cloud.loads == [("16036", "300")]
+    assert setup.frame.uploads == []
+    with setup.app.app_context():
+        from app.settings.index_routes import _transport_badge
+
+        assert _transport_badge(setup.device) == "Cloud"
+
+
+def test_cloud_error_does_not_silently_enable_local_previews(setup, monkeypatch):
+    cfg = dict(setup.settings.get_section("devices")["lounge"])
+    cfg.update(delivery_method="cloud", cloud_device_id="16036")
+    setup.settings.patch_section("devices", {"lounge": cfg})
+
+    def unavailable(*args):
+        raise MeuralError("cloud unavailable")
+
+    monkeypatch.setattr("app.meural_cloud.get_cloud_client", unavailable)
+    setup.publisher().poll_once()
+    assert setup.frame.uploads == []
 
 
 def test_failed_upload_can_retry_and_is_not_marked_delivered(setup):
