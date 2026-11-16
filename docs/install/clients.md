@@ -26,11 +26,13 @@ client and what's been tested on real hardware.
 
 ## Netgear Meural
 
-Open **Settings → Devices → Add device → Netgear Meural**, enter a device id and display name, then click **Add Netgear Meural**. On its page, enter its LAN address under **Frame address** and save. Tesserae sends a temporary preview through the frame's local API and renews it while running. Set **Renew preview every** shorter than your frame's preview duration. When renewal stops, the frame returns to its own artwork.
+Open **Settings → Devices → Add device → Netgear Meural**, enter a device id and display name, then click **Add Netgear Meural**. On its page, open **Connection** and choose **Sign in to Netgear**. Complete any verification challenge and choose the frame from your account. Use HTTPS or a trusted local connection when signing in. Tesserae stores the access and refresh tokens with SecretBox; your password and verification code go directly from your browser to Netgear.
 
-Enable **Sleep through quiet hours** to put the frame to sleep during that window. Tesserae wakes it afterward only if it put it to sleep; a frame asleep through its own controls stays asleep. Keep the frame's unauthenticated local API on a trusted network.
+Cloud delivery uploads each changed dashboard once and shows one image at a time. It pauses Meural gallery rotation and scheduling while Tesserae manages the frame. **Resume Meural gallery** restores the saved gallery and rotation settings. Sign-out, frame changes and device deletion also attempt restoration; if it fails, the saved session stays available for a retry.
 
-Local network mode is untested on a physical frame. Automated tests use fake transports. Cloud sign-in and persistent artwork delivery are separate work.
+For **Local preview (backup)**, enter the frame's LAN address and keep the renewal interval shorter than its preview duration. Local previews expire, so Tesserae must keep running. A LAN address also enables quiet-hours sleep control with cloud delivery. Keep the frame's unauthenticated local API on a trusted network.
+
+Both delivery paths have automated tests with fake transports. Local network mode is untested on a physical frame; cloud sign-in and playback restoration also need a hardware check.
 
 ## tesserae-device-firmware
 
