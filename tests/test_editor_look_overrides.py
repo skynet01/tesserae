@@ -222,6 +222,24 @@ def test_status_bar_does_not_make_look_visible():
     assert editor_look_context(page, [])["look_visible"] is False
 
 
+@pytest.mark.parametrize("plugins", [["news_front_pages"], ["news_front_pages", "webpage"]])
+def test_independent_widgets_skip_the_look_step(app, plugins):
+    store = app.config["PAGE_STORE"]
+    store.save(
+        Page(
+            id="independent",
+            name="Independent",
+            cells=[
+                Cell(id=f"c{i}", plugin=plugin, x=i * 400, y=0, w=400, h=480)
+                for i, plugin in enumerate(plugins)
+            ],
+        )
+    )
+    body = app.test_client().get("/pages/independent").text
+    step = body.split('id="ev2-step-look"', 1)[1].split(">", 1)[0]
+    assert "hidden" in step
+
+
 @pytest.mark.parametrize(
     "settings", [{"gap": 12}, {"corner_radius": 8}, {"custom_css": ".cell {opacity:.8}"}]
 )
