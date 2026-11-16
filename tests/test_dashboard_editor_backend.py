@@ -533,9 +533,8 @@ def test_classic_panel_view_names_each_groups_display(app, monkeypatch):
     monkeypatch.setattr("app.page_routes.preview_groups_for_page", lambda *a, **kw: groups)
     app.config["SETTINGS_STORE"].update_section("ui", {"dashboard_editor": "classic"})
     body = app.test_client().get("/pages/home").text
-    assert (
-        "gamut=waveshare_e6&amp;dither=floyd-steinberg&amp;w=800&amp;h=480&amp;device=desk" in body
-    )
-    assert "gamut=mono&amp;dither=floyd-steinberg&amp;w=296&amp;h=128&amp;device=tag%201" in body
+    # A bound group names its display; the renderer owns its palette and dither.
+    assert 'device=desk&amp;w=800&amp;h=480"' in body
+    assert 'device=tag%201&amp;w=296&amp;h=128"' in body
     assert "gamut=gray_4&amp;dither=floyd-steinberg&amp;w=400&amp;h=300&quot;" not in body
     assert 'w=400&amp;h=300"' in body

@@ -16,6 +16,16 @@ from app.state.page_store import Cell, Page
 FREE_TEXT_TYPES = {"string", "text", "number", "textarea", "variables_textarea", "time"}
 EXCEPTIONS = {
     ("ha_core", "settings", "token"): "User-supplied access token; never suggest a credential.",
+    **{
+        ("news_illustrated", "settings", name): "Provider credential; never suggest an API key."
+        for name in (
+            "groq_api_key",
+            "kie_api_key",
+            "gemini_api_key",
+            "pollinations_api_key",
+            "huggingface_api_key",
+        )
+    },
 }
 
 
