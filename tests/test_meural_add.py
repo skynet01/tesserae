@@ -34,6 +34,7 @@ def test_add_meural_opens_its_page_without_pairing(app: Flask, transport: str) -
         "/settings/devices/add",
         data={
             "kind": "meural",
+            "delivery_method": "local",
             "id": "Meural Test",
             "name": "Example frame",
             "transport": transport,
@@ -43,7 +44,9 @@ def test_add_meural_opens_its_page_without_pairing(app: Flask, transport: str) -
     assert response.status_code == 302
     assert response.location == "/settings/devices/meural_test"
     device = app.config["DEVICE_REGISTRY"].get("meural_test")
-    assert app.config["SETTINGS_STORE"].get_section("devices")["meural_test"]["host"] == "192.0.2.10"
+    assert (
+        app.config["SETTINGS_STORE"].get_section("devices")["meural_test"]["host"] == "192.0.2.10"
+    )
     assert device is not None
     assert device.name == "Example frame"
     assert device.kind_of == "meural"
@@ -64,16 +67,19 @@ def test_add_meural_opens_its_page_without_pairing(app: Flask, transport: str) -
 def test_add_meural_rejects_invalid_id_and_duplicate(app: Flask) -> None:
     client = app.test_client()
     invalid = client.post(
-        "/settings/devices/add", data={"kind": "meural", "id": "../bad"}, follow_redirects=True
+        "/settings/devices/add",
+        data={"kind": "meural", "delivery_method": "local", "id": "../bad"},
+        follow_redirects=True,
     )
     assert b"Device id must be" in invalid.data
     assert app.config["DEVICE_REGISTRY"].get("../bad") is None
     client.post(
-        "/settings/devices/add", data={"kind": "meural", "id": "meural_test", "name": "First"}
+        "/settings/devices/add",
+        data={"kind": "meural", "delivery_method": "local", "id": "meural_test", "name": "First"},
     )
     duplicate = client.post(
         "/settings/devices/add",
-        data={"kind": "meural", "id": "meural_test", "name": "Second"},
+        data={"kind": "meural", "delivery_method": "local", "id": "meural_test", "name": "Second"},
         follow_redirects=True,
     )
     assert b"already in use" in duplicate.data
