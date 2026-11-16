@@ -3442,9 +3442,15 @@ def _when_of(deck: Deck | None) -> dict[str, Any]:
     return {"mode": "between", "start": start, "end": end, "days": days, "kind": kind}
 
 
-def _recent_sent(page_id: str, limit: int = 8) -> list[dict[str, Any]]:
+def _recent_sent(
+    page_id: str, limit: int = 8, device_id: str | None = None
+) -> list[dict[str, Any]]:
     """The pictures this dashboard last sent, newest first (``[{thumb, at}]``):
-    a draw widget's recent photos, from the push log. Only frames still on disk."""
+    a draw widget's recent photos, from the push log. Only frames still on disk.
+
+    ``device_id`` keeps the frames sent to that display when there are any: a
+    dashboard also shown on a display of another shape sent pictures of that
+    shape too (a landscape TV's frames in a portrait frame's strip)."""
     from app.lineup_thumbs import sent_thumb_url
 
     events = current_app.config.get("EVENT_LOG")
@@ -3454,6 +3460,9 @@ def _recent_sent(page_id: str, limit: int = 8) -> list[dict[str, Any]]:
         rows = events.list(type="push", target=page_id, statuses=("sent", "ok"), limit=40)
     except Exception:
         return []
+    if device_id:
+        mine = [r for r in rows if device_id in (r.extra.get("device_ids") or [])]
+        rows = mine or rows
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in rows:
@@ -3496,7 +3505,7 @@ def _editor_page(
         "icon": summary.get("icon", ""),
         "items": summary.get("items", {}),
         "recent": (
-            _recent_sent(page.id)
+            _recent_sent(page.id, device_id=device_id)
             if (summary.get("items") or {}).get("mode") == "draw"
             or (summary.get("items") or {}).get("empty")
             else []

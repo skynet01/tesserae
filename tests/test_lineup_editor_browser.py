@@ -59,10 +59,14 @@ def test_add_dashboard_offers_optional_conditions(real, conditional, width):
         browser, page, errors = _open(p, base, "/decks/morning/edit", width=width)
         page.locator("[data-picker]").click()
         page.locator('[data-add="clock"]').click()
-        assert page.get_by_text("Only show while", exact=False).is_visible()
-        assert "Skipped while conditions fail" in page.locator("#dxe-picker").inner_text()
+        # Optional, in the picker, closed until asked for.
+        cond = page.locator("#dxe-picker .dxe-pick-cond")
+        assert cond.get_by_text("Only show while", exact=False).is_visible()
+        assert cond.get_attribute("open") is None
         assert "clock" not in _steps(page)
         if conditional:
+            cond.locator("> summary").click()
+            assert "Skipped while a condition fails" in cond.inner_text()
             page.locator("#dxe-picker").get_by_role(
                 "button", name="Add condition", exact=True
             ).click()
@@ -402,8 +406,9 @@ def test_dashboards_reorder_items_add_remove_and_discard(real: tuple[str, Flask]
         page.locator("[data-picker]").click()
         assert page.locator('#dxe-picker [data-add="photos"]').count() == 1
         page.locator('#dxe-picker [data-add="photos"]').click()
-        page.locator("[data-add-cancel]").click()
+        page.locator("#dxe-picker .wizard-footer [data-add-cancel]").click()
         assert _steps(page) == ["clock", "climate"]
+        page.locator("[data-picker]").click()
         page.locator('#dxe-picker [data-add="photos"]').click()
         page.locator("[data-add-confirm]").click()
         assert _steps(page) == ["clock", "climate", "photos"]
@@ -472,9 +477,12 @@ def test_new_lineup_steps_and_creates(real: tuple[str, Flask]) -> None:
         assert page.locator(".dxe-done").count() == 2
         assert "No dashboards yet." in page.locator(".dxe-empty").first.inner_text()
         assert create.is_disabled()
-        page.locator('[data-add="photos"]').click()
+        page.locator("[data-picker]").click()
+        page.locator('#dxe-picker [data-add="photos"]').click()
         page.locator("[data-add-confirm]").click()
-        page.locator('[data-add="clock"]').click()
+        page.locator("[data-picker]").click()
+        page.locator('#dxe-picker [data-add="clock"]').click()
+        page.locator("#dxe-picker .dxe-pick-cond > summary").click()
         page.locator("#dxe-picker").get_by_role("button", name="Add condition", exact=True).click()
         page.locator("#dxe-picker .cp-row").get_by_role("combobox").first.select_option(
             "time_window"
@@ -1063,7 +1071,7 @@ def test_collection_widgets_stack_and_plain_ones_do_not(
     monkeypatch.setattr(
         routes,
         "_recent_sent",
-        lambda page_id, limit=8: recent[:limit] if page_id != "list_cold" else [],
+        lambda page_id, limit=8, device_id=None: recent[:limit] if page_id != "list_cold" else [],
     )
     pages = app.config["PAGE_STORE"]
     decks = app.config["DECK_STORE"]
