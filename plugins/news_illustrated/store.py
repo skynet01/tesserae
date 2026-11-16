@@ -56,7 +56,10 @@ def write_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        tmp.write_bytes(data)
+        with tmp.open("wb") as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
         os.replace(tmp, path)
     finally:
         with contextlib.suppress(OSError):
@@ -65,8 +68,15 @@ def write_atomic(path: Path, data: bytes) -> None:
 
 def read_json(path: Path, default: Any) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if path.name in (JOBS, STATE, STORIES) and not isinstance(value, dict):
+            raise ValueError("invalid run state")
+        return value
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError) as err:
+        if path.name in (JOBS, STATE, STORIES):
+            raise RuntimeError("Saved news run state is unreadable; paid calls are blocked") from err
         return default
 
 

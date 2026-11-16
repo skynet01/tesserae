@@ -128,11 +128,12 @@ def test_pictures_are_named_by_content_and_only_ours_are_served(tmp_path: Path) 
     assert store.prune_images(tmp_path, set(), now=time.time() + 2 * 3600) == 1
 
 
-def test_stories_round_trip_and_bad_files_read_as_empty(tmp_path: Path) -> None:
+def test_stories_round_trip_and_bad_files_block_paid_work(tmp_path: Path) -> None:
     store.save_stories(tmp_path, [{"title": "A"}, {"title": ""}, "junk"])  # type: ignore[list-item]
     assert store.load_stories(tmp_path) == [{"title": "A"}]
     (tmp_path / store.STORIES).write_text("{not json", encoding="utf-8")
-    assert store.load_stories(tmp_path) == []
+    with pytest.raises(RuntimeError, match="paid calls are blocked"):
+        store.load_stories(tmp_path)
     assert not list(tmp_path.glob(".*.tmp")), "no temp files left behind"
 
 

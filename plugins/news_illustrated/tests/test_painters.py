@@ -8,11 +8,15 @@ import json
 import urllib.parse
 
 import pytest
-
 from plugins.news_illustrated import net, painters
 from plugins.news_illustrated.tests.fakes import Call, FakeNet, ok, ok_json, picture
 
-KEYS = {"kie": "kie-key", "gemini": "gem-key", "pollinations": "pol-key", "huggingface": "hf-key"}
+KEYS = {
+    "kie": "kie-key",
+    "gemini": "gem-key",
+    "pollinations": "pol-key",
+    "huggingface": "hf-key",
+}
 RESULT_URL = "https://tempfile.example.com/result.png"
 
 
@@ -410,7 +414,9 @@ def test_kie_task_id_is_saved_before_polling_and_collected_later(fake_net: FakeN
     assert later.record == {"task_id": "t9", "at": 5000.0}
 
 
-def test_an_old_kie_task_is_not_collected(fake_net: FakeNet) -> None:
+def test_an_old_kie_task_is_collected_without_a_new_submission(
+    fake_net: FakeNet,
+) -> None:
     memo = painters.TaskMemo(
         {"task_id": "old", "at": 0.0}, clock=lambda: painters.KIE_RESUME_S + 1.0
     )
@@ -418,7 +424,7 @@ def test_an_old_kie_task_is_not_collected(fake_net: FakeNet) -> None:
     fake_net.on(painters.KIE_RECORD_URL, _kie_success())
     fake_net.on(RESULT_URL, ok(picture(), "image/png"))
     assert _kie_paint(memo)[0] is not None
-    assert len(fake_net.to(painters.KIE_CREATE_URL)) == 1
+    assert len(fake_net.to(painters.KIE_CREATE_URL)) == 0
 
 
 def test_an_unanswered_kie_create_is_not_resent_at_once(fake_net: FakeNet) -> None:
@@ -482,10 +488,32 @@ def test_dying_during_the_create_still_blocks_a_second_create(fake_net: FakeNet)
     assert "may have been accepted" in log[-1]
 
 
-def test_a_kie_result_that_is_not_a_picture_is_not_collected_again(fake_net: FakeNet) -> None:
+def test_a_kie_result_that_is_not_a_picture_is_not_collected_again(
+    fake_net: FakeNet,
+) -> None:
     fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
     fake_net.on(painters.KIE_RECORD_URL, _kie_success())
     fake_net.on(RESULT_URL, ok("<html>expired</html>"))
     memo = painters.TaskMemo()
     assert _kie_paint(memo)[0] is None
-    assert memo.record is None
+    assert memo.record["failed"]
+    assert _kie_paint(memo)[0] is None
+    assert len(fake_net.to(painters.KIE_CREATE_URL)) == 1
+
+
+def test_pending_kie_does_not_pay_another_provider(fake_net):
+    fake_net.on(painters.KIE_CREATE_URL, ok_json({"data": {"taskId": "t1"}}))
+    fake_net.on(painters.KIE_RECORD_URL, _kie_record("generating"))
+    fake_net.on(painters.HUGGINGFACE_URL, ok(picture()))
+    assert _paint(_settings("kie", "huggingface"))[0] is None
+    assert len(fake_net.to(painters.KIE_CREATE_URL)) == 1
+    assert len(fake_net.to(painters.HUGGINGFACE_URL)) == 0
+
+
+@pytest.mark.parametrize("answer", [{"code": 200, "data": {}}, {"data": ["malformed"]}, {"code": 500, "msg": "error after accepting"}])
+def test_kie_missing_task_id_is_ambiguous_even_on_http_200(fake_net, answer):
+    fake_net.on(painters.KIE_CREATE_URL, ok_json(answer))
+    memo = painters.TaskMemo()
+    assert _kie_paint(memo)[0] is None
+    assert _kie_paint(memo)[0] is None
+    assert len(fake_net.to(painters.KIE_CREATE_URL)) == 1

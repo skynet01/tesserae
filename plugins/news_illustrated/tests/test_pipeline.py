@@ -9,9 +9,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
-from plugins.news_illustrated import feeds, painters, pipeline, store, summarise
-from plugins.news_illustrated.tests.fakes import FakeNet, article_page, ok, ok_json, picture, rss
+from plugins.news_illustrated import feeds, net, painters, pipeline, store, summarise
+from plugins.news_illustrated.tests.fakes import (
+    FakeNet,
+    article_page,
+    ok,
+    ok_json,
+    picture,
+    rss,
+)
 
 FEEDS = {
     "Tech": "https://hnrss.example.com/frontpage",
@@ -54,6 +60,112 @@ def _run(data_dir: Path, cfg: pipeline.Config | None = None, **kw: Any) -> pipel
     log: list[str] = []
     out = pipeline.run_edition(cfg or _cfg(), data_dir, log=log.append, **kw)
     return out
+
+
+def test_restart_during_groq_does_not_pay_twice(fake_net, tmp_path):
+    _news(fake_net)
+
+    def crash(call):
+        raise SystemExit("restart after accepting payment")
+
+    fake_net.routes.insert(0, (summarise.GROQ_URL, [crash]))
+    with pytest.raises(SystemExit):
+        _run(tmp_path)
+    fake_net.routes.pop(0)
+    _run(tmp_path)
+    assert len(fake_net.to(summarise.GROQ_URL)) == 3  # once per source, including the lost reply
+
+
+@pytest.mark.parametrize(
+    "provider,url",
+    [
+        ("huggingface", painters.HUGGINGFACE_URL),
+        ("gemini", "https://generativelanguage.googleapis.com/"),
+        ("pollinations", painters.POLLINATIONS_URL),
+    ],
+)
+@pytest.mark.parametrize("failure", ["crash", "timeout", "invalid_picture"])
+def test_restart_during_sync_picture_does_not_pay_twice(fake_net, tmp_path, provider, url, failure):
+    _news(fake_net)
+    cfg = _cfg(**{f"{provider}_api_key": "key", "provider_order": provider})
+
+    def crash(call):
+        if failure == "crash":
+            raise SystemExit("restart after accepting payment")
+        return net.Reply(0, error="timed out") if failure == "timeout" else ok("invalid picture")
+
+    fake_net.routes.insert(0, (url, [crash]))
+    if failure == "crash":
+        with pytest.raises(SystemExit):
+            _run(tmp_path, cfg)
+    else:
+        _run(tmp_path, cfg)
+    fake_net.routes.pop(0)
+    _run(tmp_path, cfg)
+    assert len(fake_net.to(url)) == 3
+
+
+def test_sync_picture_is_reused_after_local_save_failure(fake_net, tmp_path, monkeypatch):
+    _news(fake_net)
+    save = store.save_image
+
+    def full_disk(*args):
+        raise OSError("disk full after paid image arrived")
+
+    monkeypatch.setattr(store, "save_image", full_disk)
+    _run(tmp_path)
+    monkeypatch.setattr(store, "save_image", save)
+    _run(tmp_path)
+    assert len(store.load_stories(tmp_path)) == 3
+    assert len(fake_net.to(painters.HUGGINGFACE_URL)) == 3
+    assert len(fake_net.to(summarise.GROQ_URL)) == 3
+
+
+def test_corrupt_paid_journal_blocks_all_paid_calls(fake_net, tmp_path):
+    _news(fake_net)
+    (tmp_path / "jobs.json").write_text("partial journal")
+    with pytest.raises(RuntimeError, match="paid calls are blocked"):
+        _run(tmp_path)
+    assert len(fake_net.to(summarise.GROQ_URL)) == 0
+    assert len(fake_net.to(painters.HUGGINGFACE_URL)) == 0
+
+
+def test_expired_ambiguous_kie_never_resubmits(fake_net, tmp_path):
+    _news(fake_net)
+    cfg = _cfg(kie_api_key="key", provider_order="kie")
+    # Simulate a provider that accepted the task but lost its response.
+    _run(tmp_path, cfg, budget=_fake_budget)
+    for job in store.load_jobs(tmp_path).values():
+        job["kie"]["at"] = 1
+        store.save_job(tmp_path, job["story"]["story_id"], job)
+    _run(tmp_path, cfg, budget=_fake_budget)
+    assert len(fake_net.to(painters.KIE_CREATE_URL)) == 3
+
+
+def test_completion_refreshes_grid_and_canvas_after_slow_run(fake_net, tmp_path):
+    from types import SimpleNamespace as NS
+
+    from flask import Flask
+
+    _news(fake_net)
+    calls = []
+    app = Flask(__name__)
+    app.config["PAGE_STORE"] = NS(
+        list=lambda: [
+            NS(id="grid", cells=[NS(plugin="news_illustrated")], canvas=None),
+            NS(id="canvas", cells=[], canvas=NS(els=[NS(widget="news_illustrated")])),
+            NS(id="other", cells=[], canvas=None),
+        ]
+    )
+    app.config["SCHEDULER"] = NS(refresh_pages_for_update=lambda ids, **kw: calls.append(ids))
+    runner = pipeline.Runner()
+    with app.app_context():
+        assert runner.start(_cfg(), tmp_path, tz=None, reason="manual")
+    _wait(runner, tmp_path)
+    end = time.monotonic() + 2
+    while not calls and time.monotonic() < end:
+        time.sleep(0.01)
+    assert calls == [{"grid", "canvas"}]
 
 
 def test_an_edition_makes_one_illustrated_story_per_source(
@@ -224,11 +336,11 @@ def test_no_paid_run_for_a_day_already_past(tmp_path: Path) -> None:
     assert pipeline.due(tmp_path, "06:05", _at("2026-10-25 06:05")) == "schedule"
 
 
-def test_before_run_at_a_first_run_and_pictures_still_go_ahead(
+def test_before_run_at_only_already_paid_pictures_go_ahead(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     night = _at("2026-10-25 03:00")
-    assert pipeline.due(tmp_path, "06:05", night) == "schedule", "no stories at all"
+    assert pipeline.due(tmp_path, "06:05", night) == "", "do not pay for a past day"
     store.save_stories(tmp_path, [{"title": "x"}])
     store.save_state(tmp_path, {"edition": "2026-10-23"})
     monkeypatch.setattr(pipeline, "owed", lambda data_dir, now: True)
@@ -298,6 +410,16 @@ def test_only_one_run_at_a_time(tmp_path: Path) -> None:
     assert not runner.running(tmp_path)
 
 
+def test_stale_schedule_request_cannot_repeat_a_finished_run(fake_net, tmp_path):
+    _news(fake_net)
+    runner = pipeline.Runner()
+    assert runner.start(_cfg(), tmp_path, tz=None, reason="schedule")
+    _wait(runner, tmp_path)
+    assert not pipeline.Runner().start(_cfg(), tmp_path, tz=None, reason="schedule", force=True)
+    assert len(fake_net.to(summarise.GROQ_URL)) == 3
+    assert len(fake_net.to(painters.HUGGINGFACE_URL)) == 3
+
+
 def test_a_run_that_crashes_releases_the_lock(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -351,7 +473,7 @@ def test_the_edition_is_the_one_the_run_started_in(
 
     monkeypatch.setattr(pipeline, "run_edition", made_one)
     runner = pipeline.Runner()
-    assert runner.start(_cfg(), tmp_path, tz=None, reason="schedule")
+    assert runner.start(_cfg(), tmp_path, tz=None, reason="manual")
     _wait(runner, tmp_path)
     state = store.load_state(tmp_path)
     assert state["edition"] == "2026-10-24"

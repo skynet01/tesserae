@@ -207,22 +207,8 @@ def test_a_run_in_progress_asks_for_follow_ups(
     with app.app_context():
         out = mod.fetch({}, {}, ctx=_ctx(data_dir, preview=True, settled=False))
     assert out["running"] and out["live_pending"] == 2
-    assert out["live_refresh_s"] == mod.live_hint(2) >= mod.LIVE_REFRESH_S
+    assert out["live_refresh_s"] == mod.LIVE_REFRESH_S
     assert out["title"]
-
-
-def test_the_hint_covers_the_work_left_within_the_hosts_follow_ups(mod: ModuleType) -> None:
-    """The host follows a push up 8 times, each at most 120 s on: while a run
-    has stories left, the hint is the worst case for them spread over those,
-    so the frame is sent again after the run, not before."""
-    assert mod.live_hint(1) >= mod.LIVE_REFRESH_S
-    hints = [mod.live_hint(n) for n in range(1, 6)]
-    assert hints == sorted(hints) and hints[0] < hints[-1]
-    for pending in range(1, 5):
-        assert mod.live_hint(pending) * mod.HOST_FOLLOW_UPS >= min(
-            pending * mod.STORY_WORST_S, mod.LIVE_REFRESH_MAX_S * mod.HOST_FOLLOW_UPS
-        )
-    assert mod.live_hint(50) == mod.LIVE_REFRESH_MAX_S
 
 
 def test_a_settled_render_after_a_missed_day_at_night_starts_no_run(

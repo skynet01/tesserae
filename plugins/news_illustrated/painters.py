@@ -25,6 +25,7 @@ import time
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from . import net, text
@@ -167,6 +168,25 @@ class TaskMemo:
     record: dict[str, Any] | None = None
     save: Callable[[dict[str, Any] | None], None] = lambda record: None
     clock: Callable[[], float] = time.time
+    folder: Path | None = None
+
+    def once(self, name: str, submit: Callable[[], bytes]) -> bytes:
+        """Sync APIs cannot collect a lost reply. Never submit them twice."""
+        if self.folder is None:
+            return submit()
+        from . import store
+
+        self.folder.mkdir(parents=True, exist_ok=True)
+        picture = self.folder / f"{name}.img"
+        marker = self.folder / f"{name}.submitted"
+        if picture.exists():
+            return picture.read_bytes()
+        if marker.exists():
+            raise PaintError("an earlier paid request may have completed; not resending")
+        store.write_atomic(marker, b"submitted")
+        raw = submit()
+        store.write_atomic(picture, raw)
+        return raw
 
     def remember(self, record: dict[str, Any] | None) -> None:
         self.record = record
@@ -257,16 +277,22 @@ def paint(
         log(f"Painting with {name}")
         attempt = Attempt(settings, key, detailed, short, budget, stopped, memo, log)
         try:
-            raw = _CALLS[name](attempt)
+            raw = (
+                memo.once(name, lambda name=name, attempt=attempt: _CALLS[name](attempt))
+                if name != "kie"
+                else _CALLS[name](attempt)
+            )
         except PaintError as err:
             log(f"{name}: {err}")
+            if name == "kie" and memo.record and not memo.record.get("failed"):
+                return None  # Collect the paid task before buying a fallback.
             continue
         try:
             jpeg, size = to_jpeg(raw)
         except PaintError as err:
             log(f"{name}: {err}")
             if name == "kie":
-                memo.remember(None)  # collecting that task again would give the same bytes
+                memo.remember({**(memo.record or {}), "failed": True})
             continue
         log(f"{name}: {size[0]}x{size[1]} picture{usage_note(attempt.usage)}")
         return Painting(jpeg, name, size, dict(attempt.usage))
@@ -306,18 +332,17 @@ def kie(a: Attempt) -> bytes:
     until it has a picture, download that."""
     auth = {"Authorization": f"Bearer {a.key}"}
     earlier = a.memo.record or {}
-    age = a.memo.clock() - float(earlier.get("at") or 0)
-    if earlier.get("task_id") and age < KIE_RESUME_S:
+    if earlier.get("failed"):
+        raise PaintError("an earlier task failed; not ordering another for this story")
+    if earlier.get("task_id"):
         task_id = str(earlier["task_id"])
         a.log("kie: collecting the task an earlier run paid for")
-    elif earlier.get("unanswered") and age < KIE_UNANSWERED_S:
+    elif earlier.get("unanswered"):
         raise PaintError(
             "an earlier task request went unanswered and may have been accepted; "
-            "not sending another yet"
+            "not sending another automatically"
         )
     else:
-        if earlier.get("task_id"):
-            a.log("kie: the task an earlier run paid for is over 6 hours old; giving up on it")
         task_id = _kie_create(a, auth)
     return _kie_collect(a, task_id, auth)
 
@@ -348,7 +373,7 @@ def collect(
         jpeg, size = to_jpeg(raw)
     except PaintError as err:
         log(f"kie: {err}")
-        memo.remember(None)  # collecting it again would give the same bytes
+        memo.remember({**(memo.record or {}), "failed": True})
         return None
     return Painting(jpeg, "kie", size)
 
@@ -370,7 +395,7 @@ def _kie_collect(a: Attempt, task_id: str, auth: dict[str, str]) -> bytes:
         if state == "success":
             image_url = _kie_result_url(_dig(record, "data", "resultJson"))
             if not image_url:
-                a.memo.remember(None)
+                a.memo.remember({**(a.memo.record or {}), "failed": True})
                 raise PaintError("finished without a picture URL")
             got = net.request(image_url, timeout=a.budget.timeout(60))
             a.budget.check()
@@ -380,7 +405,7 @@ def _kie_collect(a: Attempt, task_id: str, auth: dict[str, str]) -> bytes:
             # saved: a crash before that collects the same task again.
             return got.body
         if state == "fail":
-            a.memo.remember(None)
+            a.memo.remember({**(a.memo.record or {}), "failed": True})
             raise PaintError(
                 f"generation failed ({_dig(record, 'data', 'failMsg') or 'no reason'})"
             )
@@ -404,11 +429,13 @@ def _kie_create(a: Attempt, auth: dict[str, str]) -> str:
     )
     answer = created.json()
     task_id = _dig(answer, "data", "taskId")
-    if task_id:
+    if isinstance(task_id, str) and task_id:
         a.memo.remember({"task_id": str(task_id), "at": a.memo.clock()})
         a.budget.check()
         return str(task_id)
-    if created.status == 0 or created.status >= 500:
+    code = answer.get("code") if isinstance(answer, dict) else None
+    refused = 400 <= created.status < 500 or (isinstance(code, int) and 400 <= code < 500)
+    if not refused:
         # No answer (or a server error) after the request went out: kie may
         # have accepted and be charging for it. The in-flight mark stays, so
         # it is not asked again for a while.

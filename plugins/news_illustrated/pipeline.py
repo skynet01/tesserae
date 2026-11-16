@@ -273,7 +273,7 @@ def due(data_dir: Path, run_at: str, now: datetime) -> str:
 
 def _scheduled(state: dict[str, Any], data_dir: Path, current: str, now: datetime) -> bool:
     stories = store.load_stories(data_dir)
-    if stories and current != now.date().isoformat():
+    if current != now.date().isoformat():
         # Before run_at the edition is yesterday's, already past. A display
         # coming home at 03:00 would otherwise pay for it, and again at run_at
         # for today's. The stories on disk stay up until then.
@@ -361,7 +361,23 @@ def make_story(
         found = feeds.article(item, log)
         log(f"Summarising {len(found.text)} characters from the {found.origin}")
         summary_usage: dict[str, Any] = {}
-        summary = summarise.summarise(
+        story = {
+            "story_id": sid,
+            "source_key": source.key,
+            "source": source.label,
+            "title": item.title,
+            "summary": text.normalise(text.first_words(found.text, cfg.summary_words))
+            or item.title,
+            "url": item.link if item.link.startswith(("http://", "https://")) else "",
+            "date": today.isoformat(),
+            "image": "",
+            "provider": "",
+        }
+        job = {"story": story}
+        # Save usable fallback text BEFORE Groq. A lost response must not cost
+        # another summary request on restart.
+        store.save_job(data_dir, sid, job)
+        story["summary"] = summarise.summarise(
             item.title,
             found.text,
             api_key=cfg.summary_key,
@@ -374,20 +390,7 @@ def make_story(
         )
         if summary_usage:
             usage.add("groq", summary_usage.get("tokens"))
-        story = {
-            "story_id": sid,
-            "source_key": source.key,
-            "source": source.label,
-            "title": item.title,
-            "summary": summary,
-            "url": item.link if item.link.startswith(("http://", "https://")) else "",
-            "date": today.isoformat(),
-            "image": "",
-            "provider": "",
-        }
-        if summary_usage:
             story["usage"] = {"summary": {"provider": "groq", **summary_usage}}
-        job = {"story": story}
         store.save_job(data_dir, sid, job)
     if stopped():
         return previous, "kept" if previous else "missing", sid
@@ -396,7 +399,7 @@ def make_story(
         job["kie"] = task
         store.save_job(data_dir, sid, job)
 
-    memo = painters.TaskMemo(job.get("kie"), save=remember)
+    memo = painters.TaskMemo(job.get("kie"), save=remember, folder=data_dir / "paid" / sid)
     painting = painters.paint(
         str(story["title"]),
         str(story["summary"]),
@@ -421,7 +424,10 @@ def make_story(
             "image": image,
             "provider": painting.provider,
             "size": list(painting.size),
-            "usage": {**(story.get("usage") or {}), "picture": _picture_usage(painting)},
+            "usage": {
+                **(story.get("usage") or {}),
+                "picture": _picture_usage(painting),
+            },
             "made": int(time.time()),
         },
         "made",
@@ -530,17 +536,19 @@ def _settle(data_dir: Path, sid: str, committed: dict[str, Any] | None) -> None:
     if not job:
         return
     painted = bool(committed and committed.get("story_id") == sid and committed.get("image"))
-    if painted or not holds(job, time.time()):
+    if painted:
         store.save_job(data_dir, sid, None)
+        import shutil
+
+        shutil.rmtree(data_dir / "paid" / sid, ignore_errors=True)
 
 
 def _prune_jobs(data_dir: Path, cfg: Config) -> None:
     """Keep only attempts that protect money, for sources still configured."""
     keys = {s.key for s in cfg.sources}
-    now = time.time()
     store.keep_jobs(
         data_dir,
-        lambda job: (job.get("story") or {}).get("source_key") in keys and holds(job, now),
+        lambda job: (job.get("story") or {}).get("source_key") in keys,
     )
 
 
@@ -698,6 +706,30 @@ class _Run:
     edition: str
     done: int = 0
     label: str = ""
+    completed: Callable[[], None] = lambda: None
+
+
+def _completion_refresh() -> Callable[[], None]:
+    """One delivery after all stories land, even after push retries ran out."""
+    from flask import current_app, has_app_context
+
+    if not has_app_context():
+        return lambda: None
+    app = current_app._get_current_object()
+
+    def refresh() -> None:
+        pages, scheduler = app.config.get("PAGE_STORE"), app.config.get("SCHEDULER")
+        if pages is None or scheduler is None:
+            return
+        ids = {
+            page.id
+            for page in pages.list()
+            if any(c.plugin == PLUGIN_ID for c in page.cells)
+            or (page.canvas and any(e.widget == PLUGIN_ID for e in page.canvas.els))
+        }
+        scheduler.refresh_pages_for_update(ids, source=PLUGIN_ID)
+
+    return refresh
 
 
 class Runner:
@@ -757,8 +789,23 @@ class Runner:
                 logger.warning("%s: could not open the run lock", PLUGIN_ID)
                 return False
             now = datetime.now(tz)
+            current = edition(now, cfg.run_at)
+            try:
+                if reason == "schedule" and not _scheduled(
+                    store.load_state(data_dir), data_dir, current, now
+                ):
+                    lock.release()
+                    return False
+            except Exception:
+                lock.release()
+                return False
             run = _Run(
-                data_dir, threading.Event(), len(cfg.sources), lock, edition(now, cfg.run_at)
+                data_dir,
+                threading.Event(),
+                len(cfg.sources),
+                lock,
+                current,
+                completed=_completion_refresh(),
             )
             self._runs[data_dir] = run
         try:
@@ -843,6 +890,11 @@ class Runner:
             finally:
                 self._finish(run)
                 _tray_close(run, outcome, failure)
+                if outcome and outcome.made:
+                    try:
+                        run.completed()
+                    except Exception:
+                        logger.exception("%s: completion refresh failed", PLUGIN_ID)
 
 
 RUNNER = Runner()
