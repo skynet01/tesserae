@@ -333,6 +333,8 @@ def devices_add() -> Response:
     renderer_loader.seed_device_settings_from_base(renderers(), settings_store())
     rebuild_transport_fn()()
     flash(f"Added device {result.device.name!r}.", "ok")
+    if result.device.kind_of == "meural":
+        return _device_page_redirect(result.device.id)
     return redirect(
         url_for(
             "auth.settings_area",

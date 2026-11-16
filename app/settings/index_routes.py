@@ -2380,6 +2380,8 @@ def _transport_badge(device: Device) -> str:
     if device.transport == "rest":
         return "REST"
     if device.transport == "push":
+        if device.kind_of == "meural":
+            return "LAN"
         if samsung_frame.is_samsung_frame_device(device) or fraimic.is_fraimic_device(device):
             return "LAN"
         return "TCP" if visionect_routes.is_visionect_device(device) else "HA"
