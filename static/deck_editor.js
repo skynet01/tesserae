@@ -135,6 +135,7 @@
     open: new Set(),
     editing: new Set(),
     rawOpen: new Set(), // step ids whose conditions' raw JSON is open
+    condOpen: new Set(), // step ids whose Conditions editor was opened with "Add a condition"
     grid: {}, // page id -> {q, offset, data, busy, open}
     strip: {}, // page id -> {data} (the first few items)
     // page id -> the item chosen with a tile's arrows, as on the Lineups page:
@@ -159,8 +160,11 @@
   const stepHadConditions = new Set(
     S.steps.filter((s) => s.conditions && s.conditions.length).map((s) => s.id)
   );
-  // Keep an existing rule editable after its last condition is removed.
+  // Conditions are a per-dashboard rule. A step that has some shows its
+  // editor; one that has none offers "Add a condition", which opens it. Only
+  // a step whose editor is showing posts its conditions.
   const hasConditions = (s) => stepHadConditions.has(s.id) || !!(s.conditions || "").trim();
+  const showConditions = (s) => hasConditions(s) || ui.condOpen.has(s.id);
   let saved = snapshot();
   const dirty = () => snapshot() !== saved;
 
@@ -1482,9 +1486,9 @@
         if (cur && !opts.some(([v]) => v === cur)) opts.push([cur, `every ${mins(Number(cur))}`]);
         keep = `<label class="dxe-mini"><span>${esc(readyLabel())}</span><select class="dxe-in dxe-select" data-fk="ov-${esc(s.id)}" data-override="${esc(s.id)}">${opts.map(([v, l]) => `<option value="${v}"${v === cur ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`;
       }
-      const cond = hasConditions(s)
+      const cond = showConditions(s)
         ? `<div class="dxe-mini dxe-cond"><span>Conditions</span><div class="condition-picker" data-condition-picker><textarea rows="2" spellcheck="false" data-cond="${esc(s.id)}" data-fk="cond-${esc(s.id)}" placeholder="[]" aria-label="Conditions for ${esc(p.name)}">${esc(s.conditions)}</textarea></div><small class="dxe-soft">Skipped while they fail.</small></div>`
-        : "";
+        : `<div class="dxe-mini dxe-cond"><span>Conditions</span><button type="button" class="dxe-link" data-add-cond="${esc(s.id)}" data-fk="addcond-${esc(s.id)}" aria-label="Add a condition for ${esc(p.name)}">Add a condition</button><small class="dxe-soft">Skips this dashboard while a condition fails.</small></div>`;
       edit = `<div class="dxe-edit">${showFor}${upd}${keep}${cond}</div>${updatesWarning(s, "edit")}`;
     }
     return (
@@ -2633,7 +2637,7 @@
           `override[${s.id}]`,
           s.override === null || s.override === undefined ? "" : String(s.override)
         );
-      if (hasConditions(s)) fd.append(`conditions[${s.id}]`, s.conditions || "");
+      if (showConditions(s)) fd.append(`conditions[${s.id}]`, s.conditions || "");
       if (s.refresh !== (pageOf(s.id).refresh || 0))
         fd.append(`page_refresh[${s.id}]`, String(s.refresh));
       if (s.pin !== undefined) fd.append(`pin[${s.id}]`, s.pin);
@@ -2970,6 +2974,19 @@
       if (pos < 0) delete ui.choice[d.drawPos];
       else if (c && c.mode === "draw") c.pos = pos;
       return itemChanged();
+    }
+    if (d.addCond) {
+      ui.condOpen.add(d.addCond);
+      draw();
+      // The picker is built a moment after the draw; its first control takes focus.
+      queueMicrotask(() =>
+        root
+          .querySelector(`[data-cond="${CSS.escape(d.addCond)}"]`)
+          ?.closest("[data-condition-picker]")
+          ?.querySelector("button, select, input, summary, textarea")
+          ?.focus()
+      );
+      return;
     }
     if (d.edit) {
       if (ui.editing.has(d.edit)) ui.editing.delete(d.edit);
