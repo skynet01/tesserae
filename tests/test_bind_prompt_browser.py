@@ -140,12 +140,16 @@ def _steps(page: Any) -> list[str]:
 
 
 def _other(page: Any, page_id: str) -> Any:
-    """The Add button of a dashboard bound to another display, in the picker."""
+    """A dashboard bound to another display, in the picker (opened if closed)."""
     if not page.locator("#dxe-picker").count():
         page.locator("[data-picker]").click()
-    if not page.locator(".dxe-picks.is-other").count():
-        page.locator("[data-elsewhere-toggle]").click()
-    return page.locator(f'.dxe-picks.is-other [data-add="{page_id}"]')
+    return page.locator(f'#dxe-pg-other ~ [data-add="{page_id}"]')
+
+
+def _add_other(page: Any, page_id: str) -> None:
+    """Pick it and press Add: the bind prompt comes up over the picker."""
+    _other(page, page_id).click()
+    page.locator("#dxe-picker [data-add-confirm]").click()
 
 
 def test_adding_a_dashboard_from_another_display_asks_first(real: tuple[str, Flask]) -> None:
@@ -156,33 +160,35 @@ def test_adding_a_dashboard_from_another_display_asks_first(real: tuple[str, Fla
         browser, page, errors = _editor(p, base)
         chip = _other(page, "photos")
         assert chip.count() == 1
-        assert page.locator('.dxe-picks:not(.is-other) [data-add="weather"]').count() == 1
+        assert page.locator('#dxe-pg-here ~ [data-add="weather"]').count() == 1
 
-        # Cancel: the dialog closes, the step is not added, nothing is bound.
-        chip.click()
+        # Cancel: the prompt closes, the step is not added, nothing is bound; the
+        # picker stays open with the choice.
+        _add_other(page, "photos")
         dlg = page.locator("dialog.bind-dialog")
         assert dlg.get_by_role("heading").inner_text() == "Show “Google Photos” on hallway?"
         assert dlg.get_by_role("checkbox", name="frame").is_checked()
         _answer(page, "Cancel")
         assert _steps(page) == ["clock"]
+        assert page.locator("#dxe-picker").is_visible()
 
-        # Escape cancels too.
-        chip.click()
+        # Escape cancels the prompt only.
+        page.locator("#dxe-picker [data-add-confirm]").click()
+        dlg.wait_for()
         page.keyboard.press("Escape")
         page.locator("dialog.bind-dialog").wait_for(state="detached")
         assert _steps(page) == ["clock"]
+        assert page.locator("#dxe-picker").is_visible()
 
-        # Binding consent comes before adding; the display binding waits for Save.
-        chip.click()
-        _move(page)
-        # Binding consent comes first; conditions are optional and can be cancelled.
-        assert page.locator("#dxe-add-conditions").input_value() == ""
+        # Closing the picker after all adds nothing.
+        page.locator("#dxe-picker .wizard-footer [data-add-cancel]").click()
         assert _steps(page) == ["clock"]
-        page.locator("[data-add-cancel]").click()
         assert _bound(app, "photos") == ["frame"]
-        _other(page, "photos").click()
+
+        # Bind agreed: added at once; the display binding waits for Save.
+        _add_other(page, "photos")
         _move(page)
-        page.locator("[data-add-confirm]").click()
+        page.locator("#dxe-picker").wait_for(state="detached")
         assert _steps(page) == ["clock", "photos"]
         assert _bound(app, "photos") == ["frame"]  # nothing changes until Save
         _save(page)
@@ -199,13 +205,14 @@ def test_leaving_the_ticks_keeps_the_other_display(real: tuple[str, Flask]) -> N
     with sync_playwright() as p:
         browser, page, errors = _editor(p, base)
         _other(page, "photos").click()
-        _also(page)
-        assert _steps(page) == ["clock"]
+        page.locator("#dxe-picker .dxe-pick-cond > summary").click()
         page.locator("#dxe-picker").get_by_role("button", name="Add condition", exact=True).click()
         page.locator("#dxe-picker .cp-row").get_by_role("combobox").first.select_option(
             "time_window"
         )
-        page.locator("[data-add-confirm]").click()
+        page.locator("#dxe-picker [data-add-confirm]").click()
+        _also(page)
+        assert _steps(page) == ["clock", "photos"]
         _save(page)
         assert _members(app) == ["clock", "photos"]
         assert _bound(app, "photos") == ["frame", "hallway"]
@@ -391,7 +398,7 @@ def test_unticking_a_display_takes_the_dashboard_off_it(
     app.config["PAGE_STORE"].save(Page(id="art", name="Art", device_ids=["frame", "door"]))
     with sync_playwright() as p:
         browser, page, errors = _editor(p, base, **(_PHONE if phone else {}))
-        _other(page, "art").click()
+        _add_other(page, "art")
         dlg = _prompt(page)
         assert dlg.get_by_role("heading").inner_text() == "Show “Art” on hallway?"
         assert dlg.locator("fieldset legend").inner_text() == "Displays"
@@ -425,7 +432,6 @@ def test_unticking_a_display_takes_the_dashboard_off_it(
                 assert el.bounding_box()["height"] >= 44
         assert _summary(dlg) == "Art will be on hallway and frame. Removed from door."
         _answer(page, "Show on 2 displays")
-        page.locator("[data-add-confirm]").click()
         assert _bound(app, "art") == ["frame", "door"]  # nothing until Save
         _save(page)
         assert _members(app) == ["clock", "art"]
@@ -442,13 +448,12 @@ def test_cancel_and_escape_forget_the_ticks(real: tuple[str, Flask]) -> None:
     app.config["PAGE_STORE"].save(Page(id="art", name="Art", device_ids=["frame", "door"]))
     with sync_playwright() as p:
         browser, page, errors = _editor(p, base)
-        chip = _other(page, "art")
-        chip.click()
+        _add_other(page, "art")
         dlg = _prompt(page)
         dlg.get_by_role("checkbox", name="door").uncheck()
         page.keyboard.press("Escape")
         dlg.wait_for(state="detached")
-        chip.click()
+        _add_other(page, "art")
         dlg = _prompt(page)
         assert _rows(dlg) == [("hallway", True), ("frame", True), ("door", True)]
         dlg.get_by_role("checkbox", name="frame").uncheck()
@@ -467,7 +472,7 @@ def test_keyboard_moves_through_the_list_and_stays_in_the_dialog(
     base, _app = real
     with sync_playwright() as p:
         browser, page, errors = _editor(p, base)
-        _other(page, "photos").click()
+        _add_other(page, "photos")
         dlg = _prompt(page)
         focused = "() => document.activeElement.closest('dialog') ? " \
             "(document.activeElement.getAttribute('aria-labelledby') || " \
