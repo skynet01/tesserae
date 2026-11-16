@@ -6,6 +6,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Lineups: a NEXT or QUEUED tag on one dashboard no longer pushes it below the others in the row.
 - Fix wake estimates after quiet hours to follow the interval sent to the display.
 - Offer optional conditions when adding a dashboard to a lineup.
 - Hide dashboard Look when no widgets use it, and restore it when one does.
