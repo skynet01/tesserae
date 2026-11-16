@@ -2065,13 +2065,13 @@ def compose_panel_preview(page_id: str) -> Response:
     Reuses the same rendered composition as ``preview.png`` (returning ``202``
     while that render is in flight), then runs it through the quantiser.
     ``?device=<id>`` selects the panel's gamut and dither (falls back to the
-    page's first bound device, then 6-colour Spectra and Floyd-Steinberg).
-    Bound previews inherit the device renderer's picture settings. Explicit
+    page's first bound device, then the dashboard's test display type).
+    Bound and typed test previews inherit their renderer's picture settings. Explicit
     ``?gamut`` and ``?dither`` choices apply only to a virtual preview.
     The cache also tracks the hydrated draft and source-image revision."""
     from typing import cast, get_args
 
-    from app.panel import device_panel
+    from app.panel import device_panel, resolve_test_display
     from app.quantizer import DitherMode, canonicalise_gamut, quantize_for_gamut_to_png
 
     preview_pages: dict[str, Page] = current_app.config.get("PREVIEW_CACHE", {}) or {}
@@ -2110,7 +2110,8 @@ def compose_panel_preview(page_id: str) -> Response:
         panel = device_panel(device)
         if panel is not None and getattr(panel, "gamut", None):
             gamut = str(panel.gamut)
-    gamut = canonicalise_gamut(gamut or "waveshare_e6")
+    virtual_panel = resolve_test_display(page, settings_store)
+    gamut = canonicalise_gamut(gamut or virtual_panel.gamut)
 
     from app.display_color import display_color_mode
 
@@ -2124,6 +2125,11 @@ def compose_panel_preview(page_id: str) -> Response:
     ).strip()
     if dither not in get_args(DitherMode):
         dither = "floyd-steinberg"
+
+    # A second display may have device-specific widgets even at the same size.
+    primary_id = next((did for did in page.device_ids if devices and devices.get(did)), "")
+    if device is not None and device.id != primary_id:
+        token = hashlib.sha256(f"{token}:device:{device.id}".encode()).hexdigest()[:16]
 
     cache_dir = Path(current_app.config["DATA_ROOT"]) / "core" / "previews"
     comp_path = cache_dir / f"{prefix}__{token}.png"
@@ -2139,6 +2145,7 @@ def compose_panel_preview(page_id: str) -> Response:
             cache_path=comp_path,
             pool=current_app.config.get("BROWSER_POOL"),
             timezone_id=_preview_timezone_id(),
+            query=f"device_id={quote(device.id, safe='')}" if device else "",
         )
         resp = current_app.response_class(status=202)
         resp.headers["Cache-Control"] = "no-store"
@@ -2150,13 +2157,44 @@ def compose_panel_preview(page_id: str) -> Response:
         if device is not None and device.renderer_ids and renderer_registry is not None
         else None
     )
+    # Test displays use the matching real renderer and its saved picture settings.
+    # An unset type retains the legacy virtual preview path.
+    if device is None and page.test_display_gamut and renderer_registry is not None:
+        renderer_id = {
+            "mono": "esp32_bw_bin",
+            "gray_4": "esp32_gray2_bin",
+            "gray_8": "esp32_gray_bin",
+            "gray_16": "esp32_gray_bin",
+            "rgb24": "circuitpython_png",
+            "rgb16": "circuitpython_png",
+            "kaleido3": "kaleido_png",
+        }.get(gamut, "esp32_bin")
+        # B/W/yellow tags use the generic quantiser, not the colour .bin format.
+        renderer = renderer_registry.get(renderer_id) if gamut != "bwy_3" else None
+        target_panel = virtual_panel.model_copy(
+            update={
+                "w": width,
+                "h": height,
+                "gamut": gamut,
+                "native_w": width,
+                "native_h": height,
+                "native_declared": True,
+                "col_offset": None,
+                "flip": False,
+                "vflip": False,
+            }
+        )
     render_settings: dict[str, Any] = {}
     if renderer is not None:
         render_settings = current_app.config["PUSH_MANAGER"]._resolve_render_settings(renderer)
         render_settings = {**render_settings, **(renderer.manifest.get("render_overrides") or {})}
     settings_key = hashlib.sha256(
         json.dumps(
-            [renderer.id if renderer else None, device.panel if device else None, render_settings],
+            [
+                renderer.id if renderer else None,
+                target_panel.model_dump() if target_panel else None,
+                render_settings,
+            ],
             sort_keys=True,
             default=str,
         ).encode()
@@ -2183,12 +2221,38 @@ def compose_panel_preview(page_id: str) -> Response:
                 # raster into controller blocks. Preview the raster stage.
                 preview_renderer = renderer_registry.get("esp32_bin") or renderer
                 render_settings.pop("_dither_regions", None)
+            source = comp_path.read_bytes()
+            # Hardware buffers require whole bytes. A hardware-free test display
+            # may have any width: append hidden white columns, then crop them off.
+            padding = 0
+            if device is None and preview_renderer.extension == "bin":
+                import io
+
+                from PIL import Image
+
+                stride = (
+                    8 if gamut == "mono" else (4 if gamut in ("gray_4", "bwry_4", "bwr_3") else 2)
+                )
+                padding = -width % stride
+                if padding:
+                    with Image.open(io.BytesIO(source)) as image:
+                        padded = Image.new("RGB", (width + padding, height), "white")
+                        padded.paste(image, (0, 0))
+                    out = io.BytesIO()
+                    padded.save(out, "PNG")
+                    source = out.getvalue()
+                    target = target.model_copy(
+                        update={"w": width + padding, "native_w": width + padding}
+                    )
             quantised = render_panel_preview(
-                comp_path.read_bytes(),
-                renderer=preview_renderer,
-                panel=target,
-                settings=render_settings,
+                source, renderer=preview_renderer, panel=target, settings=render_settings
             )
+            if padding:
+                with Image.open(io.BytesIO(quantised)) as image:
+                    cropped = image.crop((0, 0, width, height))
+                out = io.BytesIO()
+                cropped.save(out, "PNG")
+                quantised = out.getvalue()
         else:
             quantised = quantize_for_gamut_to_png(
                 comp_path.read_bytes(),

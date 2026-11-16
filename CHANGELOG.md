@@ -6,6 +6,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Dashboard test displays can choose a panel type. Panel previews preserve dither pixels and show each device separately.
+
 - Dashboard editor: widget settings are compact, with switches in one list and short fields side by side.
 - Dashboard editor: replacing a widget drops choices the new one doesn't list, and long widget names keep their tag.
 - Dashboard editor: widget status (like HA capture) shows at the bottom of the open row, and number fields show their units.
