@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from plugins.news_illustrated import feeds, net, painters, pipeline, store, summarise
 from plugins.news_illustrated.tests.fakes import (
     FakeNet,

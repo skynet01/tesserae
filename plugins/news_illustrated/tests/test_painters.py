@@ -8,6 +8,7 @@ import json
 import urllib.parse
 
 import pytest
+
 from plugins.news_illustrated import net, painters
 from plugins.news_illustrated.tests.fakes import Call, FakeNet, ok, ok_json, picture
 
@@ -510,7 +511,14 @@ def test_pending_kie_does_not_pay_another_provider(fake_net):
     assert len(fake_net.to(painters.HUGGINGFACE_URL)) == 0
 
 
-@pytest.mark.parametrize("answer", [{"code": 200, "data": {}}, {"data": ["malformed"]}, {"code": 500, "msg": "error after accepting"}])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"code": 200, "data": {}},
+        {"data": ["malformed"]},
+        {"code": 500, "msg": "error after accepting"},
+    ],
+)
 def test_kie_missing_task_id_is_ambiguous_even_on_http_200(fake_net, answer):
     fake_net.on(painters.KIE_CREATE_URL, ok_json(answer))
     memo = painters.TaskMemo()
