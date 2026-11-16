@@ -648,6 +648,7 @@ def test_new_lineup_steps_and_creates(real: tuple[str, Flask]) -> None:
             "time_window"
         )
         assert page.locator("[data-add-mode]").count() == 0
+        page.locator("[data-add-confirm]").click()
         assert create.is_enabled()
         page.locator("#dxe-title").fill("Day art")
         with page.expect_navigation():
@@ -696,8 +697,9 @@ def test_new_lineup_adds_a_picked_dashboard_in_one_step(
         assert page.evaluate("() => document.activeElement.dataset.picker !== undefined")
         # Picking a dashboard adds it, selected, with nothing else to confirm.
         page.locator("[data-picker]").click()
-        assert "added as you pick" in page.locator(".dxe-pick-head").inner_text()
+        assert page.locator("#dxe-picker").get_by_role("heading", name="Add a dashboard").is_visible()
         page.locator('#dxe-picker [data-add="photos"]').click()
+        page.locator("[data-add-confirm]").click()
         assert _steps(page) == ["photos"]
         assert page.locator("#dxe-picker").count() == 0
         assert page.locator("[data-add-confirm], [data-add-cancel]").count() == 0

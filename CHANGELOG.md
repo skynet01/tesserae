@@ -30,6 +30,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ### Fixed
 
+- Keep the lineup wizard's progress and Create controls alongside the dashboard picker.
+
 - Keep the Meural address form on the local delivery path.
 
 - Font atlases for touch and overlay displays build in about a second instead of 25. Each build waited out a timeout and logged `composer mount wait timed out`, which on a fresh start looked like the server had hung.

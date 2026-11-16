@@ -1201,7 +1201,7 @@
       .join("")
       .replaceAll(' loading="lazy"', ' loading="eager"');
     const addTile =
-      st.display && !S.isNew
+      st.display
         ? `<li class="lu-step dxe-add-step"><figure><span class="lu-slot"></span><button type="button" class="dxe-add-tile" data-picker data-fk="picker" aria-haspopup="dialog">${ico("plus")}<span>Add dashboard</span></button></figure></li>`
         : "";
     const now = vms.some((x) => x.pill) ? " has-now" : "";
@@ -1767,18 +1767,12 @@
     }
   }
 
+  function emptyHtml() {
+    return `<div class="dxe-none"><button type="button" class="dxe-add-tile dxe-add-first" data-picker data-fk="picker" aria-haspopup="dialog"${st.display ? "" : " disabled"}>${ico("plus")}<span>Add a dashboard</span></button><p class="dxe-none-t"><b>No dashboards yet</b><span class="dxe-soft">${st.display ? "Add one or more. They show in the order you add them." : "Pick a display first."}</span></p></div>`;
+  }
   function stepsCard() {
-    const empty = st.steps.length
-      ? ""
-      : `<p class="dxe-empty">${ico("layers")}<span>No dashboards yet.</span></p>`;
-    const addRow = st.steps.length
-      ? ""
-      : `<div class="dxe-add-row"><button type="button" class="lu-btn-ghost dxe-add" data-picker data-fk="picker" aria-haspopup="dialog"${st.display ? "" : " disabled"}>${ico("plus")}<span>Add dashboard</span></button></div>`;
-    return (
-      `<div class="dxe-card dxe-steps-card"${shapeVars()}>${empty}${st.steps.length ? stripHtml() : ""}` +
-      addRow +
-      `</div>`
-    );
+    const n = st.steps.length;
+    return `<div class="dxe-card dxe-steps-card${n ? "" : " is-empty"}"${shapeVars()}>${n ? stripHtml() : emptyHtml()}</div>`;
   }
 
   /* ------------------------------------------------------------ 3 Timing */
@@ -2349,8 +2343,8 @@
       // can't be used, and says why (the line beside it, and on a press).
       setButtons(
         btns,
-        `<a class="lu-btn-ghost lu-btn-line" href="${esc(S.urls.back)}" data-fk="f-cancel">Cancel</a>` +
-          `<button type="button" class="lu-btn-primary" data-create data-fk="f-create"${ready && !ui.saving && !ui.duplicating ? "" : " disabled"}>${ui.saving ? "Creating…" : "Create lineup"}</button>`
+        `<a class="dxe-link quiet dxe-cancel" href="${esc(S.urls.back)}" data-fk="f-cancel">Cancel</a>` +
+          `<button type="button" class="lu-btn-primary" data-create data-fk="f-create" aria-describedby="dxe-save-state"${ui.saving || ui.duplicating ? " disabled" : ready ? "" : ' aria-disabled="true"'}>${ui.saving ? "Creating…" : "Create lineup"}</button>`
       );
       return;
     }
