@@ -32,6 +32,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 - Paid image retries keep saved tasks and spending reservations until explicit recovery.
 - Unreadable painting budgets block new paid requests instead of resetting the daily allowance.
 - Lineup thumbnail files close before transmission, so disconnected browsers cannot leave them open.
+- The classic editor can refresh widget data without saving and inspect previews at their native size.
 - Lineups show the delivered, queued and waiting states, with separate lanes for overlapping windows.
 - Smart sync: button wakes no longer reset wake-time trust.
 - Pre-renders and warm-ahead runs are skipped for a display that is paused, in quiet hours, or whose lineup conditions for that dashboard fail, so background renders no longer spend money nobody can see. A dashboard on the glass keeps its refreshes and edits as before. An automated follow-up is dropped once a newer frame has reached the display, and a display coming back from a pause gets a fresh render instead of a frame drawn before it. (#535)
