@@ -6,6 +6,7 @@
   "description": "Sign in to Netgear and choose a frame. Tesserae displays one image at a time and creates no Meural galleries. Cloud delivery pauses gallery rotation and keeps the frame's sleep scheduler active. Resume Meural gallery restores your previous playback. Local previews are available as a backup. An optional LAN address enables quiet-hours sleep control.",
   "renderers": ["pi_png"],
   "transport": "push",
+  "always_on": true,
   "panel": {
     "w": 1080,
     "h": 1920,

@@ -1545,6 +1545,7 @@ def _upcoming_inputs(device: Any, now_utc: datetime) -> tuple[UpcomingInput, ...
             at=ev.scheduled_at.timestamp(),
             lineup_id=ev.lineup_id,
             dashboard_id=ev.dashboard_id,
+            cause=ev.cause,
         )
         for ev in events
     )

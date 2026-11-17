@@ -289,6 +289,7 @@ class UpcomingInput:
     at: float
     lineup_id: str | None = None
     dashboard_id: str | None = None
+    cause: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2299,7 +2300,11 @@ def build_display(
         for ev in d.upcoming:
             item = (ev.at, ev.dashboard_id, ev.lineup_id)
             if upcoming is None and (
-                ev.at > clk.epoch or (ev.dashboard_id is not None and ev.dashboard_id != on_id)
+                ev.at > clk.epoch
+                or (ev.dashboard_id is not None and ev.dashboard_id != on_id)
+                # A due repaint is still the next update attempt for an
+                # always-on display, even when its picture does not change.
+                or (ev.cause == "dashboard_refresh" and connected and not d.reach.live)
             ):
                 upcoming = item
             if following is None and ev.at > clk.epoch:

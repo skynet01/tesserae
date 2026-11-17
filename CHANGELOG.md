@@ -6,6 +6,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Include due dashboard refreshes in always-on displays' next-update time.
+
 - Meural swipes show the next item or dashboard, and thumbnails follow the frame's current artwork.
 
 - Hide the dashboard Look step for newspaper front pages that draw their own appearance.

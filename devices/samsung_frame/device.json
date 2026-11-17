@@ -8,6 +8,7 @@
     "pi_png"
   ],
   "transport": "push",
+  "always_on": true,
   "panel": {
     "w": 3840,
     "h": 2160,
