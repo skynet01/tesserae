@@ -14,7 +14,6 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +24,7 @@ from PIL import Image
 
 from app import background_loops
 from app.device_loader import Device, DeviceRegistry
+from app.frame_log import _note
 from app.meural_http import open_request, read_response
 from app.panel import device_panel
 from app.quantizer import apply_underscan, rotate_png
@@ -33,24 +33,10 @@ logger = logging.getLogger(__name__)
 KIND = "meural"
 POLL_INTERVAL_S = 5
 DEFAULT_REFRESH_S = 15
-EXCHANGE_LOG_LINES = 60
 _HOSTNAME = re.compile(
     r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
 )
-
-
-def _note(app: Flask, device_id: str, way: str, text: str) -> None:
-    with app.config.setdefault("MEURAL_LOG_LOCK", threading.Lock()):
-        logs = app.config.setdefault("MEURAL_EXCHANGES", {})
-        logs.setdefault(device_id, deque(maxlen=EXCHANGE_LOG_LINES)).append(
-            (time.time(), way, text)
-        )
-
-
-def exchanges(app: Flask, device_id: str) -> list[tuple[float, str, str]]:
-    with app.config.setdefault("MEURAL_LOG_LOCK", threading.Lock()):
-        return list(app.config.get("MEURAL_EXCHANGES", {}).get(device_id, ()))
 
 
 def valid_host(value: Any) -> bool:

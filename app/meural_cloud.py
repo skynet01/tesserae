@@ -16,7 +16,8 @@ from typing import Any
 from flask import Flask
 
 from app.device_loader import Device
-from app.meural import _note, valid_host
+from app.frame_log import _note
+from app.meural import valid_host
 from app.meural_auth import (
     AuthenticationBlocked,
     AuthResult,

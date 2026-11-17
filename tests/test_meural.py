@@ -616,7 +616,7 @@ def test_frame_log_records_renewal_failure_and_skip_without_credentials(
 ):
     import urllib.error
 
-    from app.meural import exchanges
+    from app.frame_log import exchanges
     from app.meural_auth import AuthResult
     from app.meural_cloud import save_session
 

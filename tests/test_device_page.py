@@ -840,9 +840,10 @@ def test_the_next_thumbnail_is_left_out_when_the_next_step_is_the_same_dashboard
     assert line["next_when"] == "~1:15 PM" and "until" in line["meta"]
 
 
-def test_meural_frame_log_renders_shared_controls(app):
+@pytest.mark.parametrize("kind", ["meural", "samsung_frame"])
+def test_frame_log_renders_shared_controls(app, kind):
     from app import device_service
-    from app.meural import _note
+    from app.frame_log import _note
 
     client = app.test_client()
     _sign_in(client)
@@ -851,7 +852,7 @@ def test_meural_frame_log_renders_shared_controls(app):
         renderers=app.config["RENDERER_REGISTRY"],
         data_root=app.config["DATA_ROOT"],
         instance_id="meural_log",
-        kind_id="meural",
+        kind_id=kind,
         name="Frame",
     )
     assert result.ok

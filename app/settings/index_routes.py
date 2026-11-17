@@ -1539,9 +1539,8 @@ def _build_device_section(store: Any, device: Device) -> dict[str, Any] | None:
             if section["status"]["health"] == "unknown"
             else section["status"]["relative"]
         )
-    if device.kind_of == "meural":
-        from app.meural import exchanges
-        from app.meural_schedule import DAYS, schedule_view
+    if device.kind_of in ("meural", "samsung_frame"):
+        from app.frame_log import exchanges
         from app.tz_resolve import app_timezone
 
         tz = app_timezone()
@@ -1550,6 +1549,9 @@ def _build_device_section(store: Any, device: Device) -> dict[str, Any] | None:
             f"{datetime.fromtimestamp(at, tz=tz):%b %d %H:%M:%S}  {arrows.get(way, '·')}  {text}"
             for at, way, text in exchanges(current_app, device.id)
         ]
+
+    if device.kind_of == "meural":
+        from app.meural_schedule import DAYS, schedule_view
 
         sleep = schedule_view(current_app, device)
         sleep["refresh_url"] = url_for("auth.meural_sleep_refresh", instance_id=device.id)
