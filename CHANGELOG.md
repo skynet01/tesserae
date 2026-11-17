@@ -6,6 +6,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Make lineup header status and timing text smaller and lighter than display titles.
+
 - Show dashboard refresh timing, daily update counts and delivery status in always-on lineup headers.
 
 - Include due dashboard refreshes in always-on displays' next-update time.
