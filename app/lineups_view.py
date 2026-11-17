@@ -518,6 +518,12 @@ class NextUpdateView(_Dict):
 
 
 @dataclass
+class NextLinePart(_Dict):
+    text: str
+    dashboard_id: str | None = None
+
+
+@dataclass
 class NextLineView(_Dict):
     """The quiet line under "Showing X": ``before`` + bold ``at`` + ``after``."""
 
@@ -525,6 +531,7 @@ class NextLineView(_Dict):
     at: str
     after: str
     title: str
+    before_parts: list[NextLinePart] = field(default_factory=list)
 
 
 @dataclass
@@ -850,6 +857,8 @@ class DisplayView(_Dict):
     # display that has not fetched the latest frame, nothing sent yet).
     on_screen_known: bool = True
     show_suffix: str = ""
+    show_lineup_name: str = ""
+    show_lineup_url: str = ""
     status_title: str = ""
     settings_url: str = ""
     refreshes_title: str = ""
@@ -2466,7 +2475,11 @@ def build_display(
         next_line = NextLineView("No update scheduled", "", "", next_title)
     elif queued is not None:
         next_line = NextLineView(
-            f"{queued.name} next, lands", queued.lands, "when it wakes", next_title
+            f"{queued.name} next, lands",
+            queued.lands,
+            "when it wakes",
+            next_title,
+            [NextLinePart(queued.name, queued.dashboard_id), NextLinePart(" next, lands")],
         )
     elif not in_sync and sched_dash is not None and pub is None and not d.published_known:
         next_line = NextLineView(
@@ -2474,14 +2487,29 @@ def build_display(
             next_update.at_label,
             "",
             next_title,
+            [
+                NextLinePart(_next_name(dashboards, sched_dash), sched_dash),
+                NextLinePart(" next, lands"),
+            ],
         )
     else:
         next_line = NextLineView(
-            f"{next_update.name} next at", next_update.at_label, "", next_title
+            f"{next_update.name} next at",
+            next_update.at_label,
+            "",
+            next_title,
+            [
+                NextLinePart(next_update.name, next_update.dashboard_id or None),
+                NextLinePart(" next at"),
+            ],
         )
     shown = dashboards.get(on_id or "")
     if d.always_on and shown is not None and shown.refresh_minutes > 0:
         cadence = f"{shown.name} refreshes every {rel_long(shown.refresh_minutes)}"
+        parts = [
+            NextLinePart(shown.name, shown.id),
+            NextLinePart(f" refreshes every {rel_long(shown.refresh_minutes)}"),
+        ]
         advance = next((ev for ev in d.upcoming or () if ev.at > clk.epoch and ev.lineup_id), None)
         if advance is not None:
             target = (
@@ -2490,10 +2518,23 @@ def build_display(
                 else "Next dashboard"
             )
             next_line = NextLineView(
-                f"{cadence} · {target} at", clk.clock(advance.at), "", next_title
+                f"{cadence} · {target} at",
+                clk.clock(advance.at),
+                "",
+                next_title,
+                [
+                    *parts,
+                    NextLinePart(" · "),
+                    NextLinePart(target, advance.dashboard_id),
+                    NextLinePart(" at"),
+                ],
             )
         else:
-            next_line = NextLineView(cadence, "", "", next_title)
+            next_line = NextLineView(cadence, "", "", next_title, parts)
+    for part in next_line.before_parts:
+        dashboard = dashboards.get(part.dashboard_id or "")
+        if dashboard is not None and dashboard.missing:
+            part.dashboard_id = None
 
     if connected:
         push_lands = "lands now"
@@ -2555,6 +2596,11 @@ def build_display(
     dashboard_ids = {step.dashboard_id for lineup in d.lineups for step in lineup.steps}
     screens = {pid: _screen(dashboards.get(pid), pid, d) for pid in dashboard_ids}
     next_epoch = adv_lands.epoch if adv_lands is not None else None
+    if d.always_on:
+        # The header has already resolved refreshes versus lineup advances.
+        # Use that same instant for both the bar marker and its countdown.
+        next_epoch = next_update.at_epoch if next_update is not None else None
+        next_tick = clk.week_minute(next_epoch) if next_epoch is not None else None
     week = [
         _day_bar(
             d,
@@ -2588,7 +2634,9 @@ def build_display(
         pause=_pause_view(d.pause),
         refreshes_today=refreshes,
         refreshes_title=(
-            f"{refreshes} scheduled updates today: lineup steps and dashboard refresh attempts. Pictures may stay the same."
+            f"{refreshes} scheduled updates today: lineup steps and dashboard refresh attempts, "
+            "including refreshes outside lineup windows. Steps and refreshes at the same time "
+            "count once. Pictures may stay the same."
             if d.always_on
             else f"{refreshes} refreshes projected today"
         ),

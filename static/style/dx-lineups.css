@@ -713,8 +713,9 @@ main.page.lu-page {
   color: var(--t-fg-soft);
   font-weight: 400;
 }
-.lu .lu-show b {
-  font-weight: 500;
+.lu .lu-show b,
+.lu .lu-show a {
+  font-weight: 600;
   color: var(--t-fg-soft);
   overflow-wrap: anywhere;
 }
@@ -752,6 +753,21 @@ main.page.lu-page {
 .lu .lu-nextl b {
   font-weight: 400;
   font-variant-numeric: tabular-nums;
+}
+.lu .lu-nextl a {
+  font-weight: 600;
+  color: var(--t-fg-soft);
+}
+.lu .lu-show a,
+.lu .lu-nextl a {
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.lu .lu-show a:hover,
+.lu .lu-show a:focus-visible,
+.lu .lu-nextl a:hover,
+.lu .lu-nextl a:focus-visible {
+  text-decoration: underline;
 }
 
 /* Inner schedule area: the display's content, one shade off the card. */

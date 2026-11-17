@@ -206,6 +206,30 @@ def test_always_on_daily_count_coalesces_slots_and_respects_quiet_hours(sleeping
     assert out.refreshes_today == (12 if sleeping else 8)
 
 
+def test_always_on_count_includes_the_dashboard_held_overnight() -> None:
+    from app.next_update import MODE_CONNECTED, Reach
+
+    displays, _ = sample_inputs()
+    lineup = LineupInput(
+        "meural",
+        "Meural",
+        "cycle",
+        (StepInput("photos", 120), StepInput("art", 120), StepInput("travel", 120)),
+        start="07:00",
+        end="23:15",
+    )
+    d = replace(displays[0], lineups=(lineup,), reach=Reach(MODE_CONNECTED), pause=None)
+    dashboards = {
+        "photos": DashboardInfo("photos", "Photos", refresh_minutes=15),
+        "art": DashboardInfo("art", "Art", refresh_minutes=15),
+        "travel": DashboardInfo("travel", "Travel", refresh_minutes=10),
+    }
+    out = build_view([d], dashboards, now=SAMPLE_NOW).displays[0]
+    # Photos and Art each own 6 hours (24 slots each). Travel owns 12 hours,
+    # including 23:00–07:00 overnight (72 slots). Nine steps share refresh slots.
+    assert out.refreshes_today == 120
+
+
 def test_status_tags_ordering_and_day_sets() -> None:
     frame = _display(sample_view_model(), "frame")
     got = [(lu.id, lu.status, lu.status_label) for lu in frame.lineups]
