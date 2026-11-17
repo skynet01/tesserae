@@ -6,6 +6,8 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 ## [Unreleased]
 
+- Show dashboard refresh timing, daily update counts and delivery status in always-on lineup headers.
+
 - Include due dashboard refreshes in always-on displays' next-update time.
 
 - Meural swipes show the next item or dashboard, and thumbnails follow the frame's current artwork.

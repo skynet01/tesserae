@@ -132,7 +132,17 @@ def test_lineups_header_counts_page_refresh_inside_two_hour_step(
                 if due
                 else now.replace(minute=15, second=0, microsecond=0).timestamp()
             )
-            assert panel["next_line"]["before"] == "Kitchen next at"
+            assert panel["next_line"]["before"] == "Kitchen refreshes every 15 min · Hall at"
+            assert panel["next_line"]["at"] == "13:00"
+            assert panel["refreshes_today"] == 27  # six steps + seven refreshes per Kitchen visit
+            if not due:
+                body = c.get("/decks").get_data(as_text=True)
+                assert "Kitchen refreshes every 15 min" in body
+                assert (
+                    "27 scheduled updates today: lineup steps and dashboard refresh attempts"
+                    in body
+                )
+                assert "<span>Checked in</span>" not in body
 
 
 # -- the computation ------------------------------------------------------
