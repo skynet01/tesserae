@@ -226,6 +226,7 @@ def test_takeover_snapshot_excludes_credentials_and_preserves_rotation_settings(
                     "frameStatus": {"currentGallery": 27, "currentItem": 28},
                     "galleryRotation": True,
                     "schedulerEnabled": False,
+                    "imageDuration": 300,
                     "brightness": 29,
                     "credentials": "private-credentials",
                 }
@@ -235,7 +236,7 @@ def test_takeover_snapshot_excludes_credentials_and_preserves_rotation_settings(
     assert MeuralCloudClient(store, "test_frame").get_playback("101") == {
         "gallery_id": "27",
         "item_id": "28",
-        "settings": {"galleryRotation": True, "schedulerEnabled": False},
+        "settings": {"galleryRotation": True, "schedulerEnabled": False, "imageDuration": 300},
         "scheduler_owned": False,
     }
 
@@ -401,7 +402,7 @@ def test_pause_records_only_the_native_controls_tesserae_takes_over(store, monke
         "app.meural_auth.open_request", lambda request, **kw: sent.append(request) or response({})
     )
     MeuralCloudClient(store, "test_frame").pause_rotation("101")
-    assert json.loads(sent[0].data) == {"galleryRotation": False}
+    assert json.loads(sent[0].data) == {"galleryRotation": False, "imageDuration": 0}
 
 
 @pytest.fixture(autouse=True)
@@ -585,3 +586,44 @@ def test_release_does_not_overwrite_a_native_scheduler_tesserae_did_not_pause(st
         },
     )
     assert json.loads(sent[0].data) == {"galleryRotation": True}
+
+
+@pytest.mark.parametrize("duration", [300, None])
+def test_restore_preserves_saved_image_duration_and_supports_old_states(
+    store, monkeypatch, duration
+):
+    session(store)
+    sent = []
+    monkeypatch.setattr(
+        "app.meural_auth.open_request", lambda request, **kw: sent.append(request) or response({})
+    )
+    settings = {"galleryRotation": True, "schedulerEnabled": False}
+    if duration is not None:
+        settings["imageDuration"] = duration
+    MeuralCloudClient(store, "test_frame").restore_playback(
+        "101",
+        {"gallery_id": None, "settings": settings},
+    )
+    assert json.loads(sent[0].data) == settings
+
+
+def test_already_paused_legacy_delivery_disables_slideshow_once(tmp_path):
+    client = Cloud()
+    delivery = CloudDelivery(tmp_path / "delivery.json", client)
+    delivery.path.write_text(
+        json.dumps(
+            {
+                "scope": "17:101",
+                "owner": "old",
+                "owned": [],
+                "original": client.get_playback("101"),
+                "paused": True,
+                "last_key": "first",
+            }
+        )
+    )
+    assert not delivery.deliver(b"first", "first", "101")
+    assert not delivery.deliver(b"first", "first", "101")
+    assert client.pauses == 1
+    delivery.release("101")
+    assert client.restored[0][1]["settings"] == {"galleryRotation": True, "schedulerEnabled": False}

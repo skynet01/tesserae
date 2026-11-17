@@ -140,7 +140,7 @@ def test_takeover_keeps_native_sleep_scheduler_enabled(app, provider, monkeypatc
     from app.meural_cloud import get_cloud_client
 
     get_cloud_client(app, "test_frame").pause_rotation("101")
-    assert calls[-1][2]["json_data"] == {"galleryRotation": False}
+    assert calls[-1][2]["json_data"] == {"galleryRotation": False, "imageDuration": 0}
 
 
 def test_native_schedule_overrides_tesserae_in_automation_gate(app, provider, monkeypatch):

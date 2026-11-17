@@ -378,6 +378,10 @@ class MeuralCloudClient:
         }
         if not all(isinstance(value, bool) for value in flags.values()):
             raise ValueError("Meural did not return the frame's rotation settings")
+        if "imageDuration" in data:
+            if type(data["imageDuration"]) is not int:
+                raise ValueError("Meural did not return the frame's image duration")
+            flags["imageDuration"] = data["imageDuration"]
         return {
             "gallery_id": resource_id(data["frameStatus"]["currentGallery"])
             if data["frameStatus"].get("currentGallery") is not None
@@ -393,7 +397,7 @@ class MeuralCloudClient:
         self.request(
             "PUT",
             f"devices/{resource_id(target)}",
-            json_data={"galleryRotation": False},
+            json_data={"galleryRotation": False, "imageDuration": 0},
             timeout=60,
         )
 
@@ -407,6 +411,11 @@ class MeuralCloudClient:
         flags = {key: original["settings"][key] for key in keys}
         if not all(isinstance(value, bool) for value in flags.values()):
             raise ValueError("Invalid saved Meural rotation settings")
+        if "imageDuration" in original["settings"]:
+            duration = original["settings"]["imageDuration"]
+            if type(duration) is not int:
+                raise ValueError("Invalid saved Meural image duration")
+            flags["imageDuration"] = duration
         if original.get("gallery_id") is not None:
             try:
                 self.request(
@@ -490,6 +499,7 @@ class CloudDelivery:
             state.pop("original")
         state.update(
             paused=False,
+            image_duration_paused=False,
             last_key=None,
             current_item=None,
             current_key=None,
@@ -517,9 +527,11 @@ class CloudDelivery:
         if not state.get("original"):
             state["original"] = self.client.get_playback(target)
             self._save(state)
-        if not state.get("paused"):
+        # Older journals paused gallery rotation but left the slideshow timer running.
+        if not state.get("paused") or not state.get("image_duration_paused"):
             self.client.pause_rotation(target)
             state["paused"] = True
+            state["image_duration_paused"] = True
             self._save(state)
         if self.cancelled():
             return False
