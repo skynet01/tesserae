@@ -10,6 +10,10 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 - Hardware: the Seeed XIAO ePaper EE05 with the 4.26" mono panel (800×480) is in the catalog as `seeed_ee05_426`. It takes the same 48,000-byte mono frame as the reTerminal E1001. The firmware target is `seeed-ee05-426` in tesserae-device-firmware. Not yet tested on real hardware.
 
+### Fixed
+
+- Treat pictures still loading when the render wait ends as failed, so an automated send keeps the previous image instead of a blank frame.
+
 ## [0.514.0], 2026-11-18
 
 ### Security
