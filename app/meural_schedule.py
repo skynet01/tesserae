@@ -20,7 +20,9 @@ from app.device_loader import Device
 from app.meural_auth import HttpError, MeuralAuthError
 from app.meural_cloud import get_cloud_client, resource_id
 
-CACHE_S = 300
+CACHE_S = 1800
+# A schedule older than this is not trusted (the cloud may be unreachable).
+STALE_S = 2 * CACHE_S
 DAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
