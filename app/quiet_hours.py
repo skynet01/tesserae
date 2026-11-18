@@ -171,11 +171,13 @@ def resolve_quiet_hours(
     2. App-level setting (when ``quiet_hours_enabled``).
     3. ``None`` (quiet hours off).
     """
+    from app.meural_schedule import STALE_S
+
     native = (getattr(device, "manifest", None) or {}).get("_native_sleep_schedule")
     if (
         isinstance(native, dict)
         and native.get("available")
-        and wall_time.time() - float(native.get("checked_at") or 0) < 300
+        and wall_time.time() - float(native.get("checked_at") or 0) < STALE_S
     ):
         return QuietHoursWindow(
             time(0), time(0), NO_DAYS, sleep_through=True, native_schedule=native

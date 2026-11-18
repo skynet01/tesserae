@@ -637,6 +637,8 @@ class MeuralPublisher:
             return True
         owned = self._owns_sleep(device, host)
         quiet = self._quiet(device)
+        from app.meural_schedule import STALE_S
+
         cfg = (self._settings.get_section("devices") or {}).get(device.id) or {}
         native = cfg.get("meural_sleep_schedule") or {}
         native_controls_sleep = (
@@ -645,7 +647,7 @@ class MeuralPublisher:
             and native.get("available")
             and native.get("scope")
             == f"{cfg.get('meural_account_id')}:{cfg.get('cloud_device_id')}"
-            and time.time() - float(native.get("checked_at") or 0) < 300
+            and time.time() - float(native.get("checked_at") or 0) < STALE_S
         )
         # Leave native sleep/wake transitions to the frame, but keep reading status.
         if not native_controls_sleep and quiet and not sleeping:
