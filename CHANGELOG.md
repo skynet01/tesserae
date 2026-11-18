@@ -10,6 +10,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 - Meural swipes show the next item or dashboard, and thumbnails follow the frame's current artwork.
 - Show Meural and Samsung The Frame exchanges, power commands and skips in the device page Frame log.
+- Long multi-select pickers show only their picks under a search box; typing filters, Enter ticks the top match, arrow keys move through results.
 - Hardware: the Seeed XIAO ePaper EE05 with the 4.26" mono panel (800×480) is in the catalog as `seeed_ee05_426`. It takes the same 48,000-byte mono frame as the reTerminal E1001. The firmware target is `seeed-ee05-426` in tesserae-device-firmware. Not yet tested on real hardware.
 
 ### Fixed
