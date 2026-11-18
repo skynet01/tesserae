@@ -16,6 +16,7 @@ All notable changes to Tesserae are recorded here. Format loosely follows
 
 - Clarify Lineups header hierarchy and link dashboard and lineup names to their editors.
 - Fix always-on lineup update timing, daily refresh counts and delivery status.
+- Treat pictures still loading when the render wait ends as failed, so an automated send keeps the previous image instead of a blank frame.
 
 ## [0.514.0], 2026-11-18
 
