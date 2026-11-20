@@ -110,6 +110,8 @@ images = _load_sibling("images")
 cookies = _load_sibling("cookies")
 screen = _load_sibling("screen")
 config_file = _load_sibling("config_file")
+gocomics_limits = _load_sibling("gocomics_limits")
+_GOCOMICS_LOCK = images.shared("gocomics_lock", threading.RLock)
 
 logger = logging.getLogger(__name__)
 
@@ -126,8 +128,6 @@ XKCD = "https://xkcd.com"
 XKCD_IMAGE_HOSTS = frozenset({"imgs.xkcd.com"})
 # Strips that come from their own source rather than GoComics.
 BUILTIN_SLUGS = frozenset({"dilbert", "xkcd"})
-# GoComics: today's page, then the two days before when a day is missing.
-GOCOMICS_DAYS_BACK = 3
 # The warm-up page, far enough back that no strip fetch asks for it: Bunny
 # Shield challenges a session that revisits an address.
 WARM_DAYS_BACK = 7
@@ -186,8 +186,8 @@ RETRY_MISSING_S = 15 * 60
 RETRY_STALE_S = 60 * 60
 # A GoComics strip still on yesterday's edition: look again this often, this
 # many times a day. The newest strip shows meanwhile, so this is not urgent.
-EDITION_RETRY_S = 3 * 3600
-EDITION_ATTEMPTS = 5
+EDITION_RETRY_S = gocomics_limits.STRIP_RETRY_S
+EDITION_ATTEMPTS = gocomics_limits.STRIP_ATTEMPTS
 # GoComics publishes each day's strips at midnight US Eastern. Once this much
 # later, a strip still on the day before is reported as not updated.
 GOCOMICS_TZ = "America/New_York"
@@ -272,9 +272,10 @@ class Web:
     transport failure raises, as a :class:`SourceError` naming the host.
     """
 
-    def __init__(self, jar: CookieJar | None = None) -> None:
+    def __init__(self, jar: CookieJar | None = None, *, budget: Any = None) -> None:
         handlers = [urllib.request.HTTPCookieProcessor(jar)] if jar is not None else []
         self._opener = urllib.request.build_opener(*handlers)
+        self._budget = budget
 
     def get(
         self,
@@ -296,6 +297,11 @@ class Web:
         return self._send(request, timeout, PAGE_MAX_BYTES)
 
     def _send(self, request: urllib.request.Request, timeout: float, limit: int) -> Reply:
+        if self._budget is not None and _host(request.full_url) in gocomics_limits.HOSTS:
+            return self._budget.send(lambda: self._send_now(request, timeout, limit))
+        return self._send_now(request, timeout, limit)
+
+    def _send_now(self, request: urllib.request.Request, timeout: float, limit: int) -> Reply:
         host = _host(request.full_url)
         try:
             response: Any = self._opener.open(request, timeout=timeout)
@@ -307,6 +313,12 @@ class Web:
             raise SourceError(f"Couldn't reach {host}.") from err
         try:
             with contextlib.closing(response):
+                if (
+                    self._budget is not None
+                    and host in gocomics_limits.HOSTS
+                    and getattr(response, "status", None) == 429
+                ):
+                    self._budget.limited(response.headers)
                 has_body = getattr(response, "fp", None) is not None
                 body = response.read(limit + 1) if has_body else b""
         except (TimeoutError, OSError) as err:
@@ -396,6 +408,12 @@ class Source:
     @property
     def fetched(self) -> bool:
         return self.kind != "manual"
+
+    @property
+    def respects_cache(self) -> bool:
+        return self.kind in ("gocomics", "farside") or (
+            self.kind == "url" and _host(self.url) in gocomics_limits.HOSTS
+        )
 
 
 def default_label(name: str) -> str:
@@ -868,10 +886,11 @@ class GoComics:
         self, cookie_file: Path, today: date, warm_name: str = "", pasted: str = ""
     ) -> None:
         self._cookie_file = cookie_file
+        self._budget = gocomics_limits.Budget(cookie_file.parent, _GOCOMICS_LOCK)
+        self._store = images.Store(cookie_file.parent)
         self._jar = MozillaCookieJar()
         self._today = today
         # A session was set up in this refresh / setting one up was tried.
-        self._ready = False
         self._warmed = False
         # The strip whose week-old page sets a session up: the first strip
         # asked for, unless the caller names a known one (checking a name
@@ -893,38 +912,53 @@ class GoComics:
             self._jar.clear(old.domain, old.path, old.name)
         for cookie in self._pasted:
             self._jar.set_cookie(cookie)
-        self._web = Web(self._jar)
+        self._web = Web(self._jar, budget=self._budget)
 
     def _using_pasted(self) -> bool:
         return any(c.name == p.name and c.value == p.value for c in self._jar for p in self._pasted)
 
     def strip(self, name: str, label: str) -> Fetched:
+        with self._budget.lock:
+            cached = self._cached(name, self._today.isoformat())
+            if cached is not None:
+                return cached
+            self._budget.begin_strip(name, self._today.isoformat())
+            return self._strip(name, label)
+
+    def _cached(self, name: str, edition: str | None) -> Fetched | None:
+        record = self._store.sources().get(f"gocomics:{name}") or {}
+        if not edition or record.get("edition") != edition:
+            return None
+        for picture in record.get("pictures") or []:
+            path = self._store.image_path(str(picture.get("file") or ""))
+            if path is not None:
+                with contextlib.suppress(OSError):
+                    return Fetched(
+                        [(path.read_bytes(), "")], edition=edition, label=record.get("label")
+                    )
+        return None
+
+    def _strip(self, name: str, label: str) -> Fetched:
         self._warm_name = self._warm_name or name
-        if not self._ready and not bunny_shield.has_session(self._jar):
-            if self._warmed:
-                raise SourceError("GoComics is blocking automatic downloads right now.")
-            self._warm()
-        for back in range(GOCOMICS_DAYS_BACK):
-            day = self._today - timedelta(days=back)
-            reply = self._page(f"{GOCOMICS}/{name}/{day:%Y/%m/%d}")
-            if reply.status == 404:
-                continue
-            if reply.status >= 400:
-                raise SourceError(f"GoComics answered HTTP {reply.status} for {label}.")
-            page = pages.parse_gocomics(reply.text(), name)
-            if page is None:
-                raise NotFound(f"GoComics has no strip called “{name}”.")
-            raw = _download(self._web, page.image_url, label)
-            self._save()
-            return Fetched([(raw, "")], edition=page.date or day.isoformat(), label=page.label)
-        raise NoRecentStrip(f"GoComics has no recent {label} strip.")
+        reply = self._page(f"{GOCOMICS}/{name}/{self._today:%Y/%m/%d}")
+        if reply.status == 404:
+            raise NoRecentStrip(f"GoComics has no recent {label} strip.")
+        if reply.status >= 400:
+            raise SourceError(f"GoComics answered HTTP {reply.status} for {label}.")
+        page = pages.parse_gocomics(reply.text(), name)
+        if page is None:
+            raise NotFound(f"GoComics has no strip called “{name}”.")
+        cached = self._cached(name, page.date)
+        if cached is not None:
+            return cached
+        raw = _download(self._web, page.image_url, label)
+        self._save()
+        return Fetched([(raw, "")], edition=page.date or self._today.isoformat(), label=page.label)
 
     def exists(self, name: str) -> bool:
         """Whether gocomics.com has a strip called ``name`` at all: its page
         answers. For telling a weekly strip from a name that isn't one."""
         self._warm_name = self._warm_name or name
-        if not self._ready and not bunny_shield.has_session(self._jar):
-            self._warm()
         reply = self._page(f"{GOCOMICS}/{name}")
         if reply.status == 404:
             return False
@@ -966,7 +1000,6 @@ class GoComics:
         if not self._challenged(reply):
             if reply.status >= 400:
                 raise SourceError(f"GoComics answered HTTP {reply.status}.")
-            self._ready = True
             self._save()
             return
         data_pow = bunny_shield.find_data_pow(reply.text())
@@ -999,7 +1032,6 @@ class GoComics:
         if self._challenged(self._web.get(url, headers=GOCOMICS_PAGE_HEADERS)):
             raise SourceError("GoComics is blocking automatic downloads right now.")
         logger.info("comics_daily: passed the GoComics browser check")
-        self._ready = True
         self._save()
 
     def _save(self) -> None:
@@ -1109,6 +1141,8 @@ def is_due(source: Source, record: dict[str, Any] | None, today: str, now: float
     """Whether ``source`` should be fetched now, given its record."""
     if not record:
         return True
+    if float(record.get("quiet_until") or 0) > now:
+        return False
     last_attempt = float(record.get("last_attempt") or 0)
     if record.get("fetched_on") == today:
         edition = record.get("edition")
@@ -1124,16 +1158,21 @@ def is_due(source: Source, record: dict[str, Any] | None, today: str, now: float
     if not isinstance(retry, dict) and last_attempt:
         day = str(record.get("attempted_on") or today)
         retry = {"day": day, "tries": 1, "after": last_attempt + lifecycle.RETRY_FIRST_S}
-    return lifecycle.may_try(retry, today, now)
+    return lifecycle.may_try(
+        retry,
+        today,
+        now,
+        tries_per_day=EDITION_ATTEMPTS if source.kind == "gocomics" else lifecycle.TRIES_PER_DAY,
+    )
 
 
 @dataclass
 class _Run:
     """One background refresh: a queue a render can add to while it runs.
 
-    Queue entries carry a ``force`` flag (``?fresh=1``), which skips the
-    due checks. ``completed`` remembers what this run already fetched, so a
-    render working from a snapshot taken before that can't queue it again.
+    Queue entries carry a ``force`` flag (``?fresh=1``), which skips due checks
+    for sources that allow forced downloads. ``completed`` remembers what
+    this run already fetched, so a render with an older snapshot can't queue it again.
     """
 
     data_dir: Path
@@ -1144,6 +1183,7 @@ class _Run:
     done: bool = False
     finished: int = 0
     failed: int = 0
+    deferred: int = 0
     thread: threading.Thread | None = None
     # The GoComics cookies pasted on the Comics page, as the latest render
     # or admin request read them (the worker has no settings to read).
@@ -1230,7 +1270,9 @@ def _finish_job(run: _Run, crashed: bool) -> None:
     if jobs is None:
         return
     with contextlib.suppress(Exception):
-        summary = f"{run.finished - run.failed} of {run.finished} updated"
+        summary = f"{run.finished - run.failed - run.deferred} of {run.finished} updated"
+        if run.deferred:
+            summary = "Using saved comics" if not run.failed else summary
         if crashed or (run.failed and run.failed == run.finished):
             jobs.fail(PLUGIN_ID, "refresh", summary)
         else:
@@ -1245,7 +1287,7 @@ def _work(run: _Run) -> None:
     """
     store = images.Store(run.data_dir)
     gocomics: GoComics | None = None
-    web = Web()
+    web = Web(budget=gocomics_limits.Budget(run.data_dir, _GOCOMICS_LOCK))
     crashed = False
     try:
         while True:
@@ -1259,12 +1301,17 @@ def _work(run: _Run) -> None:
             # The render that queued this read the state before earlier work
             # in this run landed; ask the state again, now.
             record = store.sources().get(source.key)
-            if not force and not is_due(source, record, run.today.isoformat(), time.time()):
+            if (not force or source.respects_cache) and not is_due(
+                source, record, run.today.isoformat(), time.time()
+            ):
                 continue
             _report(run, source)
             if source.kind == "gocomics" and gocomics is None:
                 gocomics = GoComics(run.data_dir / COOKIE_FILE, run.today, pasted=run.pasted)
-            if not refresh_source(store, source, run.today, web=web, gocomics=gocomics):
+            result = refresh_source(store, source, run.today, web=web, gocomics=gocomics)
+            if result is None:
+                run.deferred += 1
+            elif not result:
                 run.failed += 1
             run.finished += 1
             run.completed.add(source.key)
@@ -1310,8 +1357,8 @@ def _fetch_source(source: Source, today: date, web: Web, gocomics: GoComics | No
 
 def refresh_source(
     store: Any, source: Source, today: date, *, web: Web, gocomics: GoComics | None
-) -> bool:
-    """Fetch one source and record the outcome; True when it fully updated.
+) -> bool | None:
+    """Fetch one source and record the outcome; None means quietly deferred.
 
     The previous pictures stay unless a complete new set was stored, so a
     failure never blanks the page and a half-downloaded Far Side row never
@@ -1334,8 +1381,10 @@ def refresh_source(
         logger.exception("comics_daily: could not record an attempt at %s", source.key)
         return False
     try:
-        fetched: Fetched | SourceError = _fetch_source(source, today, web, gocomics)
-    except SourceError as err:
+        fetched: Fetched | SourceError | gocomics_limits.Deferred = _fetch_source(
+            source, today, web, gocomics
+        )
+    except (SourceError, gocomics_limits.Deferred) as err:
         fetched = err
     except Exception:
         logger.exception("comics_daily: fetching %s failed", source.key)
@@ -1344,11 +1393,26 @@ def refresh_source(
 
 
 def record_fetch(
-    store: Any, source: Source, fetched: Fetched | SourceError, today: date, started: float
-) -> bool:
+    store: Any,
+    source: Source,
+    fetched: Fetched | SourceError | gocomics_limits.Deferred,
+    today: date,
+    started: float,
+) -> bool | None:
     """Keep what a fetch of ``source`` brought (or the error it ended in),
     note it in the log, and say whether the source fully updated."""
     today_iso = today.isoformat()
+    if isinstance(fetched, gocomics_limits.Deferred):
+
+        def keep_saved(entry: dict[str, Any]) -> None:
+            entry.update(
+                error=None,
+                quiet_until=fetched.until,
+                retry={"day": today_iso, "tries": 0, "after": fetched.until},
+            )
+
+        store.update(source.key, keep_saved)
+        return None
     stored: list[dict[str, Any]] = []
     expected = 0
     if isinstance(fetched, Fetched):
@@ -1360,7 +1424,9 @@ def record_fetch(
             logger.exception("comics_daily: storing %s failed", source.key)
             fetched = SourceError(f"Couldn't keep the pictures for {source.label}.")
     if isinstance(fetched, SourceError):
-        outcome: Callable[[dict[str, Any]], None] = _failed(str(fetched), today_iso)
+        outcome: Callable[[dict[str, Any]], None] = _failed(
+            str(fetched), today_iso, slow=source.kind == "gocomics"
+        )
         complete = False
     else:
         expected = max(fetched.expected or 0, len(fetched.pictures))
@@ -1410,7 +1476,14 @@ def _log_fetch(
     if isinstance(fetched, SourceError):
         message = str(fetched)
         outcome = "blocked" if "blocking" in message else "error"
-        retry = lifecycle.describe(entry.get("retry"), today, time.time())
+        retry = lifecycle.describe(
+            entry.get("retry"),
+            today,
+            time.time(),
+            tries_per_day=EDITION_ATTEMPTS
+            if source.kind == "gocomics"
+            else lifecycle.TRIES_PER_DAY,
+        )
         kept = "; the last good picture stays up" if entry.get("pictures") else ""
         log_entry(
             store, label, outcome, f"{message} ({seconds}){kept}{'; ' + retry if retry else ''}"
@@ -1429,13 +1502,19 @@ def _log_fetch(
     log_entry(store, label, "ok", f"{edition}, {what}")
 
 
-def _failed(message: str, today: str) -> Callable[[dict[str, Any]], None]:
+def _failed(message: str, today: str, *, slow: bool = False) -> Callable[[dict[str, Any]], None]:
     """A failed try: the error, and the backoff before the next one. What
     was on disk stays up meanwhile."""
 
     def record(entry: dict[str, Any]) -> None:
         entry["error"] = message
-        entry["retry"] = lifecycle.failed(entry.get("retry"), today, time.time())
+        entry["retry"] = lifecycle.failed(
+            entry.get("retry"),
+            today,
+            time.time(),
+            first=EDITION_RETRY_S if slow else lifecycle.RETRY_FIRST_S,
+            cap=gocomics_limits.COOLDOWN_MAX_S if slow else lifecycle.RETRY_MAX_S,
+        )
 
     return record
 
@@ -1457,6 +1536,7 @@ def _succeeded(
             entry["retry"] = lifecycle.failed(entry.get("retry"), today, time.time())
             return
         entry.pop("retry", None)
+        entry.pop("quiet_until", None)
         entry.update(
             pictures=stored,
             edition=fetched.edition,
@@ -1549,7 +1629,10 @@ def fetch(
     records = store.sources()
     force = bool(ctx.get("fresh"))
     due = [
-        s for s in wanted if s.fetched and (force or is_due(s, records.get(s.key), today_iso, now))
+        s
+        for s in wanted
+        if s.fetched
+        and ((force and not s.respects_cache) or is_due(s, records.get(s.key), today_iso, now))
     ]
     pasted = saved_cookie_header() if any(s.kind == "gocomics" for s in due) else None
     run = (
@@ -1687,6 +1770,18 @@ def freshness(
     return "ok", None
 
 
+def _public_error(record: dict[str, Any]) -> str:
+    """Old persisted HTTP 429 errors are private too, until the next success."""
+    message = str(record.get("error") or "")
+    if (
+        record.get("quiet_until")
+        or re.search(r"\bHTTP\s+429\b", message, re.IGNORECASE)
+        or "too many requests" in message.lower()
+    ):
+        return ""
+    return message
+
+
 def _payload(
     wanted: list[Source],
     problems: list[Problem],
@@ -1705,7 +1800,7 @@ def _payload(
         record = records.get(source.key) or {}
         pictures = _pictures(record, store)
         label = source.title or str(record.get("label") or source.label)
-        error = record.get("error")
+        error = _public_error(record)
         busy_now = source.key in busy
         state, since = freshness(source, record, bool(pictures), busy_now, today, published)
         if source.kind == "manual" and not pictures:
@@ -1868,7 +1963,7 @@ def source_status(
     tone), a status line, a warning when it couldn't refresh automatically,
     and its pictures."""
     pictures = _pictures(record, store)
-    error = str(record.get("error") or "")
+    error = _public_error(record)
     edition = record.get("edition")
     state, since = freshness(source, record, bool(pictures), source.key in busy, today, published)
     fetched = record.get("last_success")
@@ -2276,6 +2371,8 @@ def admin_view(store: Any, config: Config, tz: Any) -> dict[str, Any]:
     # The log, oldest first, as columns: when, source, outcome, what.
     log = []
     for entry in store.log():
+        if not _public_error({"error": entry.get("text")}):
+            continue
         when = "?"
         with contextlib.suppress(TypeError, ValueError, OverflowError, OSError):
             when = datetime.fromtimestamp(float(entry["at"]), tz).strftime("%b %d %H:%M:%S")
@@ -2525,8 +2622,8 @@ def blueprint() -> Blueprint:
         count = len(pasted.pairs)
         log_entry(store, "GoComics cookies", "saved", f"{count} pasted")
         flash(
-            f"Saved {count} GoComics cookie{'' if count == 1 else 's'}. The next GoComics "
-            "fetch uses them; Fetch now tries them at once.",
+            f"Saved {count} GoComics cookie{'' if count == 1 else 's'}. "
+            "The next GoComics download uses them.",
             "ok",
         )
         return _to_cookies()
@@ -2574,7 +2671,7 @@ def blueprint() -> Blueprint:
             source = Source(key=f"gocomics:{slug}", kind="gocomics", name=slug)
             started = time.time()
             today = _today()
-            outcome: Fetched | SourceError
+            outcome: Fetched | SourceError | gocomics_limits.Deferred
             with _scope(plugin):
                 warm = WARM_STRIP if slug != WARM_STRIP else ""
                 gocomics = GoComics(
@@ -2588,19 +2685,19 @@ def blueprint() -> Blueprint:
                 except NoRecentStrip as err:
                     try:
                         found = gocomics.exists(slug)
-                    except SourceError:
+                    except (SourceError, gocomics_limits.Deferred):
                         found = True  # can't tell: let it in, its status will say
                     if not found:
                         flash(f"GoComics has no strip called “{slug}”.", "error")
                         return _back()
                     outcome = err
-                except SourceError as err:
+                except (SourceError, gocomics_limits.Deferred) as err:
                     outcome = err
             record_fetch(store, source, outcome, today, started)
             note_pasted_result(store, gocomics)
             if isinstance(outcome, Fetched):
                 label = outcome.label or label
-            else:
+            elif not isinstance(outcome, gocomics_limits.Deferred):
                 warning = str(outcome)
         new_row = {"enabled": True, "label": label, "slug": slug, "mode": "auto", "image_url": ""}
 
@@ -2771,13 +2868,22 @@ def blueprint() -> Blueprint:
             flash("The Image URL has to start with https:// or http://.", "error")
             return _back(f"strip-{slug}")
         try:
-            raw, _ = net_guard.fetch_bytes(
-                url,
-                headers={k: v for k, v in BROWSER_HEADERS.items() if k != "Accept"},
-                timeout=IMAGE_TIMEOUT_S,
-                max_bytes=images.MAX_UPLOAD_BYTES,
-                allow_local=False,
-            )
+
+            def download() -> tuple[bytes, str]:
+                return net_guard.fetch_bytes(
+                    url,
+                    headers={k: v for k, v in BROWSER_HEADERS.items() if k != "Accept"},
+                    timeout=IMAGE_TIMEOUT_S,
+                    max_bytes=images.MAX_UPLOAD_BYTES,
+                    allow_local=False,
+                )
+
+            if _host(url) in gocomics_limits.HOSTS:
+                raw, _ = gocomics_limits.Budget(data_dir, _GOCOMICS_LOCK).send(download)
+            else:
+                raw, _ = download()
+        except gocomics_limits.Deferred:
+            return _back(f"strip-{slug}")
         except net_guard.BlockedURLError:
             flash("That address isn't on the public web, so it can't be imported.", "error")
             return _back(f"strip-{slug}")
