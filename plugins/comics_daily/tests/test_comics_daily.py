@@ -150,7 +150,10 @@ class FakeWeb(urllib.request.HTTPSHandler):
 
 
 @pytest.fixture
-def web(monkeypatch: pytest.MonkeyPatch) -> FakeWeb:
+def web(monkeypatch: pytest.MonkeyPatch, client: FlaskClient) -> FakeWeb:
+    monkeypatch.setattr(srv.gocomics_limits, "REQUEST_INTERVAL_S", 0)
+    module = client.application.config["PLUGIN_REGISTRY"].get("comics_daily").server_module
+    monkeypatch.setattr(module.gocomics_limits, "REQUEST_INTERVAL_S", 0)
     fake = FakeWeb({})
     real = urllib.request.build_opener
     monkeypatch.setattr(urllib.request, "build_opener", lambda *h: real(*h, fake))
@@ -328,7 +331,7 @@ def test_gocomics_page_gets_send_navigation_headers(
     web.routes[("POST", gc + "/.bunny-shield/verify-pow")] = [
         (200, {"Set-Cookie": "bunny_shield_id_1=new; Path=/"}, b"{}")
     ]
-    if session == "expired":
+    if session in ("fresh", "expired"):
         web.routes[("GET", f"{gc}/garfield/2026/10/25")].insert(0, _html(CHALLENGE_PAGE, 403))
 
     fetched = srv.GoComics(cookie_file, TODAY).strip("garfield", "Garfield")
@@ -359,6 +362,7 @@ def test_gocomics_solves_challenge_on_warm_page_and_keeps_cookies(
         (200, {"Set-Cookie": "bunny_shield_id_33498=s3cret; Path=/"}, b"{}")
     ]
     _gocomics_routes(web)
+    web.routes[("GET", f"{gc}/garfield/2026/10/25")].insert(0, _html(CHALLENGE_PAGE, 403))
     cookie_file = tmp_path / srv.COOKIE_FILE
 
     fetched = srv.GoComics(cookie_file, TODAY).strip("garfield", "Garfield")
@@ -366,15 +370,21 @@ def test_gocomics_solves_challenge_on_warm_page_and_keeps_cookies(
     assert fetched.edition == "2026-10-25"
     assert fetched.label == "Garfield"
     asset = "https://featureassets.gocomics.com/assets/abc"
-    assert web.urls() == [warm, warm, f"{gc}/garfield/2026/10/25", asset]
+    assert web.urls() == [
+        f"{gc}/garfield/2026/10/25",
+        warm,
+        warm,
+        f"{gc}/garfield/2026/10/25",
+        asset,
+    ]
     (verify,) = [r for r in web.requests if r.get_method() == "POST"]
     assert verify.get_header("Bunnyshield-challenge-response") == f"{DATA_POW}#{DATA_POW_ANSWER}"
     # Every request carries the Accept headers BunnyCDN insists on.
     for req in web.requests:
         assert req.get_header("Accept", "").startswith("text/html")
         assert req.get_header("Accept-language") == "en-US,en;q=0.5"
-    # The strip page was asked for once, with the new session's cookie.
-    strip_req = web.requests[3]
+    # The retried strip page carries the new session's cookie.
+    strip_req = web.requests[4]
     assert "bunny_shield_id_33498=s3cret" in (strip_req.get_header("Cookie") or "")
     assert cookie_file.stat().st_mode & 0o777 == 0o600
     jar = MozillaCookieJar()
@@ -523,6 +533,296 @@ def test_failed_refresh_keeps_last_good_and_reports_stale(web: FakeWeb, tmp_path
 # -- the widget end to end -----------------------------------------------------------------
 
 
+def test_forced_renders_reuse_todays_strip_across_displays_and_clients(
+    web: FakeWeb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(srv, "_today", lambda: TODAY)
+    _all_routes(web)
+    options = {"strips": "garfield", "far_side": False}
+    ctx = {"data_dir": str(tmp_path)}
+    srv.fetch(options, {}, ctx=ctx)
+    srv._RUNS[str(tmp_path)].thread.join(5)
+    count = len(web.requests)
+    for display in ("frame", "other", "editor", "thumbnail"):
+        payload = srv.fetch(options, {}, ctx={**ctx, "fresh": True, "placement_id": display})
+        srv._RUNS[str(tmp_path)].thread.join(5)
+        assert payload["strips"]
+    # A new client (as after a restart) also uses the persisted picture.
+    assert srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield").pictures
+    assert len(web.requests) == count
+
+
+@pytest.mark.parametrize("kind", ["url", "farside"])
+def test_forced_refresh_reuses_sources_on_the_shared_comic_cdn(
+    web: FakeWeb, tmp_path: Path, kind: str
+) -> None:
+    source = (
+        srv.FARSIDE
+        if kind == "farside"
+        else srv.Source(
+            "url:garfield", "url", "garfield", "https://featureassets.gocomics.com/assets/x"
+        )
+    )
+    srv.record_fetch(images.Store(tmp_path), source, srv.Fetched([(_png(), "")]), TODAY, 0)
+    srv._work(srv._Run(tmp_path, TODAY, queue=[(source, True)]))
+    assert not web.requests
+
+
+def test_429_keeps_saved_strip_and_stops_other_comics_without_errors(
+    web: FakeWeb, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = images.Store(tmp_path)
+    source = srv.Source("gocomics:garfield", "gocomics", "garfield")
+    srv.record_fetch(
+        store,
+        source,
+        srv.Fetched([(_png(), "")], edition="2026-10-24"),
+        date(2026, 10, 24),
+        time.time(),
+    )
+    saved = store.sources()[source.key]["pictures"]
+    _all_routes(web)
+    web.routes[("GET", f"{GC}/garfield/2026/10/25")] = [
+        _html("Too Many Requests", 429, **{"Retry-After": "86400"})
+    ]
+    client = srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY)
+    assert srv.refresh_source(store, source, TODAY, web=srv.Web(), gocomics=client) is None
+    count = len(web.requests)
+    other = srv.Source("gocomics:calvinandhobbes", "gocomics", "calvinandhobbes")
+    restarted = srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY)
+    assert srv.refresh_source(store, other, TODAY, web=srv.Web(), gocomics=restarted) is None
+    assert len(web.requests) == count
+    assert store.sources()[source.key]["pictures"] == saved
+    payload = srv._payload(
+        [source, other], [], store.sources(), set(), {}, store, TODAY.isoformat()
+    )
+    assert payload["strips"]
+    assert "429" not in json.dumps(payload) and "Too Many" not in json.dumps(payload)
+    assert not store.sources()[source.key].get("error")
+    assert len([r for r in caplog.records if "429" in r.message]) == 1
+
+
+@pytest.mark.parametrize(
+    "retry_after,wait",
+    [
+        ("86400", 86400),
+        ("Thu, 01 Jan 1970 08:20:00 GMT", 29000),
+        ("nonsense", 21600),
+        ("-1", 21600),
+        ("0", 21600),
+    ],
+)
+def test_retry_after_survives_restart_and_day_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry_after: str, wait: int
+) -> None:
+    limits = srv.gocomics_limits
+    clock = [1000.0]
+    monkeypatch.setattr(limits, "time", lambda: clock[0])
+    budget = limits.Budget(tmp_path, threading.RLock())
+    headers = email.message.Message()
+    headers["Retry-After"] = retry_after
+    reply = srv.Reply(429, headers, b"", "")
+    with pytest.raises(limits.Deferred) as caught:
+        budget.send(lambda: reply)
+    assert caught.value.until == 1000 + wait
+    restarted = limits.Budget(tmp_path, budget.lock)
+    with pytest.raises(limits.Deferred):
+        restarted.begin_strip("other", "2026-10-26")
+    clock[0] += wait
+    with pytest.raises(limits.Deferred) as repeated:
+        restarted.send(lambda: reply)
+    assert repeated.value.until >= clock[0] + 43200
+
+
+def test_request_spacing_is_shared_by_new_clients_and_survives_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limits = srv.gocomics_limits
+    clock = [1000.0]
+    calls = []
+    monkeypatch.setattr(limits, "time", lambda: clock[0])
+    monkeypatch.setattr(limits, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    lock = threading.RLock()
+    for _ in range(3):
+        limits.Budget(tmp_path, lock).send(lambda: calls.append(clock[0]))
+    assert calls == [1000, 1010, 1020]
+
+
+def test_missing_strip_checks_only_today_three_times_spaced_six_hours(
+    web: FakeWeb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(srv.gocomics_limits, "time", lambda: clock[0])
+    url = f"{GC}/garfield/2026/10/25"
+    web.routes[("GET", url)] = [_html("not published", 404)]
+    for _ in range(3):
+        with pytest.raises(srv.NoRecentStrip):
+            srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield")
+        with pytest.raises(srv.gocomics_limits.Deferred):
+            srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield")
+        clock[0] += 21600
+    with pytest.raises(srv.gocomics_limits.Deferred):
+        srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield")
+    assert web.urls() == [url, url, url]
+
+
+def test_stale_edition_reuses_its_image_and_next_date_fetches_a_new_image(
+    web: FakeWeb, tmp_path: Path
+) -> None:
+    store = images.Store(tmp_path)
+    source = srv.Source("gocomics:garfield", "gocomics", "garfield")
+    srv.record_fetch(
+        store,
+        source,
+        srv.Fetched([(_png(), "")], edition="2026-10-24"),
+        date(2026, 10, 24),
+        time.time(),
+    )
+    url = f"{GC}/garfield/2026/10/25"
+    web.routes[("GET", url)] = [_html(_gocomics_page("garfield", "2026-10-24", "old"))]
+    assert (
+        srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield").edition
+        == "2026-10-24"
+    )
+    assert web.urls() == [url]
+    tomorrow = date(2026, 10, 26)
+    web.routes[("GET", f"{GC}/garfield/2026/10/26")] = [
+        _html(_gocomics_page("garfield", "2026-10-26", "new"))
+    ]
+    web.routes[("GET", "https://featureassets.gocomics.com/assets/new")] = [_img(_png())]
+    assert (
+        srv.GoComics(tmp_path / srv.COOKIE_FILE, tomorrow).strip("garfield", "Garfield").edition
+        == "2026-10-26"
+    )
+    assert len(web.requests) == 3
+
+
+@pytest.mark.parametrize("stage", ["page", "warm", "verify", "image"])
+def test_rate_limit_at_each_network_stage_is_quiet(
+    web: FakeWeb, tmp_path: Path, stage: str
+) -> None:
+    _all_routes(web)
+    page = f"{GC}/garfield/2026/10/25"
+    warm = f"{GC}/garfield/2026/10/18"
+    verify = GC + "/.bunny-shield/verify-pow"
+    asset = "https://featureassets.gocomics.com/assets/abc"
+    web.routes[("POST", verify)] = [(200, {}, b"{}")]
+    if stage in ("warm", "verify"):
+        web.routes[("GET", page)] = [_html(CHALLENGE_PAGE, 403)]
+        web.routes[("GET", warm)] = [_html(CHALLENGE_PAGE, 403)]
+    target = {
+        "page": ("GET", page),
+        "warm": ("GET", warm),
+        "verify": ("POST", verify),
+        "image": ("GET", asset),
+    }[stage]
+    web.routes[target] = [_html("Too Many Requests", 429)]
+    store = images.Store(tmp_path)
+    source = srv.Source("gocomics:garfield", "gocomics", "garfield")
+    assert (
+        srv.refresh_source(
+            store,
+            source,
+            TODAY,
+            web=srv.Web(),
+            gocomics=srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY),
+        )
+        is None
+    )
+    assert not store.sources()[source.key].get("error")
+    assert store.log() == []
+    assert web.requests[-1].full_url == target[1]
+
+
+def test_a_403_with_the_cdns_429_page_also_starts_cooldown(web: FakeWeb, tmp_path: Path) -> None:
+    web.routes[("GET", f"{GC}/garfield/2026/10/25")] = [
+        _html("<title>429 Too Many Requests</title>", 403)
+    ]
+    with pytest.raises(srv.gocomics_limits.Deferred):
+        srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield")
+    with pytest.raises(srv.gocomics_limits.Deferred):
+        srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("peanuts", "Peanuts")
+    assert len(web.requests) == 1
+
+
+def test_429_is_handled_before_reading_or_decoding_its_body(web: FakeWeb, tmp_path: Path) -> None:
+    web.routes[("GET", f"{GC}/garfield/2026/10/25")] = [
+        (429, {"Content-Encoding": "gzip", "Retry-After": "86400"}, b"not gzip")
+    ]
+    with pytest.raises(srv.gocomics_limits.Deferred):
+        srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield")
+
+
+def test_suppressed_refresh_finishes_the_job_without_a_failure(
+    web: FakeWeb, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _all_routes(web)
+    web.routes[("GET", f"{GC}/garfield/2026/10/25")] = [_html("Too Many Requests", 429)]
+    failed, finished = [], []
+    monkeypatch.setattr(srv.jobs, "fail", lambda *args: failed.append(args))
+    monkeypatch.setattr(srv.jobs, "finish", lambda *args: finished.append(args))
+    source = srv.Source("gocomics:garfield", "gocomics", "garfield")
+    run = srv._Run(tmp_path, TODAY, queue=[(source, True)])
+    srv._work(run)
+    assert run.deferred == 1 and not failed
+    assert finished[-1][-1] == "Using saved comics"
+
+
+def test_admin_and_payload_hide_legacy_rate_limit_errors(client: FlaskClient) -> None:
+    client.get("/plugins/comics_daily/")
+    store = _store(client)
+    source = srv.Source("gocomics:garfield", "gocomics", "garfield")
+    srv.record_fetch(
+        store, source, srv.Fetched([(_png(), "")], edition="2026-10-24"), date(2026, 10, 24), 0
+    )
+    store.update(
+        source.key,
+        lambda entry: entry.update(error="GoComics answered HTTP 429. Too many requests."),
+    )
+    store.append_log(
+        {
+            "at": time.time(),
+            "source": "Garfield",
+            "outcome": "error",
+            "text": "GoComics answered HTTP 429. Too many requests.",
+        }
+    )
+    store.append_log(
+        {
+            "at": time.time(),
+            "source": "Garfield",
+            "outcome": "ok",
+            "text": "2026-10-25, 1 picture, 429 KB",
+        }
+    )
+    body = client.get("/plugins/comics_daily/").get_data(as_text=True)
+    assert "HTTP 429" not in body and "Too many requests" not in body
+    assert "429 KB" in body
+    payload = srv._payload([source], [], store.sources(), set(), {}, store, TODAY.isoformat())
+    assert payload["strips"] and "429" not in json.dumps(payload)
+
+
+def test_manual_gocomics_import_respects_cooldown_without_a_flash(
+    client: FlaskClient, web: FakeWeb, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app import net_guard
+
+    client.get("/plugins/comics_daily/")
+    calls = []
+
+    def limited(url: str, **kwargs: Any) -> Any:
+        calls.append(url)
+        raise urllib.error.HTTPError(url, 429, "Too Many Requests", email.message.Message(), None)
+
+    monkeypatch.setattr(net_guard, "fetch_bytes", limited)
+    url = "https://featureassets.gocomics.com/assets/today"
+    for _ in range(2):
+        response = client.post("/plugins/comics_daily/strips/garfield/import", data={"url": url})
+        assert response.status_code == 302
+        assert not _messages(client)
+    assert calls == [url]
+
+
 def _all_routes(fake: FakeWeb) -> None:
     gc = "https://www.gocomics.com"
     fake.routes[("GET", srv.FARSIDE_URL)] = [_html(FARSIDE_PAGE)]
@@ -661,6 +961,7 @@ def test_without_argon2id_only_gocomics_challenges_fail(
 
     monkeypatch.setattr(srv, "bunny_shield", old)
     gc = "https://www.gocomics.com"
+    web.routes[("GET", f"{gc}/garfield/2026/10/25")] = [_html(CHALLENGE_PAGE, status=403)]
     web.routes[("GET", f"{gc}/garfield/2026/10/18")] = [_html(CHALLENGE_PAGE, status=403)]
     with pytest.raises(srv.SourceError, match="cryptography 44"):
         srv.GoComics(tmp_path / srv.COOKIE_FILE, TODAY).strip("garfield", "Garfield")
@@ -2086,16 +2387,16 @@ def test_a_failing_source_backs_off_and_keeps_its_last_good_picture(
     good = store.sources()[go.key]["pictures"]
     now = time.time()
     tries = []
-    for n in range(1, srv.lifecycle.TRIES_PER_DAY + 1):
+    for n in range(1, srv.EDITION_ATTEMPTS + 1):
         srv.record_fetch(store, go, srv.SourceError("GoComics is blocking."), TODAY, now)
         record = store.sources()[go.key]
         tries.append(record["retry"]["tries"])
         assert record["pictures"] == good  # the last good picture stays up
-        wait = srv.lifecycle.retry_wait(n)
+        wait = srv.lifecycle.retry_wait(n, first=21600, cap=172800)
         assert not srv.is_due(go, record, TODAY.isoformat(), now + wait - 60)
-        if n < srv.lifecycle.TRIES_PER_DAY:
+        if n < srv.EDITION_ATTEMPTS:
             assert srv.is_due(go, record, TODAY.isoformat(), now + wait + 1)
-    assert tries == list(range(1, srv.lifecycle.TRIES_PER_DAY + 1))
+    assert tries == [1, 2, 3]
     assert [srv.lifecycle.retry_wait(n) / 60 for n in (1, 2, 3, 4, 5, 6)] == [
         30,
         60,
@@ -2108,9 +2409,7 @@ def test_a_failing_source_backs_off_and_keeps_its_last_good_picture(
     assert not srv.is_due(go, record, TODAY.isoformat(), now + 10 * 3600)
     assert srv.is_due(go, record, "2026-10-26", now + 10 * 3600)
     log = store.log()
-    assert log[1]["text"].endswith(
-        "; the last good picture stays up; next try in 30 min (try 2 of 6)"
-    )
+    assert log[1]["text"].endswith("; the last good picture stays up; next try in 6 h (try 2 of 3)")
     assert log[-1]["text"].endswith("no more tries today")
     # A try that works replaces the picture at once and clears the backoff.
     srv.record_fetch(store, go, srv.Fetched([(_png((99, 33)), "")], edition="2026-10-25"), TODAY, 0)
