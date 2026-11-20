@@ -158,6 +158,15 @@ BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
 }
+# BunnyCDN can reject page requests outright without navigation metadata,
+# even with a valid shield cookie. These apply to GoComics page GETs only.
+GOCOMICS_PAGE_HEADERS = {
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-User": "?1",
+    "Sec-Fetch-Dest": "document",
+    "Upgrade-Insecure-Requests": "1",
+}
 
 PAGE_TIMEOUT_S = 20
 IMAGE_TIMEOUT_S = 30
@@ -925,7 +934,7 @@ class GoComics:
 
     def _page(self, url: str) -> Reply:
         pasted = self._using_pasted()
-        reply = self._web.get(url)
+        reply = self._web.get(url, headers=GOCOMICS_PAGE_HEADERS)
         if not self._challenged(reply):
             if pasted and self.pasted_result is None:
                 self.pasted_result = "worked"
@@ -940,7 +949,7 @@ class GoComics:
         logger.info("comics_daily: GoComics session expired, setting up a new one")
         self._jar.clear()
         self._warm()
-        reply = self._web.get(url)
+        reply = self._web.get(url, headers=GOCOMICS_PAGE_HEADERS)
         if self._challenged(reply):
             raise SourceError("GoComics is blocking automatic downloads right now.")
         return reply
@@ -953,7 +962,7 @@ class GoComics:
         self._warmed = True
         day = self._today - timedelta(days=WARM_DAYS_BACK)
         url = f"{GOCOMICS}/{self._warm_name}/{day:%Y/%m/%d}"
-        reply = self._web.get(url)
+        reply = self._web.get(url, headers=GOCOMICS_PAGE_HEADERS)
         if not self._challenged(reply):
             if reply.status >= 400:
                 raise SourceError(f"GoComics answered HTTP {reply.status}.")
@@ -987,7 +996,7 @@ class GoComics:
         )
         if verify.status >= 400:
             raise SourceError("GoComics turned down its browser check answer.")
-        if self._challenged(self._web.get(url)):
+        if self._challenged(self._web.get(url, headers=GOCOMICS_PAGE_HEADERS)):
             raise SourceError("GoComics is blocking automatic downloads right now.")
         logger.info("comics_daily: passed the GoComics browser check")
         self._ready = True

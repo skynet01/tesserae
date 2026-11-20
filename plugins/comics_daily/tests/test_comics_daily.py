@@ -311,6 +311,41 @@ def test_store_names_are_validated(tmp_path: Path) -> None:
 # -- GoComics through the shield ---------------------------------------------------
 
 
+@pytest.mark.parametrize("session", ["fresh", "saved", "expired"])
+def test_gocomics_page_gets_send_navigation_headers(
+    web: FakeWeb, tmp_path: Path, session: str
+) -> None:
+    """BunnyCDN rejects page GETs without navigation metadata, even with a session."""
+    gc = "https://www.gocomics.com"
+    warm = f"{gc}/garfield/2026/10/18"
+    cookie_file = tmp_path / srv.COOKIE_FILE
+    if session != "fresh":
+        jar = MozillaCookieJar()
+        jar.set_cookie(_cookie("bunny_shield_id_1", "saved"))
+        jar.save(str(cookie_file), ignore_discard=True)
+    _gocomics_routes(web)
+    web.routes[("GET", warm)] = [_html(CHALLENGE_PAGE, 403), _html("<html>ready</html>")]
+    web.routes[("POST", gc + "/.bunny-shield/verify-pow")] = [
+        (200, {"Set-Cookie": "bunny_shield_id_1=new; Path=/"}, b"{}")
+    ]
+    if session == "expired":
+        web.routes[("GET", f"{gc}/garfield/2026/10/25")].insert(0, _html(CHALLENGE_PAGE, 403))
+
+    fetched = srv.GoComics(cookie_file, TODAY).strip("garfield", "Garfield")
+
+    assert fetched.edition == "2026-10-25"
+    for req in web.requests:
+        if req.get_method() == "GET" and req.full_url.startswith(gc + "/"):
+            assert req.get_header("Sec-fetch-site") == "none"
+            assert req.get_header("Sec-fetch-mode") == "navigate"
+            assert req.get_header("Sec-fetch-user") == "?1"
+            assert req.get_header("Sec-fetch-dest") == "document"
+            assert req.get_header("Upgrade-insecure-requests") == "1"
+        else:
+            assert not req.has_header("Sec-fetch-mode")
+            assert not req.has_header("Upgrade-insecure-requests")
+
+
 def test_gocomics_solves_challenge_on_warm_page_and_keeps_cookies(
     web: FakeWeb, tmp_path: Path
 ) -> None:
